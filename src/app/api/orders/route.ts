@@ -1,0 +1,58 @@
+import { createClient } from '@/lib/supabase/server'
+import { NextResponse } from 'next/server'
+
+export async function GET(request: Request) {
+  try {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
+
+    const { searchParams } = new URL(request.url)
+    const page       = parseInt(searchParams.get('page')  ?? '1')
+    const limit      = parseInt(searchParams.get('limit') ?? '50')
+    const status     = searchParams.get('status')
+    const cls        = searchParams.get('classification')
+    const assigned   = searchParams.get('assigned_to')
+    const risk       = searchParams.get('is_at_risk')
+    const sla        = searchParams.get('sla_breached')
+    const search     = searchParams.get('search')
+    const attempts   = searchParams.get('attempts')
+    const from       = (page - 1) * limit
+    const to         = from + limit - 1
+
+    let query = supabase
+      .from('orders_with_sla')
+      .select('*', { count: 'exact' })
+      .order('updated_at', { ascending: false })
+      .range(from, to)
+
+    if (status === 'failed_attempt') {
+      // "Intento fallido" no es un normalized_status — son pedidos con al menos un intento de entrega no completado
+      query = query.gte('delivery_attempts', 1).neq('normalized_status', 'delivered')
+    } else if (status) {
+      query = query.eq('normalized_status', status)
+    }
+    if (cls)      query = query.eq('classification', cls)
+    if (assigned) query = query.eq('assigned_to', assigned)
+    if (risk === 'true')  query = query.eq('is_at_risk', true)
+    if (sla === 'true')   query = query.eq('sla_breached', true)
+    if (attempts) query = query.eq('delivery_attempts', parseInt(attempts))
+
+    if (search) {
+      query = query.or(
+        `tracking_number.ilike.%${search}%,customer_name.ilike.%${search}%,customer_phone.ilike.%${search}%,order_number.ilike.%${search}%`,
+      )
+    }
+
+    const { data, error, count } = await query
+    if (error) throw error
+
+    return NextResponse.json({
+      data,
+      pagination: { page, limit, total: count ?? 0, pages: Math.ceil((count ?? 0) / limit) },
+    })
+  } catch (err) {
+    console.error('[GET /api/orders]', err)
+    return NextResponse.json({ error: 'Error interno' }, { status: 500 })
+  }
+}
