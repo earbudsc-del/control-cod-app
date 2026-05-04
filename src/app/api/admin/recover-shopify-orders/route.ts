@@ -206,20 +206,50 @@ export async function POST(request: Request) {
     const existingSet  = new Set((existingRows ?? []).map(r => r.shopify_order_id as string))
     const alreadyInDb  = shopifyOrders.filter(o => existingSet.has(String(o.id))).length
 
-    // 7. Resolver tienda (misma lógica que el webhook: primera tienda activa)
-    const { data: storeRow } = await service
+    // 7. Resolver tienda — primero por shopify_domain, fallback a primera activa
+    const { data: storeRow, error: storeError } = await service
       .from('stores')
-      .select('id')
+      .select('*')
+      .eq('shopify_domain', shopDomain)
       .eq('is_active', true)
-      .order('created_at', { ascending: true })
-      .limit(1)
       .maybeSingle()
 
-    if (!storeRow) {
-      return NextResponse.json({ error: 'No se encontró tienda activa en la base de datos.' }, { status: 404 })
+    if (storeError) {
+      console.error('[recover-shopify-orders] Error buscando tienda por shopify_domain:', storeError)
     }
 
-    const storeId = storeRow.id as string
+    let resolvedStore = storeRow
+
+    if (!resolvedStore) {
+      console.warn(`[recover-shopify-orders] No se encontró tienda con shopify_domain="${shopDomain}", intentando fallback a primera tienda activa...`)
+
+      const { data: fallbackStore, error: fallbackError } = await service
+        .from('stores')
+        .select('*')
+        .eq('is_active', true)
+        .limit(1)
+        .maybeSingle()
+
+      if (fallbackError) {
+        console.error('[recover-shopify-orders] Error en fallback de tienda:', fallbackError)
+      }
+
+      if (!fallbackStore) {
+        return NextResponse.json({
+          error: 'No se encontró tienda activa en la base de datos.',
+          shopify_domain_buscado: shopDomain,
+          storeError:   storeError?.message   ?? null,
+          fallbackError: fallbackError?.message ?? null,
+        }, { status: 404 })
+      }
+
+      resolvedStore = fallbackStore
+      console.log(`[recover-shopify-orders] Tienda resuelta por fallback: id=${resolvedStore.id}`)
+    } else {
+      console.log(`[recover-shopify-orders] Tienda resuelta por shopify_domain: id=${resolvedStore.id}`)
+    }
+
+    const storeId = resolvedStore.id as string
 
     // 8. Insertar pedidos faltantes
     let inserted = 0

@@ -109,11 +109,17 @@ export async function POST(request: Request) {
     const alreadyInDb = shopifyOrders.filter(o => existingSet.has(String(o.id))).length
 
     // 6. Resolver tienda activa
-    const { data: storeRow } = await service
+    const { data: storeRow, error: storeErr } = await service
       .from('stores').select('id').eq('is_active', true)
       .order('created_at', { ascending: true }).limit(1).maybeSingle()
+    if (storeErr) {
+      console.error('[recover-orders] Error al leer stores — posible SUPABASE_SERVICE_ROLE_KEY faltante en Vercel:', storeErr)
+    }
     if (!storeRow) {
-      return NextResponse.json({ error: 'No se encontró tienda activa.' }, { status: 404 })
+      return NextResponse.json({
+        error: 'No se encontró tienda activa. Verificar SUPABASE_SERVICE_ROLE_KEY en variables de entorno de Vercel.',
+        supabase_error: storeErr?.message ?? null,
+      }, { status: 404 })
     }
     const storeId = storeRow.id as string
 
