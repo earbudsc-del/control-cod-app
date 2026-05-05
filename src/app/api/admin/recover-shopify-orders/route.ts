@@ -198,17 +198,29 @@ export async function POST(request: Request) {
       })
     }
 
-    // 6. Comparar contra Supabase — buscar cuáles ya existen
-    const service      = await createServiceClient()
-    const shopifyIds   = shopifyOrders.map(o => String(o.id))
+    // 6. Comparar contra Supabase — buscar cuáles ya existen con sus campos clave
+    const service    = await createServiceClient()
+    const shopifyIds = shopifyOrders.map(o => String(o.id))
 
     const { data: existingRows } = await service
       .from('orders')
-      .select('shopify_order_id')
+      .select('id, shopify_order_id, customer_name, customer_phone, customer_address, city')
       .in('shopify_order_id', shopifyIds)
 
-    const existingSet  = new Set((existingRows ?? []).map(r => r.shopify_order_id as string))
-    const alreadyInDb  = shopifyOrders.filter(o => existingSet.has(String(o.id))).length
+    type ExistingRow = {
+      id:               string
+      shopify_order_id: string
+      customer_name:    string | null
+      customer_phone:   string | null
+      customer_address: string | null
+      city:             string | null
+    }
+
+    const existingMap = new Map<string, ExistingRow>(
+      (existingRows ?? []).map(r => [r.shopify_order_id as string, r as ExistingRow])
+    )
+    const existingSet = new Set(existingMap.keys())
+    const alreadyInDb = shopifyOrders.filter(o => existingSet.has(String(o.id))).length
 
     // 7. Resolver tienda
     const domain = (process.env.SHOPIFY_SHOP_DOMAIN || '')
@@ -237,32 +249,85 @@ export async function POST(request: Request) {
 
     const storeId = store.id as string
 
-    // 8. Insertar pedidos faltantes
-    let inserted = 0
-    const errors: string[] = []
+    // 8. Procesar pedidos: actualizar incompletos o insertar nuevos
+    let inserted            = 0
+    let updatedMissingData  = 0
+    const errors: string[]  = []
+
+    function isEmpty(val: string | null | undefined): boolean {
+      return !val || val.trim() === '' || val.trim() === '-'
+    }
 
     for (const order of shopifyOrders) {
       const shopifyOrderId = String(order.id)
+      const addr           = order.shipping_address ?? order.billing_address
 
-      // Ya existe — saltar
-      if (existingSet.has(shopifyOrderId)) continue
+      const customerName =
+        [order.customer?.first_name, order.customer?.last_name]
+          .filter(Boolean)
+          .join(' ') ||
+        addr?.name ||
+        null
 
+      const customerPhone    = order.customer?.phone ?? addr?.phone ?? null
+      const customerAddress  = addr?.address1 ?? null
+      const city             = addr?.city     ?? null
+      const province         = addr?.province ?? null
+      const productSummary   = order.line_items?.length ? buildProductSummary(order.line_items) : null
+      const codAmount        = order.total_price ? (parseFloat(order.total_price) || null) : null
+
+      const existing = existingMap.get(shopifyOrderId)
+
+      // ── Rama A: pedido ya existe — actualizar si tiene campos vacíos ──────────
+      if (existing) {
+        const needsUpdate =
+          isEmpty(existing.customer_name)    ||
+          isEmpty(existing.customer_phone)   ||
+          isEmpty(existing.customer_address) ||
+          isEmpty(existing.city)
+
+        if (!needsUpdate) continue
+
+        const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
+
+        if (isEmpty(existing.customer_name)    && customerName)    patch.customer_name    = customerName
+        if (isEmpty(existing.customer_phone)   && customerPhone)   patch.customer_phone   = customerPhone
+        if (isEmpty(existing.customer_address) && customerAddress) patch.customer_address = customerAddress
+        if (isEmpty(existing.city)             && city)            patch.city             = city
+        if (province)                                              patch.province         = province
+        if (productSummary)                                        patch.product_summary  = productSummary
+        if (codAmount)                                             patch.cod_amount       = codAmount
+
+        // Si solo quedó updated_at no hay nada que persistir
+        if (Object.keys(patch).length <= 1) continue
+
+        try {
+          const { error: updateErr } = await service
+            .from('orders')
+            .update(patch)
+            .eq('id', existing.id)
+
+          if (updateErr) {
+            errors.push(`update ${order.name ?? shopifyOrderId}: ${updateErr.message}`)
+            continue
+          }
+
+          updatedMissingData++
+          console.log(`[recover-diag] updated missing customer data: ${order.name ?? shopifyOrderId}`)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          errors.push(`update ${order.name ?? shopifyOrderId}: ${msg}`)
+        }
+
+        continue
+      }
+
+      // ── Rama B: pedido nuevo — insertar ──────────────────────────────────────
       try {
-        const addr = order.shipping_address ?? order.billing_address
-
-        const customerName =
-          [order.customer?.first_name, order.customer?.last_name]
-            .filter(Boolean)
-            .join(' ') ||
-          addr?.name ||
-          null
-
-        const customerPhone = order.customer?.phone ?? addr?.phone ?? null
-
         // Detección de duplicados por teléfono — igual que el webhook
-        let duplicateAlert        = false
+        let duplicateAlert                    = false
         let duplicateOfOrderId: string | null = null
-        let duplicateReason: string | null    = null
+        let duplicateReason:    string | null = null
 
         if (customerPhone) {
           const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
@@ -290,22 +355,18 @@ export async function POST(request: Request) {
           .insert({
             store_id:              storeId,
             shopify_order_id:      shopifyOrderId,
-            order_number:          order.name ?? null,
-            customer_name:         customerName || null,
+            order_number:          order.name          ?? null,
+            customer_name:         customerName        || null,
             customer_phone:        customerPhone,
-            customer_address:      addr?.address1 ?? null,
-            city:                  addr?.city ?? null,
-            province:              addr?.province ?? null,
-            product_summary:       order.line_items?.length
-                                     ? buildProductSummary(order.line_items)
-                                     : null,
-            cod_amount:            order.total_price
-                                     ? (parseFloat(order.total_price) || null)
-                                     : null,
+            customer_address:      customerAddress,
+            city,
+            province,
+            product_summary:       productSummary,
+            cod_amount:            codAmount,
             normalized_status:     'pending',
             source:                'shopify_webhook',
             customer_confirmed:    false,
-            shopify_created_at:    order.created_at ?? null,
+            shopify_created_at:    order.created_at    ?? null,
             duplicate_alert:       duplicateAlert,
             duplicate_of_order_id: duplicateOfOrderId,
             duplicate_reason:      duplicateReason,
@@ -315,8 +376,7 @@ export async function POST(request: Request) {
           .single()
 
         if (insertErr) {
-          // 23505 = unique_violation — race condition, el pedido ya existe
-          if (insertErr.code === '23505') continue
+          if (insertErr.code === '23505') continue  // race condition — ya existe
           errors.push(`${order.name ?? shopifyOrderId}: ${insertErr.message}`)
           continue
         }
@@ -340,14 +400,16 @@ export async function POST(request: Request) {
 
     console.log(
       `[recover-shopify-orders] Completado — encontrados: ${shopifyFound},`,
-      `ya en DB: ${alreadyInDb}, insertados: ${inserted}, errores: ${errors.length}`,
+      `ya en DB: ${alreadyInDb}, insertados: ${inserted},`,
+      `actualizados (datos faltantes): ${updatedMissingData}, errores: ${errors.length}`,
     )
 
     return NextResponse.json({
-      shopify_found: shopifyFound,
-      already_in_db: alreadyInDb,
+      shopify_found:        shopifyFound,
+      already_in_db:        alreadyInDb,
       inserted,
-      errors_count:  errors.length,
+      updated_missing_data: updatedMissingData,
+      errors_count:         errors.length,
       errors,
       range: { from, to, utc_min: createdAtMin, utc_max: createdAtMax },
     })
