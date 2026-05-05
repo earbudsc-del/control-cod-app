@@ -76,7 +76,10 @@ export async function POST(
     }
 
     const { error } = await supabase.from('orders').update(updates).eq('id', id)
-    if (error) throw error
+    if (error) {
+      console.error('[confirmation] Supabase update error — action:', action, '| code:', error.code, '| message:', error.message, '| details:', error.details)
+      throw error
+    }
 
     if (action === 'no_coverage') {
       await supabase.from('notes').insert({
@@ -94,6 +97,7 @@ export async function POST(
     })
   } catch (err) {
     console.error('[POST /api/orders/[id]/confirmation]', err)
-    return NextResponse.json({ error: 'Error interno' }, { status: 500 })
+    const msg = err instanceof Error ? err.message : String(err)
+    return NextResponse.json({ error: 'Error interno', detail: msg }, { status: 500 })
   }
 }

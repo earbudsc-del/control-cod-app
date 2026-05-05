@@ -76,12 +76,13 @@ export function mapNormalizedStatus(estado: string): string {
   ) return 'novedad'
 
   if (
-    s.includes('reparto')     ||
-    s.includes('en ruta')     ||
-    s.includes('mensajero')   ||
-    s.includes('despacho')    ||
-    s.includes('en camino')   ||
-    s.includes('en entrega')
+    s.includes('reparto')      ||
+    s.includes('en ruta')      ||
+    s.includes('mensajero')    ||
+    s.includes('despacho')     ||
+    s.includes('en camino')    ||
+    s.includes('en entrega')   ||
+    s.includes('para entrega')    // "Para entrega hoy", "Salió para entrega"
   ) return 'en_reparto'
 
   if (
