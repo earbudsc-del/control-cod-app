@@ -210,50 +210,32 @@ export async function POST(request: Request) {
     const existingSet  = new Set((existingRows ?? []).map(r => r.shopify_order_id as string))
     const alreadyInDb  = shopifyOrders.filter(o => existingSet.has(String(o.id))).length
 
-    // 7. Resolver tienda — primero por shopify_domain, fallback a primera activa
-    const { data: storeRow, error: storeError } = await service
+    // 7. Resolver tienda
+    const domain = (process.env.SHOPIFY_SHOP_DOMAIN || '')
+      .trim()
+      .toLowerCase()
+
+    console.log('[recover-diag] domain used:', domain)
+
+    const { data: store, error: storeError } = await service
       .from('stores')
-      .select('*')
-      .eq('shopify_domain', shopDomain)
+      .select('id')
+      .eq('shopify_domain', domain)
       .eq('is_active', true)
-      .maybeSingle()
+      .single()
 
-    if (storeError) {
-      console.error('[recover-shopify-orders] Error buscando tienda por shopify_domain:', storeError)
+    console.log('[recover-diag] store found:', store)
+    console.log('[recover-diag] store error:', storeError)
+
+    if (!store) {
+      return NextResponse.json({
+        error: 'No se encontró tienda activa en la base de datos.',
+        domain_usado: domain,
+        storeError: storeError?.message ?? null,
+      }, { status: 404 })
     }
 
-    let resolvedStore = storeRow
-
-    if (!resolvedStore) {
-      console.warn(`[recover-shopify-orders] No se encontró tienda con shopify_domain="${shopDomain}", intentando fallback a primera tienda activa...`)
-
-      const { data: fallbackStore, error: fallbackError } = await service
-        .from('stores')
-        .select('*')
-        .eq('is_active', true)
-        .limit(1)
-        .maybeSingle()
-
-      if (fallbackError) {
-        console.error('[recover-shopify-orders] Error en fallback de tienda:', fallbackError)
-      }
-
-      if (!fallbackStore) {
-        return NextResponse.json({
-          error: 'No se encontró tienda activa en la base de datos.',
-          shopify_domain_buscado: shopDomain,
-          storeError:   storeError?.message   ?? null,
-          fallbackError: fallbackError?.message ?? null,
-        }, { status: 404 })
-      }
-
-      resolvedStore = fallbackStore
-      console.log(`[recover-shopify-orders] Tienda resuelta por fallback: id=${resolvedStore.id}`)
-    } else {
-      console.log(`[recover-shopify-orders] Tienda resuelta por shopify_domain: id=${resolvedStore.id}`)
-    }
-
-    const storeId = resolvedStore.id as string
+    const storeId = store.id as string
 
     // 8. Insertar pedidos faltantes
     let inserted = 0
