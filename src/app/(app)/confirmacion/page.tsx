@@ -162,6 +162,7 @@ function sortedAll(orders: Order[]): Order[] {
 export default function ConfirmacionPage() {
   const trackingParam = useSearchParams().get('tracking')
   const rowRefs       = useRef<Map<string, HTMLTableRowElement>>(new Map())
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [orders, setOrders]           = useState<Order[]>([])
   const [total, setTotal]             = useState(0)
@@ -178,6 +179,7 @@ export default function ConfirmacionPage() {
   const [loadingRow, setLoadingRow]       = useState<Record<string, boolean>>({})
   const [methodMap, setMethodMap]         = useState<Record<string, ContactMethod>>({})
   const [confidenceMap, setConfidenceMap] = useState<Record<string, string>>({})
+  const [toast, setToast]                 = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -281,6 +283,12 @@ export default function ConfirmacionPage() {
   // Reset paginación al cambiar tab o búsqueda
   useEffect(() => { setCurrentPage(1) }, [activeTab, searchQuery])
 
+  function showToast(msg: string, type: 'success' | 'error') {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    setToast({ msg, type })
+    toastTimerRef.current = setTimeout(() => setToast(null), 3000)
+  }
+
   async function postConfirmation(orderId: string, action: string) {
     setLoadingRow(prev => ({ ...prev, [orderId]: true }))
     try {
@@ -290,18 +298,39 @@ export default function ConfirmacionPage() {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ action, method }),
       })
-      if (!res.ok) return
-      const data = await res.json() as ConfirmResult
 
+      if (!res.ok) {
+        showToast('Error al procesar la acción. Intenta de nuevo.', 'error')
+        return
+      }
+
+      const data = await res.json() as ConfirmResult
       setConfidenceMap(prev => ({ ...prev, [orderId]: data.confirmation_confidence }))
 
       if (action === 'no_answer') {
         setAttemptsMap(prev => ({ ...prev, [orderId]: data.confirmation_attempts }))
         if (data.confirmation_status === 'unreachable') {
           setTerminalMap(prev => ({ ...prev, [orderId]: 'unreachable' }))
+          showToast('Pedido marcado como inalcanzable', 'success')
+        } else {
+          showToast(`Intento ${data.confirmation_attempts}/${MAX_ATTEMPTS} registrado`, 'success')
         }
       } else {
         setTerminalMap(prev => ({ ...prev, [orderId]: action }))
+
+        const TOAST_MSG: Record<string, string> = {
+          confirmed:   '✓ Pedido confirmado',
+          cancelled:   'Pedido cancelado',
+          no_coverage: 'Pedido marcado como Sin cobertura',
+          wrong_number:'Número incorrecto registrado',
+        }
+        showToast(TOAST_MSG[action] ?? 'Acción registrada', 'success')
+
+        // Remover de la cola tras 1.5 s para acciones de rechazo
+        // (confirmed se deja visible en sesión para conteo del agente)
+        if (action !== 'confirmed') {
+          setTimeout(() => setOrders(prev => prev.filter(o => o.id !== orderId)), 1500)
+        }
       }
     } finally {
       setLoadingRow(prev => ({ ...prev, [orderId]: false }))
@@ -314,6 +343,20 @@ export default function ConfirmacionPage() {
 
   return (
     <div className="space-y-5">
+
+      {/* ── Toast ── */}
+      {toast && (
+        <div className={`fixed top-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3
+                         rounded-xl shadow-xl text-sm font-semibold animate-in
+                         ${toast.type === 'success'
+                           ? 'bg-gray-900 text-white'
+                           : 'bg-red-600 text-white'}`}>
+          {toast.type === 'success'
+            ? <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
+            : <XCircle      className="w-4 h-4 text-white shrink-0" />}
+          {toast.msg}
+        </div>
+      )}
 
       {/* ── Banner ── */}
       <div className="relative overflow-hidden rounded-2xl
