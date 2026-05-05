@@ -19,6 +19,7 @@ export async function GET() {
       { count: noRespondieronHoy },
       { count: canceladosHoy },
       { count: numerosIncorrectosHoy },
+      { count: sinCoberturaHoy },
       { count: confirmadosAyer },
       { count: contactadosAyer },
       { count: atrasadosPendientes },
@@ -60,6 +61,13 @@ export async function GET() {
         .eq('confirmation_status', 'unreachable')
         .gte('last_confirmation_attempt', todayIso),
 
+      // Hoy — sin cobertura marcados hoy
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('confirmation_status', 'no_coverage')
+        .gte('last_confirmation_attempt', todayIso),
+
       // Ayer — confirmados (ventana exacta de ayer)
       supabase
         .from('orders')
@@ -97,6 +105,7 @@ export async function GET() {
       noRespondieronHoy:     noRespondieronHoy     ?? 0,
       canceladosHoy:         canceladosHoy         ?? 0,
       numerosIncorrectosHoy: numerosIncorrectosHoy ?? 0,
+      sinCoberturaHoy:       sinCoberturaHoy       ?? 0,
       tasaConfirmacionHoy:   t  > 0 ? Math.round((c  / t)  * 100) : null,
       // Ayer
       confirmadosAyer:       cy,

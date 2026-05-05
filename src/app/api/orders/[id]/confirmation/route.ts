@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 
-type ConfirmAction = 'confirmed' | 'no_answer' | 'wrong_number' | 'cancelled'
+type ConfirmAction = 'confirmed' | 'no_answer' | 'wrong_number' | 'cancelled' | 'no_coverage'
 type ConfirmMethod = 'call' | 'whatsapp' | 'other'
 
 const MAX_ATTEMPTS = 3
@@ -70,10 +70,21 @@ export async function POST(
       case 'cancelled':
         updates.confirmation_status = 'cancelled'
         break
+      case 'no_coverage':
+        updates.confirmation_status = 'no_coverage'
+        break
     }
 
     const { error } = await supabase.from('orders').update(updates).eq('id', id)
     if (error) throw error
+
+    if (action === 'no_coverage') {
+      await supabase.from('notes').insert({
+        order_id:   id,
+        created_by: user.id,
+        content:    'Pedido marcado como Sin cobertura',
+      })
+    }
 
     return NextResponse.json({
       success:                 true,

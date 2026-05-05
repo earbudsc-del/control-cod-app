@@ -10,7 +10,7 @@ import {
   ClipboardList, RefreshCw, MessageCircle, Phone,
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, RotateCcw, Clock, Inbox, TrendingUp,
-  AlertTriangle, MapPinOff, ChevronLeft, ChevronRight,
+  AlertTriangle, MapPinOff, ChevronLeft, ChevronRight, Search,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage } from '@/lib/alert-helpers'
@@ -30,6 +30,7 @@ interface ConfirmStats {
   sinRespuesta:   number
   inalcanzables:  number
   noDesean:       number
+  sinCobertura:   number
 }
 
 interface ConfirmResult {
@@ -44,6 +45,7 @@ interface AgentPerf {
   noRespondieronHoy:     number
   canceladosHoy:         number
   numerosIncorrectosHoy: number
+  sinCoberturaHoy:       number
   tasaConfirmacionHoy:   number | null
 }
 
@@ -59,17 +61,19 @@ const CONFIDENCE: Record<string, { label: string; cls: string }> = {
 }
 
 const CONF_STATUS: Record<string, { label: string; cls: string }> = {
-  pending:     { label: 'Pendiente',    cls: 'bg-gray-100 text-gray-500' },
-  confirmed:   { label: 'Confirmado',   cls: 'bg-green-100 text-green-700' },
-  unreachable: { label: 'Inalcanzable', cls: 'bg-red-100 text-red-700' },
-  cancelled:   { label: 'Canceló',      cls: 'bg-gray-200 text-gray-700' },
+  pending:     { label: 'Pendiente',     cls: 'bg-gray-100 text-gray-500' },
+  confirmed:   { label: 'Confirmado',    cls: 'bg-green-100 text-green-700' },
+  unreachable: { label: 'Inalcanzable',  cls: 'bg-red-100 text-red-700' },
+  cancelled:   { label: 'Canceló',       cls: 'bg-gray-200 text-gray-700' },
+  no_coverage: { label: 'Sin cobertura', cls: 'bg-orange-100 text-orange-700' },
 }
 
 const TERMINAL: Record<string, { label: string; color: string }> = {
-  confirmed:    { label: 'Confirmado',     color: 'bg-green-100 text-green-700' },
-  wrong_number: { label: 'Nro incorrecto', color: 'bg-red-100 text-red-700'    },
-  cancelled:    { label: 'Canceló',        color: 'bg-gray-100 text-gray-600'  },
-  unreachable:  { label: 'Inalcanzable',   color: 'bg-red-100 text-red-700'    },
+  confirmed:    { label: 'Confirmado',     color: 'bg-green-100 text-green-700'   },
+  wrong_number: { label: 'Nro incorrecto', color: 'bg-red-100 text-red-700'       },
+  cancelled:    { label: 'Canceló',        color: 'bg-gray-100 text-gray-600'     },
+  unreachable:  { label: 'Inalcanzable',   color: 'bg-red-100 text-red-700'       },
+  no_coverage:  { label: 'Sin cobertura',  color: 'bg-orange-100 text-orange-700' },
 }
 
 const TAB_META: { tab: Tab; label: string }[] = [
@@ -167,6 +171,7 @@ export default function ConfirmacionPage() {
   const [perf, setPerf]               = useState<AgentPerf | null>(null)
   const [activeTab, setActiveTab]     = useState<Tab>('all')
   const [currentPage, setCurrentPage] = useState(1)
+  const [searchQuery, setSearchQuery] = useState('')
 
   const [terminalMap, setTerminalMap]     = useState<Record<string, string>>({})
   const [attemptsMap, setAttemptsMap]     = useState<Record<string, number>>({})
@@ -257,14 +262,24 @@ export default function ConfirmacionPage() {
 
   const PAGE_SIZE = 50
 
-  const pagedOrders = useMemo(
-    () => displayedOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
-    [displayedOrders, currentPage],
-  )
-  const totalPages = Math.ceil(displayedOrders.length / PAGE_SIZE)
+  const filteredOrders = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return displayedOrders
+    return displayedOrders.filter(o =>
+      (o.customer_name  ?? '').toLowerCase().includes(q) ||
+      (o.customer_phone ?? '').toLowerCase().includes(q) ||
+      (o.order_number   ?? '').toLowerCase().includes(q),
+    )
+  }, [displayedOrders, searchQuery])
 
-  // Reset paginación al cambiar tab
-  useEffect(() => { setCurrentPage(1) }, [activeTab])
+  const pagedOrders = useMemo(
+    () => filteredOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [filteredOrders, currentPage],
+  )
+  const totalPages = Math.ceil(filteredOrders.length / PAGE_SIZE)
+
+  // Reset paginación al cambiar tab o búsqueda
+  useEffect(() => { setCurrentPage(1) }, [activeTab, searchQuery])
 
   async function postConfirmation(orderId: string, action: string) {
     setLoadingRow(prev => ({ ...prev, [orderId]: true }))
@@ -368,11 +383,11 @@ export default function ConfirmacionPage() {
 
             <div className="flex items-center gap-2 flex-wrap flex-1">
               {([
-                { label: 'Confirmados',    count: perf.confirmadosHoy,        cls: 'bg-green-100 text-green-700' },
-                { label: 'Contactados',    count: perf.contactadosHoy,        cls: 'bg-blue-100  text-blue-700'  },
-                { label: 'No responden',   count: perf.noRespondieronHoy,     cls: 'bg-amber-100 text-amber-700' },
-                { label: 'Cancelados',     count: perf.canceladosHoy,         cls: 'bg-gray-100  text-gray-600'  },
-                { label: 'Nro incorrecto', count: perf.numerosIncorrectosHoy, cls: 'bg-red-100   text-red-700'   },
+                { label: 'Confirmados',    count: perf.confirmadosHoy,        cls: 'bg-green-100  text-green-700'  },
+                { label: 'Contactados',    count: perf.contactadosHoy,        cls: 'bg-blue-100   text-blue-700'   },
+                { label: 'No responden',   count: perf.noRespondieronHoy,     cls: 'bg-amber-100  text-amber-700'  },
+                { label: 'Cancelados',     count: perf.canceladosHoy,         cls: 'bg-gray-100   text-gray-600'   },
+                { label: 'Sin cobertura',  count: perf.sinCoberturaHoy,       cls: 'bg-orange-100 text-orange-700' },
               ] as const).map(({ label, count, cls }) => (
                 <div key={label} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg ${cls}`}>
                   <span className="text-sm font-black tabular-nums leading-none">{count}</span>
@@ -456,13 +471,14 @@ export default function ConfirmacionPage() {
           </div>
 
           {/* Fila 2: métricas informativas */}
-          <div className="grid grid-cols-5 gap-2">
+          <div className="grid grid-cols-6 gap-2">
             {([
-              { label: 'Confirm. hoy',   count: stats.confirmadosHoy, cls: 'bg-green-50  text-green-700  border-green-100'  },
-              { label: 'Contactados hoy',count: stats.contactadosHoy, cls: 'bg-blue-50   text-blue-700   border-blue-100'   },
-              { label: 'Sin respuesta',  count: stats.sinRespuesta,   cls: 'bg-amber-50  text-amber-700  border-amber-100'  },
-              { label: 'Inalcanzables',  count: stats.inalcanzables,  cls: 'bg-red-50    text-red-700    border-red-100'    },
-              { label: 'No desean',      count: stats.noDesean,       cls: 'bg-gray-50   text-gray-600   border-gray-200'   },
+              { label: 'Confirm. hoy',   count: stats.confirmadosHoy, cls: 'bg-green-50   text-green-700   border-green-100'  },
+              { label: 'Contactados hoy',count: stats.contactadosHoy, cls: 'bg-blue-50    text-blue-700    border-blue-100'   },
+              { label: 'Sin respuesta',  count: stats.sinRespuesta,   cls: 'bg-amber-50   text-amber-700   border-amber-100'  },
+              { label: 'Inalcanzables',  count: stats.inalcanzables,  cls: 'bg-red-50     text-red-700     border-red-100'    },
+              { label: 'No desean',      count: stats.noDesean,       cls: 'bg-gray-50    text-gray-600    border-gray-200'   },
+              { label: 'Sin cobertura',  count: stats.sinCobertura,   cls: 'bg-orange-50  text-orange-700  border-orange-100' },
             ] as const).map(({ label, count, cls }) => (
               <div key={label}
                    className={`flex flex-col items-center justify-center p-3 rounded-lg border ${cls}`}>
@@ -507,6 +523,22 @@ export default function ConfirmacionPage() {
             <p className="text-sm font-semibold text-indigo-800">
               Máximo {MAX_ATTEMPTS} intentos por pedido · Sin respuesta en 3 intentos → inalcanzable
             </p>
+          </div>
+
+          {/* Buscador */}
+          <div className="px-4 py-2.5 border-b border-indigo-100">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Buscar por nombre, teléfono o #orden..."
+                className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg
+                           focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400
+                           placeholder:text-gray-400 bg-white"
+              />
+            </div>
           </div>
 
           {/* Tabs de filtro rápido */}
@@ -707,6 +739,7 @@ export default function ConfirmacionPage() {
                             </span>
                           ) : (
                             <div className="grid grid-cols-2 gap-1">
+                              {/* Fila 1 */}
                               <button
                                 onClick={() => postConfirmation(order.id, 'confirmed')}
                                 className="flex items-center gap-1 bg-green-100 hover:bg-green-200
@@ -723,13 +756,14 @@ export default function ConfirmacionPage() {
                               >
                                 <PhoneMissed className="w-3 h-3 shrink-0" />No contesta
                               </button>
+                              {/* Fila 2 */}
                               <button
-                                onClick={() => postConfirmation(order.id, 'wrong_number')}
-                                className="flex items-center gap-1 bg-red-100 hover:bg-red-200
-                                           text-red-700 text-[11px] font-medium px-2 py-1 rounded
+                                onClick={() => postConfirmation(order.id, 'no_coverage')}
+                                className="flex items-center gap-1 bg-orange-100 hover:bg-orange-200
+                                           text-orange-700 text-[11px] font-medium px-2 py-1 rounded
                                            transition-colors whitespace-nowrap"
                               >
-                                <XCircle className="w-3 h-3 shrink-0" />Nro incorr.
+                                <MapPinOff className="w-3 h-3 shrink-0" />Sin cobertura
                               </button>
                               <button
                                 onClick={() => postConfirmation(order.id, 'cancelled')}
@@ -779,7 +813,7 @@ export default function ConfirmacionPage() {
                 Página <span className="font-bold text-gray-800">{currentPage}</span> de{' '}
                 <span className="font-bold text-gray-800">{totalPages}</span>
                 {' '}·{' '}
-                <span className="text-gray-400">{displayedOrders.length} resultados</span>
+                <span className="text-gray-400">{filteredOrders.length} resultados</span>
               </span>
               <button
                 onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}

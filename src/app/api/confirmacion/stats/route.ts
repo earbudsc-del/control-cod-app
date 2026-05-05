@@ -38,6 +38,7 @@ export async function GET() {
       { count: contactadosHoy },
       { count: inalcanzables },
       { count: noDesean },
+      { count: sinCobertura },
     ] = await Promise.all([
 
       // Nunca contactados — mismos filtros que la tabla visible
@@ -81,6 +82,15 @@ export async function GET() {
         .eq('confirmation_status', 'cancelled')
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned'),
+
+      // Sin cobertura activos (solo pedidos Shopify)
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('source', 'shopify_webhook')
+        .eq('confirmation_status', 'no_coverage')
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned'),
     ])
 
     return NextResponse.json({
@@ -92,6 +102,7 @@ export async function GET() {
       sinRespuesta:   reintentar     ?? 0,
       inalcanzables:  inalcanzables  ?? 0,
       noDesean:       noDesean       ?? 0,
+      sinCobertura:   sinCobertura   ?? 0,
     })
   } catch (err) {
     console.error('[GET /api/confirmacion/stats]', err)
