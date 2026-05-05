@@ -75,26 +75,47 @@ function buildProductSummary(items: ShopifyLineItem[]): string {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export async function POST(request: Request) {
+  const rawShop = request.headers.get('x-shopify-shop-domain')
+  console.log('[webhook-diag] RAW SHOP HEADER:', rawShop)
+
+  // ── DIAG: entrada ─────────────────────────────────────────────────────────────
+  const diagShop    = request.headers.get('x-shopify-shop-domain') ?? '(sin header)'
+  const diagTopic   = request.headers.get('x-shopify-topic')       ?? '(sin header)'
+  const diagHmacRaw = request.headers.get('x-shopify-hmac-sha256') ?? ''
+  console.log('[webhook-diag] ► REQUEST RECIBIDA', new Date().toISOString())
+  console.log('[webhook-diag] shop:', diagShop)
+  console.log('[webhook-diag] topic:', diagTopic)
+  console.log('[webhook-diag] hmac presente:', diagHmacRaw.length > 0, '— longitud:', diagHmacRaw.length)
+  console.log('[webhook-diag] SERVICE_ROLE_KEY EXISTS:', !!process.env.SUPABASE_SERVICE_ROLE_KEY)
+  console.log('[webhook-diag] WEBHOOK_SECRET EXISTS:', !!process.env.SHOPIFY_WEBHOOK_SECRET)
+  // ─────────────────────────────────────────────────────────────────────────────
+
   // 1. Leer raw body antes de cualquier parse (necesario para verificar HMAC)
   const rawBody = await request.text()
+  console.log('[webhook-diag] body_bytes:', rawBody.length)
 
   // 2. Verificar HMAC con timing-safe compare
   const webhookSecret = process.env.SHOPIFY_WEBHOOK_SECRET
   if (!webhookSecret) {
     console.error('[shopify-webhook] SHOPIFY_WEBHOOK_SECRET no configurado')
+    console.error('[webhook-diag] ✖ STATUS 500 — WEBHOOK_SECRET faltante')
     return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 })
   }
 
   const hmacHeader = request.headers.get('x-shopify-hmac-sha256') ?? ''
   const shopDomain = request.headers.get('x-shopify-shop-domain') ?? ''
 
-  if (!verifyHmac(rawBody, hmacHeader, webhookSecret)) {
+  const hmacValid = verifyHmac(rawBody, hmacHeader, webhookSecret)
+  console.log('[webhook-diag] HMAC válido:', hmacValid)
+
+  if (!hmacValid) {
     console.warn(
       '[shopify-webhook] HMAC inválido — request rechazado.',
       'shop:', shopDomain || '(sin header)',
       'body_bytes:', rawBody.length,
       'hmac_header_length:', hmacHeader.length,
     )
+    console.error('[webhook-diag] ✖ STATUS 401 — HMAC inválido')
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -104,8 +125,11 @@ export async function POST(request: Request) {
     payload = JSON.parse(rawBody) as ShopifyOrderPayload
   } catch {
     console.error('[shopify-webhook] JSON inválido — shop:', shopDomain)
+    console.error('[webhook-diag] ✖ STATUS 400 — JSON inválido')
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
+
+  console.log('[webhook-diag] shopify_order_id:', String(payload.id), '— order_name:', payload.name ?? '(sin nombre)')
 
   console.log(
     '[shopify-webhook] ✓ Recibido:',
@@ -116,20 +140,35 @@ export async function POST(request: Request) {
 
   // 4. Resolver tienda
   //    Primero por shopify_domain exacto; si no coincide, usa la primera tienda activa.
+
+  // DIAG: confirmar env vars y valor usado para lookup
+  console.log('[webhook-diag] SUPABASE_URL:', process.env.NEXT_PUBLIC_SUPABASE_URL)
+  console.log('[webhook-diag] SERVICE_ROLE_EXISTS:', !!process.env.SUPABASE_SERVICE_ROLE_KEY)
+  console.log('[webhook-diag] shop used for lookup:', shopDomain)
+
+  // DIAG: listar todas las tiendas visibles desde este cliente Supabase
+  const { data: allStores, error: allStoresError } = await supabase
+    .from('stores')
+    .select('id, shopify_domain, is_active')
+  console.log('[webhook-diag] all stores visible from webhook:', allStores)
+  console.log('[webhook-diag] all stores error:', allStoresError)
+
   let storeId: string | null = null
 
   if (shopDomain) {
-    const { data } = await supabase
+    const { data: store, error: storeError } = await supabase
       .from('stores')
       .select('id')
       .eq('shopify_domain', shopDomain)
       .eq('is_active', true)
       .maybeSingle()
-    storeId = data?.id ?? null
+    console.log('[webhook-diag] store lookup data:', store)
+    console.log('[webhook-diag] store lookup error:', storeError)
+    storeId = store?.id ?? null
   }
 
   if (!storeId) {
-    const { data } = await supabase
+    const { data, error: storeErrFallback } = await supabase
       .from('stores')
       .select('id')
       .eq('is_active', true)
@@ -137,10 +176,13 @@ export async function POST(request: Request) {
       .limit(1)
       .maybeSingle()
     storeId = data?.id ?? null
+    if (storeErrFallback) console.error('[webhook-diag] Error en fallback tienda:', storeErrFallback.message)
+    console.log('[webhook-diag] tienda por fallback:', storeId ?? 'no encontrada')
   }
 
   if (!storeId) {
     console.error('[shopify-webhook] No se encontró tienda activa — shop_domain_header:', shopDomain || '(vacío)')
+    console.error('[webhook-diag] ✖ STATUS 404 — tienda no encontrada')
     return NextResponse.json({ error: 'Store not found' }, { status: 404 })
   }
 
@@ -157,6 +199,7 @@ export async function POST(request: Request) {
     .maybeSingle()
 
   if (existing) {
+    console.log('[webhook-diag] idempotente — shopify_order_id ya existe:', shopifyOrderId)
     console.log('[shopify-webhook] Idempotente (ya existe):', shopifyOrderId, '→ order_id:', existing.id)
     // Asegurar que la task existe aunque la primera request haya fallado a mitad
     await createTaskIfNotExists(supabase, {
@@ -246,6 +289,7 @@ export async function POST(request: Request) {
   if (insertErr) {
     // Código 23505 = unique_violation — carrera entre dos requests simultáneos
     if (insertErr.code === '23505') {
+      console.log('[webhook-diag] unique_violation 23505 — race condition, buscando existente')
       const { data: dup } = await supabase
         .from('orders')
         .select('id')
@@ -260,9 +304,11 @@ export async function POST(request: Request) {
           priority: 'high',
         })
       }
+      console.log('[webhook-diag] ✓ STATUS 200 — idempotente (race condition)')
       return NextResponse.json({ ok: true, duplicate: true, order_id: dup?.id ?? null })
     }
     console.error('[shopify-webhook] Error al insertar pedido:', insertErr)
+    console.error('[webhook-diag] ✖ STATUS 500 — insert falló. code:', insertErr.code, '| message:', insertErr.message, '| details:', insertErr.details)
     return NextResponse.json({ error: 'Failed to save order' }, { status: 500 })
   }
 
@@ -288,6 +334,7 @@ export async function POST(request: Request) {
     (duplicateAlert ? ` — ALERTA DUPLICADO: ${duplicateNoteText}` : '') +
     ` → tarea confirmation creada`,
   )
+  console.log('[webhook-diag] ✓ STATUS 200 — pedido insertado. order_id:', newOrder.id)
 
   return NextResponse.json({
     ok:              true,

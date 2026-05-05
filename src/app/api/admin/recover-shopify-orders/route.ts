@@ -118,6 +118,10 @@ async function fetchShopifyOrders(
 
 export async function POST(request: Request) {
   try {
+    // DEBUG TEMPORAL — eliminar tras verificar en Vercel
+    console.log('SERVICE_ROLE_KEY EXISTS:', !!process.env.SUPABASE_SERVICE_ROLE_KEY)
+    console.log('SHOPIFY_SHOP_DOMAIN:', process.env.SHOPIFY_SHOP_DOMAIN)
+
     // 1. Auth — solo admin
     const authSupabase = await createClient()
     const { data: { user } } = await authSupabase.auth.getUser()
