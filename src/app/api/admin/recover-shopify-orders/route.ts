@@ -10,6 +10,7 @@ const SHOPIFY_API_VERSION = '2024-07'
 interface ShopifyAddress {
   name?:     string
   address1?: string
+  address2?: string
   city?:     string
   province?: string
   phone?:    string
@@ -32,6 +33,7 @@ interface ShopifyOrder {
   name?:             string
   created_at?:       string
   total_price?:      string
+  phone?:            string
   customer?:         ShopifyCustomer
   shipping_address?: ShopifyAddress
   billing_address?:  ShopifyAddress
@@ -260,21 +262,48 @@ export async function POST(request: Request) {
 
     for (const order of shopifyOrders) {
       const shopifyOrderId = String(order.id)
-      const addr           = order.shipping_address ?? order.billing_address
+      const shipping = order.shipping_address || {}
+      const billing  = order.billing_address  || {}
+      const customer = order.customer         || {}
 
-      const customerName =
-        [order.customer?.first_name, order.customer?.last_name]
-          .filter(Boolean)
-          .join(' ') ||
-        addr?.name ||
+      const customer_name =
+        shipping.name ||
+        `${customer.first_name || ''} ${customer.last_name || ''}`.trim() ||
+        billing.name ||
         null
 
-      const customerPhone    = order.customer?.phone ?? addr?.phone ?? null
-      const customerAddress  = addr?.address1 ?? null
-      const city             = addr?.city     ?? null
-      const province         = addr?.province ?? null
-      const productSummary   = order.line_items?.length ? buildProductSummary(order.line_items) : null
-      const codAmount        = order.total_price ? (parseFloat(order.total_price) || null) : null
+      const customer_phone =
+        shipping.phone ||
+        billing.phone  ||
+        customer.phone ||
+        order.phone    ||
+        null
+
+      const customer_address =
+        [shipping.address1, shipping.address2].filter(Boolean).join(' ') ||
+        [billing.address1,  billing.address2 ].filter(Boolean).join(' ') ||
+        null
+
+      const city =
+        shipping.city ||
+        billing.city  ||
+        null
+
+      const province =
+        shipping.province ||
+        billing.province  ||
+        null
+
+      const productSummary = order.line_items?.length ? buildProductSummary(order.line_items) : null
+      const codAmount      = order.total_price ? (parseFloat(order.total_price) || null) : null
+
+      console.log('[recover-diag] mapped customer:', {
+        customer_name,
+        customer_phone,
+        customer_address,
+        city,
+        province,
+      })
 
       const existing = existingMap.get(shopifyOrderId)
 
@@ -290,9 +319,9 @@ export async function POST(request: Request) {
 
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
 
-        if (isEmpty(existing.customer_name)    && customerName)    patch.customer_name    = customerName
-        if (isEmpty(existing.customer_phone)   && customerPhone)   patch.customer_phone   = customerPhone
-        if (isEmpty(existing.customer_address) && customerAddress) patch.customer_address = customerAddress
+        if (isEmpty(existing.customer_name)    && customer_name)    patch.customer_name    = customer_name
+        if (isEmpty(existing.customer_phone)   && customer_phone)  patch.customer_phone   = customer_phone
+        if (isEmpty(existing.customer_address) && customer_address) patch.customer_address = customer_address
         if (isEmpty(existing.city)             && city)            patch.city             = city
         if (province)                                              patch.province         = province
         if (productSummary)                                        patch.product_summary  = productSummary
@@ -329,14 +358,14 @@ export async function POST(request: Request) {
         let duplicateOfOrderId: string | null = null
         let duplicateReason:    string | null = null
 
-        if (customerPhone) {
+        if (customer_phone) {
           const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
           const { data: potentialDup } = await service
             .from('orders')
             .select('id, order_number, normalized_status')
             .eq('store_id', storeId)
-            .eq('customer_phone', customerPhone)
+            .eq('customer_phone', customer_phone)
             .in('normalized_status', [...ACTIVE_STATUSES])
             .gte('created_at', sevenDaysAgo)
             .order('created_at', { ascending: false })
@@ -355,10 +384,10 @@ export async function POST(request: Request) {
           .insert({
             store_id:              storeId,
             shopify_order_id:      shopifyOrderId,
-            order_number:          order.name          ?? null,
-            customer_name:         customerName        || null,
-            customer_phone:        customerPhone,
-            customer_address:      customerAddress,
+            order_number:          order.name     ?? null,
+            customer_name:         customer_name  || null,
+            customer_phone:        customer_phone,
+            customer_address:      customer_address,
             city,
             province,
             product_summary:       productSummary,
