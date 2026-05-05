@@ -8,6 +8,7 @@ import { createTaskIfNotExists } from '@/lib/tasks/auto-tasks'
 interface ShopifyAddress {
   name?:     string
   address1?: string
+  address2?: string
   city?:     string
   province?: string
   phone?:    string
@@ -30,10 +31,12 @@ interface ShopifyOrderPayload {
   name?:             string    // e.g. "#1001"
   created_at?:       string
   total_price?:      string
+  phone?:            string
   customer?:         ShopifyCustomer
   shipping_address?: ShopifyAddress
   billing_address?:  ShopifyAddress
   line_items?:       ShopifyLineItem[]
+  note_attributes?:  { name: string; value: string }[]
 }
 
 // Statuses que indican un pedido aún activo en normalized_status.
@@ -211,17 +214,53 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, duplicate: true, order_id: existing.id })
   }
 
-  // 6. Mapear campos del payload (extraídos antes del duplicate check para reutilizarlos)
-  const addr = payload.shipping_address ?? payload.billing_address
+  // 6. Mapear campos del payload — note_attributes tiene prioridad sobre shipping/billing
+  const shipping = payload.shipping_address || {}
+  const billing  = payload.billing_address  || {}
+  const customer = payload.customer         || {}
+  const notes    = payload.note_attributes  || []
+
+  const getNote = (key: string) =>
+    notes.find(n => n.name?.toLowerCase().includes(key))?.value || null
+
+  const note_name     = getNote('nombre')
+  const note_phone    = getNote('whatsapp') || getNote('telefono')
+  const note_address  = getNote('dirección') || getNote('direccion')
+  const note_city     = getNote('ciudad')
+  const note_province = getNote('provincia')
 
   const customerName =
-    [payload.customer?.first_name, payload.customer?.last_name]
-      .filter(Boolean)
-      .join(' ') ||
-    addr?.name ||
+    note_name ||
+    shipping.name ||
+    `${customer.first_name || ''} ${customer.last_name || ''}`.trim() ||
+    billing.name ||
     null
 
-  const customerPhone = payload.customer?.phone ?? addr?.phone ?? null
+  const customerPhone =
+    note_phone    ||
+    shipping.phone ||
+    billing.phone  ||
+    customer.phone ||
+    payload.phone  ||
+    null
+
+  const customerAddress =
+    note_address ||
+    [shipping.address1, shipping.address2].filter(Boolean).join(' ') ||
+    [billing.address1,  billing.address2 ].filter(Boolean).join(' ') ||
+    null
+
+  const customerCity =
+    note_city    ||
+    shipping.city ||
+    billing.city  ||
+    null
+
+  const customerProvince =
+    note_province    ||
+    shipping.province ||
+    billing.province  ||
+    null
 
   // 7. Detectar posible pedido duplicado por teléfono
   //    No bloquea la creación — solo marca el pedido para revisión del agente.
@@ -259,11 +298,11 @@ export async function POST(request: Request) {
     store_id:              storeId,
     shopify_order_id:      shopifyOrderId,
     order_number:          payload.name ?? null,
-    customer_name:         customerName || null,
+    customer_name:         customerName    || null,
     customer_phone:        customerPhone,
-    customer_address:      addr?.address1 ?? null,
-    city:                  addr?.city ?? null,
-    province:              addr?.province ?? null,
+    customer_address:      customerAddress || null,
+    city:                  customerCity    || null,
+    province:              customerProvince || null,
     product_summary:       payload.line_items?.length
                              ? buildProductSummary(payload.line_items)
                              : null,

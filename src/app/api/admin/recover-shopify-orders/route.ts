@@ -290,14 +290,26 @@ export async function POST(request: Request) {
       const shipping = order.shipping_address || {}
       const billing  = order.billing_address  || {}
       const customer = order.customer         || {}
+      const notes    = order.note_attributes  || []
+
+      const getNote = (key: string) =>
+        notes.find(n => n.name?.toLowerCase().includes(key))?.value || null
+
+      const note_name     = getNote('nombre')
+      const note_phone    = getNote('whatsapp') || getNote('telefono')
+      const note_address  = getNote('dirección') || getNote('direccion')
+      const note_city     = getNote('ciudad')
+      const note_province = getNote('provincia')
 
       const customer_name =
+        note_name ||
         shipping.name ||
         `${customer.first_name || ''} ${customer.last_name || ''}`.trim() ||
         billing.name ||
         null
 
       const customer_phone =
+        note_phone    ||
         shipping.phone ||
         billing.phone  ||
         customer.phone ||
@@ -305,16 +317,19 @@ export async function POST(request: Request) {
         null
 
       const customer_address =
+        note_address ||
         [shipping.address1, shipping.address2].filter(Boolean).join(' ') ||
         [billing.address1,  billing.address2 ].filter(Boolean).join(' ') ||
         null
 
       const city =
+        note_city    ||
         shipping.city ||
         billing.city  ||
         null
 
       const province =
+        note_province    ||
         shipping.province ||
         billing.province  ||
         null
