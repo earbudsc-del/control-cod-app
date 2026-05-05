@@ -31,13 +31,19 @@ interface ShopifyLineItem {
 interface ShopifyOrder {
   id:                number
   name?:             string
+  order_number?:     number
   created_at?:       string
   total_price?:      string
   phone?:            string
+  email?:            string
+  contact_email?:    string
   customer?:         ShopifyCustomer
   shipping_address?: ShopifyAddress
   billing_address?:  ShopifyAddress
   line_items?:       ShopifyLineItem[]
+  note_attributes?:  { name: string; value: string }[]
+  shipping_lines?:   { title?: string; code?: string }[]
+  client_details?:   { user_agent?: string; browser_ip?: string } | null
 }
 
 // Estados activos para detección de duplicados — misma lista que el webhook
@@ -80,7 +86,7 @@ async function fetchShopifyOrders(
   createdAtMin:  string,
   createdAtMax:  string,
 ): Promise<ShopifyOrder[]> {
-  const fields = 'id,name,created_at,total_price,customer,shipping_address,billing_address,line_items'
+  const fields = 'id,name,order_number,created_at,total_price,phone,email,contact_email,customer,shipping_address,billing_address,line_items,note_attributes'
   const base   =
     `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/orders.json` +
     `?status=any&limit=250` +
@@ -262,6 +268,25 @@ export async function POST(request: Request) {
 
     for (const order of shopifyOrders) {
       const shopifyOrderId = String(order.id)
+
+      // DIAG TEMPORAL — log raw para #8582
+      if (order.name === '#8582' || order.order_number === 8582) {
+        console.log('[recover-diag] RAW SHOPIFY ORDER #8582:', JSON.stringify({
+          id:               order.id,
+          name:             order.name,
+          order_number:     order.order_number,
+          phone:            order.phone,
+          email:            order.email,
+          contact_email:    order.contact_email,
+          customer:         order.customer,
+          shipping_address: order.shipping_address,
+          billing_address:  order.billing_address,
+          note_attributes:  order.note_attributes,
+          shipping_lines:   order.shipping_lines,
+          client_details:   order.client_details,
+        }, null, 2))
+      }
+
       const shipping = order.shipping_address || {}
       const billing  = order.billing_address  || {}
       const customer = order.customer         || {}
