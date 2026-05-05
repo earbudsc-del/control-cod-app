@@ -3,9 +3,10 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { updateOrderTracking } from '@/lib/tracking/update-order'
 import { createTaskIfNotExists, resolveAutoTasks } from '@/lib/tasks/auto-tasks'
 
-const ACTIVE_STATUSES = ['in_transit', 'en_reparto', 'novedad', 'unknown']
-const BATCH_SIZE      = 5
-const BATCH_DELAY_MS  = 1_500
+// Estados finales: el cron NO los re-procesa (EFI ya no cambiará de estado)
+const FINAL_STATUSES = ['delivered', 'returned', 'cancelled']
+const BATCH_SIZE     = 5
+const BATCH_DELAY_MS = 1_500
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -32,8 +33,8 @@ export async function POST(req: Request) {
   const { data: orders, error: fetchErr } = await supabase
     .from('orders')
     .select('id, tracking_number, normalized_status, last_tracking_update, store_id')
-    .in('normalized_status', ACTIVE_STATUSES)
     .not('tracking_number', 'is', null)
+    .not('normalized_status', 'in', `(${FINAL_STATUSES.join(',')})`)
     .order('last_tracking_update', { ascending: true, nullsFirst: true })
     .limit(200)
 
@@ -98,6 +99,8 @@ export async function POST(req: Request) {
   )
 
   // Confirmation tasks para pedidos sin confirmar (normalized_status = 'pending')
+  // Necesario para pedidos importados por Excel: el import no llama a createTaskIfNotExists,
+  // a diferencia del webhook que lo hace al insertar.
   const { data: pendingOrders } = await supabase
     .from('orders')
     .select('id, store_id')
