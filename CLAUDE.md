@@ -47,6 +47,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **recover-shopify-orders: sincroniza tracking_number desde Shopify fulfillments** | 2026-05-06 | `src/app/api/admin/recover-shopify-orders/route.ts` |
 | **Fix cron: procesa todos los pedidos con tracking_number (no solo ACTIVE_STATUSES)** | 2026-05-05 | `src/app/api/tracking/auto/route.ts` |
 | **Fix parser: "Para entrega hoy" / "Salió para entrega" → en_reparto** | 2026-05-05 | `src/lib/tracking/efi-parser.ts` |
 | **Buscador en /confirmacion** | 2026-05-05 | `confirmacion/page.tsx` |
@@ -425,10 +426,53 @@ El componente `FlujoKpis` muestra en `/reparto` y `/novedad` un resumen horizont
 
 ## 6. PENDIENTES PRIORIZADOS
 
+### P0 — Sync fulfillment/tracking_number desde Shopify (CRÍTICO — diagnóstico 2026-05-06)
+
+**Problema raíz:** Cuando el admin despacha una orden en EFI y fulfills en Shopify, el `tracking_number` nunca llega a nuestra DB. El cron no puede procesar la orden (filtra `tracking_number IS NOT NULL`). La orden queda `pending` indefinidamente aunque EFI la tenga en reparto.
+
+**Ciclo roto:**
+```
+order/create webhook → pending, tracking=NULL
+Agente confirma → confirmation_status='confirmed', tracking=NULL  ← atascado aquí
+Admin despacha en EFI + fulfills en Shopify → tracking en Shopify
+                                            ↑ NADIE escucha este evento
+Cron no la procesa → sigue 'pending' para siempre en nuestra app
+```
+
+**Webhooks que faltan:**
+- `fulfillments/create` — dispara cuando Shopify crea un fulfillment con tracking_number
+- No existe ningún handler en `/api/webhooks/shopify/fulfillments/`
+
+**Campos que faltan en endpoints de recovery:**
+- `recover-shopify-orders`: `fields` no incluye `fulfillments` ni `fulfillment_status`
+- `recover-orders`: ídem, campos aún más reducidos
+- La Shopify Admin API sí los expone: `order.fulfillments[0].tracking_number`
+
+**Modelo de estado correcto (sin migración de DB):**
+- "Confirmada sin guía" = `confirmation_status='confirmed' AND tracking_number IS NULL`
+- "Despachada" = `confirmation_status='confirmed' AND tracking_number IS NOT NULL` → `normalized_status='in_transit'` al recibir el fulfillment
+
+**Plan de implementación:**
+1. **Paso 1 (retroactivo) ✅ IMPLEMENTADO:** `recover-shopify-orders` ahora incluye `fulfillments` en los `fields` de Shopify API. Extrae `order.fulfillments.find(f => f.tracking_number).tracking_number`. En Rama A (orden existente): actualiza si `tracking_number IS NULL` en DB (nunca sobreescribe). En Rama B (orden nueva): inserta con el tracking_number. Respuesta incluye `updated_tracking` como nuevo contador. Usa `normalized_status='pending'`  — el cron (con Fix #2) actualizará el estado real desde Effi en el siguiente ciclo.
+2. **Paso 2 (tiempo real, pendiente):** Crear `/api/webhooks/shopify/fulfillments/route.ts` — recibe `fulfillments/create`, busca orden por `shopify_order_id = payload.order_id`, actualiza `tracking_number` y `normalized_status='in_transit'` si estaba `pending`
+3. **Paso 3 (UI, pendiente):** En `/confirmacion`, filtrar del tab activo las `confirmed + tracking IS NOT NULL`. Agregar contador "Despachadas"
+4. **Paso 4 (dashboard, pendiente):** Agregar métricas `confirmed_sin_guia` y `confirmadas_despachadas`
+
+**Queries diagnóstico:**
+```sql
+-- Confirmadas sin guía (el hueco principal)
+SELECT count(*) FROM orders WHERE confirmation_status='confirmed' AND tracking_number IS NULL;
+-- Con guía pero stuck en pending (Fix #2 las resolverá)
+SELECT count(*) FROM orders WHERE tracking_number IS NOT NULL AND normalized_status='pending';
+-- Distribución por source
+SELECT source, count(*), count(*) FILTER (WHERE tracking_number IS NOT NULL) as con_tracking
+FROM orders GROUP BY source;
+```
+
 ### P1 — Botón "Listo para despacho" → persistir en DB
 - En `/confirmados`, el botón actualmente solo actualiza el estado local (UI)
-- Pendiente: definir qué campo actualizar en `orders` (ej. `dispatched_at`, nuevo estado, o una task)
-- Candidato natural: agregar `dispatched_at` timestamp en `orders`, o cambiar `normalized_status` a `in_transit` al asignar guía
+- Después de P0: cuando Shopify fulfillment llega, `tracking_number` se guarda automáticamente → ese es el trigger real de "despachado"
+- El botón podría quedar como confirmación manual para casos sin Shopify
 
 ### P2 — Reprogramación + sync con EFI
 - Cuando agente marca "Reprogramado" en novedad → actualizar fecha estimada en EFI (si API disponible) o al menos registrar en `orders.scheduled_date`

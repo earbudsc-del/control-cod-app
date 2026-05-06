@@ -28,22 +28,29 @@ interface ShopifyLineItem {
   quantity:       number
 }
 
+interface ShopifyFulfillment {
+  tracking_number?:  string | null
+  tracking_company?: string | null
+}
+
 interface ShopifyOrder {
-  id:                number
-  name?:             string
-  order_number?:     number
-  created_at?:       string
-  total_price?:      string
-  phone?:            string
-  email?:            string
-  contact_email?:    string
-  customer?:         ShopifyCustomer
-  shipping_address?: ShopifyAddress
-  billing_address?:  ShopifyAddress
-  line_items?:       ShopifyLineItem[]
-  note_attributes?:  { name: string; value: string }[]
-  shipping_lines?:   { title?: string; code?: string }[]
-  client_details?:   { user_agent?: string; browser_ip?: string } | null
+  id:                 number
+  name?:              string
+  order_number?:      number
+  created_at?:        string
+  total_price?:       string
+  phone?:             string
+  email?:             string
+  contact_email?:     string
+  fulfillment_status?: string | null
+  fulfillments?:      ShopifyFulfillment[]
+  customer?:          ShopifyCustomer
+  shipping_address?:  ShopifyAddress
+  billing_address?:   ShopifyAddress
+  line_items?:        ShopifyLineItem[]
+  note_attributes?:   { name: string; value: string }[]
+  shipping_lines?:    { title?: string; code?: string }[]
+  client_details?:    { user_agent?: string; browser_ip?: string } | null
 }
 
 // Estados activos para detección de duplicados — misma lista que el webhook
@@ -86,7 +93,7 @@ async function fetchShopifyOrders(
   createdAtMin:  string,
   createdAtMax:  string,
 ): Promise<ShopifyOrder[]> {
-  const fields = 'id,name,order_number,created_at,total_price,phone,email,contact_email,customer,shipping_address,billing_address,line_items,note_attributes'
+  const fields = 'id,name,order_number,created_at,total_price,phone,email,contact_email,fulfillment_status,fulfillments,customer,shipping_address,billing_address,line_items,note_attributes'
   const base   =
     `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/orders.json` +
     `?status=any&limit=250` +
@@ -212,7 +219,7 @@ export async function POST(request: Request) {
 
     const { data: existingRows } = await service
       .from('orders')
-      .select('id, shopify_order_id, customer_name, customer_phone, customer_address, city')
+      .select('id, shopify_order_id, customer_name, customer_phone, customer_address, city, tracking_number')
       .in('shopify_order_id', shopifyIds)
 
     type ExistingRow = {
@@ -222,6 +229,7 @@ export async function POST(request: Request) {
       customer_phone:   string | null
       customer_address: string | null
       city:             string | null
+      tracking_number:  string | null
     }
 
     const existingMap = new Map<string, ExistingRow>(
@@ -260,6 +268,7 @@ export async function POST(request: Request) {
     // 8. Procesar pedidos: actualizar incompletos o insertar nuevos
     let inserted            = 0
     let updatedMissingData  = 0
+    let updatedTracking     = 0
     const errors: string[]  = []
 
     function isEmpty(val: string | null | undefined): boolean {
@@ -345,27 +354,35 @@ export async function POST(request: Request) {
         province,
       })
 
+      // Extraer tracking_number del primer fulfillment con tracking (si existe)
+      const trackingNumber =
+        order.fulfillments?.find(f => !!f.tracking_number)?.tracking_number ?? null
+
       const existing = existingMap.get(shopifyOrderId)
 
-      // ── Rama A: pedido ya existe — actualizar si tiene campos vacíos ──────────
+      // ── Rama A: pedido ya existe — actualizar si tiene campos vacíos o tracking ─
       if (existing) {
-        const needsUpdate =
+        const needsTracking  = !existing.tracking_number && !!trackingNumber
+        const needsCustomer  =
           isEmpty(existing.customer_name)    ||
           isEmpty(existing.customer_phone)   ||
           isEmpty(existing.customer_address) ||
           isEmpty(existing.city)
 
-        if (!needsUpdate) continue
+        if (!needsTracking && !needsCustomer) continue
 
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
 
-        if (isEmpty(existing.customer_name)    && customer_name)    patch.customer_name    = customer_name
-        if (isEmpty(existing.customer_phone)   && customer_phone)  patch.customer_phone   = customer_phone
+        // Tracking number: solo rellenar si estaba vacío — nunca sobreescribir
+        if (needsTracking)                                         patch.tracking_number  = trackingNumber
+
+        if (isEmpty(existing.customer_name)    && customer_name)  patch.customer_name    = customer_name
+        if (isEmpty(existing.customer_phone)   && customer_phone) patch.customer_phone   = customer_phone
         if (isEmpty(existing.customer_address) && customer_address) patch.customer_address = customer_address
-        if (isEmpty(existing.city)             && city)            patch.city             = city
-        if (province)                                              patch.province         = province
-        if (productSummary)                                        patch.product_summary  = productSummary
-        if (codAmount)                                             patch.cod_amount       = codAmount
+        if (isEmpty(existing.city)             && city)           patch.city             = city
+        if (province)                                             patch.province         = province
+        if (productSummary)                                       patch.product_summary  = productSummary
+        if (codAmount)                                            patch.cod_amount       = codAmount
 
         // Si solo quedó updated_at no hay nada que persistir
         if (Object.keys(patch).length <= 1) continue
@@ -381,8 +398,13 @@ export async function POST(request: Request) {
             continue
           }
 
-          updatedMissingData++
-          console.log(`[recover-diag] updated missing customer data: ${order.name ?? shopifyOrderId}`)
+          if (needsTracking)  updatedTracking++
+          if (needsCustomer)  updatedMissingData++
+          console.log(
+            `[recover-diag] updated ${order.name ?? shopifyOrderId}:`,
+            needsTracking ? `tracking=${trackingNumber}` : '',
+            needsCustomer ? 'customer_data' : '',
+          )
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           errors.push(`update ${order.name ?? shopifyOrderId}: ${msg}`)
@@ -432,6 +454,7 @@ export async function POST(request: Request) {
             province,
             product_summary:       productSummary,
             cod_amount:            codAmount,
+            tracking_number:       trackingNumber,
             normalized_status:     'pending',
             source:                'shopify_webhook',
             customer_confirmed:    false,
@@ -470,6 +493,7 @@ export async function POST(request: Request) {
     console.log(
       `[recover-shopify-orders] Completado — encontrados: ${shopifyFound},`,
       `ya en DB: ${alreadyInDb}, insertados: ${inserted},`,
+      `tracking sincronizados: ${updatedTracking},`,
       `actualizados (datos faltantes): ${updatedMissingData}, errores: ${errors.length}`,
     )
 
@@ -477,6 +501,7 @@ export async function POST(request: Request) {
       shopify_found:        shopifyFound,
       already_in_db:        alreadyInDb,
       inserted,
+      updated_tracking:     updatedTracking,
       updated_missing_data: updatedMissingData,
       errors_count:         errors.length,
       errors,
