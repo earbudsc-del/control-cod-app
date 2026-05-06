@@ -48,6 +48,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Responsive/mobile-first en /novedad: cards para móvil, tabla se mantiene en desktop** | 2026-05-06 | `novedad/page.tsx` |
 | **Vercel Cron Job: tracking en producción cada 5 min sin dependencia de PC local** | 2026-05-06 | `vercel.json` (nuevo), `api/tracking/auto/route.ts` |
 | **Gestión de usuarios mejorada: email, último login, última acción, confirm dialog en rol** | 2026-05-06 | `api/profiles/route.ts`, `src/types/index.ts`, `settings/page.tsx` |
 | **Pipeline nav: barra horizontal Confirmación → Sin guía → Despachados en los 3 módulos** | 2026-05-06 | `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `confirmados/page.tsx`, `despachados/page.tsx` |
@@ -208,6 +209,45 @@
 - **`markRecuperada(orderId)`:** acción manual que patchea `follow_up_result='recovered'` y saca el pedido de `activeOrders`. El tab "Entregadas" NO se actualiza inmediatamente al marcar — espera el próximo fetchData para mostrar datos EFI actualizados.
 
 **Archivos modificados (2026-05-03):** `src/app/(app)/novedad/page.tsx`
+
+### /novedad — Responsive mobile-first (2026-05-06)
+
+**Qué se hizo:** Toda la pantalla `/novedad` es ahora mobile-friendly sin romper desktop.
+
+**Estrategia de breakpoint:** `md` (768px) es el punto de corte. Por debajo → cards. Por encima → tabla idéntica a la versión anterior.
+
+**Cambios por sección:**
+
+| Sección | Mobile (< md) | Desktop (≥ md) |
+|---|---|---|
+| Banner | Compacto, íconos reducidos, subtítulo oculto, refresh sin texto | Igual que antes |
+| Stats superiores (3 cards) | 2 columnas (Pendientes ocupa 2 cols para destacar) | 3 columnas |
+| Stats inferiores (6 cells) | 3 columnas | 6 columnas |
+| Tabs | `min-h-[44px]` touch target, `overflow-x-auto` ya existía | Sin cambios |
+| Buscador | Ancho completo, `py-2.5` para touch | Sin cambios |
+| Tabla novedades activas | `hidden md:table` — oculta en móvil | Intacta, sin cambios |
+| Cards novedades activas | `md:hidden` — visible solo en móvil | No se renderiza |
+| Tabla entregadas | `hidden md:table` — oculta en móvil | Intacta |
+| Cards entregadas | `md:hidden` — visible solo en móvil | No se renderiza |
+| Paginación | `min-h-[40px]` touch targets, conteo abreviado | Sin cambios |
+
+**Subcomponentes nuevos en `novedad/page.tsx`:**
+- `NovedadCard` — card completa para pedido activo en novedad. Muestra: número de orden, tracking, cliente, teléfono, monto (`cod_amount`), ubicación (city + province + address), producto (`product_summary`), estado/motivo (`raw_status`), días en novedad, badge de intentos con severidad (1 = amarillo, 2 = naranja + "Último intento", 3+ = rojo animado + "Riesgo alto"), sugerencia de supervisor si aplica. Botones grandes: WhatsApp (verde, 48px), Llamar (azul, 48px), luego grid 2×2 de acciones (Contactado/Reprogramar/No responde/No salv.) + "Recuperado" full-width + "Ver detalle" con borde.
+- `EntregadaCard` — card para pedidos en tab "✓ Entregadas". Muestra: tracking, nombre de entrega relativo + absoluto, cliente, teléfono, ubicación, fecha completa, badge de intentos previos + `last_attempt_reason`, botón Ver detalle.
+
+**Acciones intactas:** Todas las funciones `postAction`, `markNoSalvable`, `markRecuperada`, `patchTask` sin cambios. Las cards llaman exactamente a las mismas funciones que la tabla.
+
+**Cómo probarlo:**
+1. `npm run dev` en `control-cod-app/`
+2. Chrome DevTools → Toggle Device Toolbar → iPhone 14 Pro (390px) o similar
+3. Verificar: no hay scroll horizontal, cards se ven completas, botones WA y Llamar son grandes y tocables
+4. Tocar "WhatsApp" → debe abrir `wa.me/` con el mensaje precargado
+5. Tocar "Llamar" → debe iniciar llamada en móvil real
+6. Ejecutar acción (ej. Contactado) → debe actualizar el estado en la card sin recargar
+7. Cambiar tab → paginación se resetea, cards se actualizan
+8. Quitar Device Toolbar → vista desktop debe mostrar tabla idéntica a la original
+
+**Archivos modificados (2026-05-06):** `src/app/(app)/novedad/page.tsx`
 
 ### Pipeline logístico (raw_status = 'Generada')
 - `raw_status = 'Generada'` (case-insensitive) indica que EFI creó la guía pero el paquete aún no ha sido recogido

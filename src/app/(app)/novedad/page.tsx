@@ -13,6 +13,7 @@ import {
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, Search, TrendingUp, CalendarClock,
   RotateCcw, ShieldAlert, Clock, ChevronLeft, ChevronRight,
+  Package, DollarSign,
 } from 'lucide-react'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
@@ -114,13 +115,368 @@ function rdMidnightUTC(offsetDays = 0): number {
 
 const PAGE_SIZE = 50
 
+// ── Subcomponente: Card móvil de novedad activa ───────────────────────────────
+
+interface NovedadCardProps {
+  order: Order
+  accion: string | undefined
+  busy: boolean
+  novedadSrc: string | null
+  dias: number
+  sug: NovedadSuggestion | null
+  onContacted: () => void
+  onRescheduled: () => void
+  onNoAnswer: () => void
+  onNoSalvable: () => void
+  onRecuperada: () => void
+  isHighlighted: boolean
+}
+
+function NovedadCard({
+  order, accion, busy, novedadSrc, dias, sug,
+  onContacted, onRescheduled, onNoAnswer, onNoSalvable, onRecuperada,
+  isHighlighted,
+}: NovedadCardProps) {
+  const nombre    = order.customer_name ?? ''
+  const intentos  = order.delivery_attempts ?? 0
+  const waUrl     = whatsAppUrl(order.customer_phone, buildNovedadMsg(nombre, order.product_summary))
+  const telUrl    = callUrl(order.customer_phone)
+  const hasPhone  = !!order.customer_phone
+  const noSalv       = order.follow_up_result === 'no_action'
+  const isRecuperada = order.follow_up_result === 'recovered'
+
+  const ubicacion = order.city
+    || order.province
+    || (order.customer_address ? order.customer_address.slice(0, 30) : null)
+
+  const cardBg = noSalv || isRecuperada
+    ? 'bg-gray-50 border-gray-200'
+    : intentos >= 3
+      ? 'bg-red-50/40 border-red-200'
+      : intentos === 2
+        ? 'bg-orange-50/40 border-orange-200'
+        : 'bg-white border-gray-200'
+
+  return (
+    <div className={`rounded-xl border-2 p-4 space-y-3 shadow-sm transition-colors
+      ${cardBg} ${isHighlighted ? 'ring-2 ring-blue-400 border-blue-300' : ''}`}>
+
+      {/* Fila superior: orden + intentos badge */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          {order.order_number && (
+            <p className="text-xs font-bold text-gray-500 mb-0.5">{order.order_number}</p>
+          )}
+          <p className="font-mono text-sm font-semibold text-gray-900 truncate">
+            {order.tracking_number ?? '—'}
+          </p>
+          {novedadSrc && (
+            <p className="text-[11px] text-gray-400 mt-0.5">{daysSince(novedadSrc)}</p>
+          )}
+        </div>
+
+        {/* Badge de intentos */}
+        <div className="shrink-0 flex flex-col items-end gap-1">
+          <span className={`text-xs font-black px-2.5 py-1 rounded-full tabular-nums
+            ${intentos >= 3
+              ? 'bg-red-100 text-red-700'
+              : intentos === 2
+                ? 'bg-orange-100 text-orange-700'
+                : 'bg-yellow-100 text-yellow-700'
+            }`}>
+            {intentos} {intentos === 1 ? 'intento' : 'intentos'}
+          </span>
+          {intentos >= 3 && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold
+                             bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+              Riesgo alto · {dias}d
+            </span>
+          )}
+          {intentos === 2 && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold
+                             bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded-full">
+              <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+              Último intento · {dias}d
+            </span>
+          )}
+          {intentos < 2 && (
+            <span className="text-[10px] text-gray-400">{dias}d en novedad</span>
+          )}
+        </div>
+      </div>
+
+      {/* Cliente + teléfono */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-semibold text-gray-900 text-sm leading-tight truncate">
+            {nombre || '—'}
+          </p>
+          <p className="font-mono text-xs text-gray-500 mt-0.5">
+            {order.customer_phone ?? 'Sin teléfono'}
+          </p>
+        </div>
+        {order.cod_amount != null && (
+          <div className="shrink-0 flex items-center gap-1 text-gray-700">
+            <DollarSign className="w-3.5 h-3.5 text-gray-400" />
+            <span className="text-sm font-bold tabular-nums">
+              {order.cod_amount.toLocaleString('es-DO')}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Ubicación */}
+      {(ubicacion || order.customer_address) && (
+        <div className="flex items-start gap-1.5 text-gray-600">
+          <MapPin className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-xs truncate">{ubicacion || '—'}</p>
+            {order.city && order.province && order.city !== order.province && (
+              <p className="text-[10px] text-gray-400">{order.province}</p>
+            )}
+            {order.customer_address && (
+              <p className="text-[10px] text-gray-400 truncate">{order.customer_address}</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Producto */}
+      {order.product_summary && (
+        <div className="flex items-start gap-1.5">
+          <Package className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5" />
+          <p className="text-xs text-gray-600 line-clamp-2">{order.product_summary}</p>
+        </div>
+      )}
+
+      {/* Motivo/estado */}
+      <div className="flex flex-col gap-0.5">
+        {novedadSrc && (
+          <p className="text-[10px] text-gray-400 flex items-center gap-1">
+            <Clock className="w-2.5 h-2.5 shrink-0" />
+            {formatEventDate(novedadSrc)}
+          </p>
+        )}
+        {order.raw_status && (
+          <p className="text-xs text-gray-500 truncate" title={order.raw_status}>
+            {order.raw_status}
+          </p>
+        )}
+        {sug && (
+          <span className={`self-start text-[10px] font-semibold px-1.5 py-0.5 rounded-full leading-tight
+            ${sug.severity === 'critical'
+              ? 'bg-red-200 text-red-800'
+              : sug.severity === 'high'
+                ? 'bg-orange-200 text-orange-800'
+                : 'bg-amber-100 text-amber-700'
+            }`}>
+            {sug.text}
+          </span>
+        )}
+      </div>
+
+      {/* Botones de contacto — grandes para móvil */}
+      {hasPhone && (
+        <div className="grid grid-cols-2 gap-2">
+          {waUrl && (
+            <a href={waUrl} target="_blank" rel="noopener noreferrer"
+               className="flex items-center justify-center gap-2
+                          bg-green-500 hover:bg-green-600 active:bg-green-700
+                          text-white text-sm font-bold px-3 py-3 rounded-xl
+                          transition-colors shadow-sm">
+              <MessageCircle className="w-5 h-5" />WhatsApp
+            </a>
+          )}
+          {telUrl && (
+            <a href={telUrl}
+               className="flex items-center justify-center gap-2
+                          bg-blue-500 hover:bg-blue-600 active:bg-blue-700
+                          text-white text-sm font-bold px-3 py-3 rounded-xl
+                          transition-colors shadow-sm">
+              <Phone className="w-5 h-5" />Llamar
+            </a>
+          )}
+        </div>
+      )}
+
+      {/* Acciones + Ver detalle */}
+      <div className="space-y-2">
+        {noSalv ? (
+          <span className="inline-flex items-center gap-1.5 text-sm font-semibold
+                           px-3 py-2 rounded-xl bg-gray-100 text-gray-500 w-full justify-center">
+            <XCircle className="w-4 h-4" />No salvable
+          </span>
+        ) : isRecuperada ? (
+          <span className="inline-flex items-center gap-1.5 text-sm font-semibold
+                           px-3 py-2 rounded-xl bg-green-100 text-green-700 w-full justify-center">
+            <CheckCircle2 className="w-4 h-4" />Recuperado
+          </span>
+        ) : busy ? (
+          <div className="flex justify-center py-2">
+            <Spinner className="w-5 h-5 text-red-500" />
+          </div>
+        ) : accion ? (
+          <span className={`inline-flex items-center gap-1.5 text-sm font-semibold
+                           px-3 py-2 rounded-xl w-full justify-center
+                           ${ACTION_BADGE[accion]?.color ?? 'bg-gray-100 text-gray-600'}`}>
+            <CheckCircle2 className="w-4 h-4" />
+            {ACTION_BADGE[accion]?.label ?? accion}
+          </span>
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={onContacted}
+              className="flex items-center justify-center gap-1.5
+                         bg-slate-100 hover:bg-slate-200 active:bg-slate-300
+                         text-slate-700 text-sm font-medium px-3 py-2.5 rounded-xl
+                         transition-colors">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />Contactado
+            </button>
+            <button
+              onClick={onRescheduled}
+              className="flex items-center justify-center gap-1.5
+                         bg-indigo-100 hover:bg-indigo-200 active:bg-indigo-300
+                         text-indigo-700 text-sm font-medium px-3 py-2.5 rounded-xl
+                         transition-colors">
+              <CalendarClock className="w-4 h-4 shrink-0" />Reprogramar
+            </button>
+            <button
+              onClick={onNoAnswer}
+              className="flex items-center justify-center gap-1.5
+                         bg-amber-100 hover:bg-amber-200 active:bg-amber-300
+                         text-amber-700 text-sm font-medium px-3 py-2.5 rounded-xl
+                         transition-colors">
+              <PhoneMissed className="w-4 h-4 shrink-0" />No responde
+            </button>
+            <button
+              onClick={onNoSalvable}
+              className="flex items-center justify-center gap-1.5
+                         bg-red-100 hover:bg-red-200 active:bg-red-300
+                         text-red-700 text-sm font-medium px-3 py-2.5 rounded-xl
+                         transition-colors">
+              <XCircle className="w-4 h-4 shrink-0" />No salv.
+            </button>
+            <button
+              onClick={onRecuperada}
+              className="col-span-2 flex items-center justify-center gap-1.5
+                         bg-green-100 hover:bg-green-200 active:bg-green-300
+                         text-green-700 text-sm font-medium px-3 py-2.5 rounded-xl
+                         transition-colors">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />Recuperado
+            </button>
+          </div>
+        )}
+
+        <Link
+          href={`/orders/${order.id}`}
+          className="flex items-center justify-center gap-1.5 text-sm font-medium
+                     text-red-600 hover:text-red-800 border border-red-200 hover:border-red-400
+                     bg-white hover:bg-red-50 px-3 py-2.5 rounded-xl transition-colors w-full">
+          <ExternalLink className="w-4 h-4" />
+          Ver detalle
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+// ── Subcomponente: Card móvil de entregada ────────────────────────────────────
+
+function EntregadaCard({ order, delivered_at }: { order: Order; delivered_at: string }) {
+  const intentos  = order.delivery_attempts ?? 0
+  const ubicacion = order.city
+    || order.province
+    || (order.customer_address ? order.customer_address.slice(0, 30) : null)
+
+  return (
+    <div className="rounded-xl border border-green-200 bg-white p-4 space-y-3 shadow-sm">
+      {/* Orden + tracking */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          {order.order_number && (
+            <p className="text-xs font-bold text-gray-400 mb-0.5">{order.order_number}</p>
+          )}
+          <p className="font-mono text-sm font-semibold text-gray-900 truncate">
+            {order.tracking_number ?? '—'}
+          </p>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
+          <span className="text-xs text-green-700 font-semibold">
+            {formatEventDate(delivered_at)}
+          </span>
+        </div>
+      </div>
+
+      {/* Cliente */}
+      <div>
+        <p className="font-semibold text-gray-900 text-sm">{order.customer_name ?? '—'}</p>
+        <p className="font-mono text-xs text-gray-500 mt-0.5">{order.customer_phone ?? '—'}</p>
+      </div>
+
+      {/* Ubicación */}
+      {ubicacion && (
+        <div className="flex items-start gap-1.5 text-gray-600">
+          <MapPin className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-xs truncate">{ubicacion}</p>
+            {order.city && order.province && order.city !== order.province && (
+              <p className="text-[10px] text-gray-400">{order.province}</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Fecha completa */}
+      <p className="text-[10px] text-gray-400">
+        {new Date(delivered_at).toLocaleDateString('es-DO', {
+          day: '2-digit', month: 'short',
+          hour: '2-digit', minute: '2-digit',
+          timeZone: 'America/Santo_Domingo',
+        })}
+      </p>
+
+      {/* Intentos previos */}
+      <div className="flex items-center justify-between">
+        <span className={`inline-flex items-center gap-1 text-xs font-bold
+                         px-2.5 py-1 rounded-full tabular-nums
+          ${intentos >= 3
+            ? 'bg-red-100 text-red-700'
+            : intentos === 2
+              ? 'bg-orange-100 text-orange-700'
+              : intentos === 1
+                ? 'bg-yellow-100 text-yellow-700'
+                : 'bg-gray-100 text-gray-500'
+          }`}>
+          {intentos} intento{intentos !== 1 ? 's' : ''} previos
+        </span>
+        {order.last_attempt_reason && (
+          <p className="text-[10px] text-gray-400 truncate max-w-[120px]"
+             title={order.last_attempt_reason}>
+            {order.last_attempt_reason}
+          </p>
+        )}
+      </div>
+
+      <Link
+        href={`/orders/${order.id}`}
+        className="flex items-center justify-center gap-1.5 text-sm font-medium
+                   text-green-600 hover:text-green-800 border border-green-200 hover:border-green-400
+                   bg-white hover:bg-green-50 px-3 py-2.5 rounded-xl transition-colors w-full">
+        <ExternalLink className="w-4 h-4" />
+        Ver detalle
+      </Link>
+    </div>
+  )
+}
+
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function NovedadPage() {
   const trackingParam = useSearchParams().get('tracking')
   const rowRefs       = useRef<Map<string, HTMLTableRowElement>>(new Map())
 
-  // Todos los pedidos, incluidos no_action (para pestaña No salvables)
   const [allOrders, setAllOrders]     = useState<Order[]>([])
   const [perf, setPerf]               = useState<NoveltyPerfData | null>(null)
   const [loading, setLoading]         = useState(true)
@@ -229,7 +585,6 @@ export default function NovedadPage() {
     }
   }
 
-  // Marca no salvable → mueve a la pestaña "No salvables" en lugar de eliminarlo
   async function markNoSalvable(orderId: string) {
     setLoadingRow(prev => ({ ...prev, [orderId]: true }))
     try {
@@ -241,7 +596,6 @@ export default function NovedadPage() {
         }),
         patchTask(orderId, { status: 'completed', result: 'no_action' }),
       ])
-      // Actualizar estado local: el pedido pasa a la pestaña No salvables
       setAllOrders(prev =>
         prev.map(o => o.id === orderId ? { ...o, follow_up_result: 'no_action' } : o)
       )
@@ -269,7 +623,6 @@ export default function NovedadPage() {
       setAllOrders(prev =>
         prev.map(o => o.id === orderId ? { ...o, follow_up_result: 'recovered' } : o)
       )
-      // El tab "Entregadas" es EFI-driven — se actualiza en el siguiente fetchData
     } finally {
       setLoadingRow(prev => ({ ...prev, [orderId]: false }))
     }
@@ -298,7 +651,6 @@ export default function NovedadPage() {
     [activeOrders, actionMap],
   )
 
-  // Pedidos visibles según tab + buscador (recuperadas se maneja por separado)
   const displayedOrders = useMemo(() => {
     if (activeTab === 'recuperadas') return []
 
@@ -333,7 +685,6 @@ export default function NovedadPage() {
     recuperadas:    recuperadasDbOrders.length,
   }), [activeOrders, dosExactos, tresOmas, reprogramadosSesion, noSalvables, recuperadasDbOrders])
 
-  // Entregadas con filtro de fecha (hoy / ayer / todas)
   const displayedRecuperadas = useMemo(() => {
     let entries = [...recuperadasDbOrders]
     if (entregadasFilter) {
@@ -378,9 +729,9 @@ export default function NovedadPage() {
   const activeCount = activeTab === 'recuperadas' ? displayedRecuperadas.length : displayedOrders.length
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3 md:space-y-4">
 
-      {/* ── Banner ── */}
+      {/* ── Banner — compacto en móvil ── */}
       <div className="relative overflow-hidden rounded-2xl
                       bg-gradient-to-r from-red-500 to-rose-600
                       border-2 border-red-400 shadow-lg shadow-red-200/50">
@@ -388,50 +739,63 @@ export default function NovedadPage() {
           <div className="absolute -right-8 -top-8 w-40 h-40 rounded-full bg-white" />
           <div className="absolute -right-2 -bottom-10 w-24 h-24 rounded-full bg-white" />
         </div>
-        <div className="relative px-6 py-5 flex items-center justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center justify-center w-12 h-12 bg-white/20 rounded-xl">
-              <AlertCircle className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-black text-white tabular-nums">
-                  {loading ? '…' : activeOrders.length.toLocaleString()}
-                </h1>
-                {!loading && activeOrders.length > 0 && (
-                  <span className="flex items-center gap-1.5 bg-white/20 text-white
-                                   text-xs font-bold px-2.5 py-1 rounded-full animate-pulse">
-                    <span className="w-1.5 h-1.5 rounded-full bg-white" />
-                    PENDIENTES
-                  </span>
-                )}
+        <div className="relative px-4 py-3 md:px-6 md:py-5">
+          {/* Fila principal */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center justify-center w-9 h-9 md:w-12 md:h-12 bg-white/20 rounded-xl shrink-0">
+                <AlertCircle className="w-5 h-5 md:w-6 md:h-6 text-white" />
               </div>
-              <p className="text-white font-semibold">Gestión de novedades</p>
-              <p className="text-red-100 text-xs mt-0.5">
-                Coordina reentregas y recupera pedidos antes de que lleguen a devolución
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-xl md:text-2xl font-black text-white tabular-nums">
+                    {loading ? '…' : activeOrders.length.toLocaleString()}
+                  </h1>
+                  {!loading && activeOrders.length > 0 && (
+                    <span className="flex items-center gap-1.5 bg-white/20 text-white
+                                     text-[10px] md:text-xs font-bold px-2 py-0.5 rounded-full animate-pulse">
+                      <span className="w-1.5 h-1.5 rounded-full bg-white" />
+                      PENDIENTES
+                    </span>
+                  )}
+                </div>
+                <p className="text-white font-semibold text-sm md:text-base">Gestión de novedades</p>
+                {/* Subtítulo solo en desktop */}
+                <p className="hidden md:block text-red-100 text-xs mt-0.5">
+                  Coordina reentregas y recupera pedidos antes de que lleguen a devolución
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {/* Reprogramados — solo desktop */}
+              {repSesion > 0 && (
+                <span className="hidden md:block text-sm text-green-200 font-semibold">
+                  ✓ {repSesion} reprogramado{repSesion !== 1 ? 's' : ''} esta sesión
+                </span>
+              )}
+              <p className="text-red-100 text-[10px] md:text-xs hidden sm:block">
+                {lastRefresh.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' })}
               </p>
+              <button
+                onClick={fetchData}
+                disabled={loading}
+                className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 text-white
+                           text-xs md:text-sm font-medium px-3 py-2 rounded-lg transition-colors
+                           disabled:opacity-50 min-h-[36px]"
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">Refrescar</span>
+              </button>
             </div>
           </div>
 
-          <div className="flex items-center gap-4 shrink-0">
-            {repSesion > 0 && (
-              <span className="text-sm text-green-200 font-semibold">
-                ✓ {repSesion} reprogramado{repSesion !== 1 ? 's' : ''} esta sesión
-              </span>
-            )}
-            <p className="text-red-100 text-xs">
-              {lastRefresh.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' })}
+          {/* Reprogramados en móvil — fila separada */}
+          {repSesion > 0 && (
+            <p className="md:hidden text-xs text-green-200 font-semibold mt-2">
+              ✓ {repSesion} reprogramado{repSesion !== 1 ? 's' : ''} esta sesión
             </p>
-            <button
-              onClick={fetchData}
-              disabled={loading}
-              className="flex items-center gap-2 bg-white/20 hover:bg-white/30 text-white
-                         text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              Refrescar
-            </button>
-          </div>
+          )}
         </div>
       </div>
 
@@ -440,8 +804,8 @@ export default function NovedadPage() {
 
       {/* ── Métricas del agente hoy ── */}
       {perf && (
-        <div className="bg-white rounded-xl border border-gray-200 px-5 py-3.5 shadow-sm">
-          <div className="flex items-center gap-3 flex-wrap">
+        <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 md:px-5 md:py-3.5 shadow-sm">
+          <div className="flex items-center gap-2 md:gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 shrink-0">
               <TrendingUp className="w-3.5 h-3.5 text-gray-400" />
               <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Mi día</span>
@@ -483,8 +847,8 @@ export default function NovedadPage() {
       {/* ── Dashboard operativo ── */}
       <div className="space-y-2">
 
-        {/* Fila 1: tarjetas de acción clickeables */}
-        <div className="grid grid-cols-3 gap-3">
+        {/* Fila 1: tarjetas de acción — 2 columnas en móvil, 3 en desktop */}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-2 md:gap-3">
           {([
             {
               tab:   'all'      as Tab,
@@ -516,58 +880,60 @@ export default function NovedadPage() {
               active:'border-rose-400 bg-rose-100 text-rose-800 ring-2 ring-rose-300/50',
               hover: 'hover:bg-rose-100',
             },
-          ] as const).map(({ tab, count, label, sub, Icon, base, active, hover }) => (
+          ] as const).map(({ tab, count, label, sub, Icon, base, active, hover }, idx) => (
             <button
               key={tab}
               onClick={() => handleTabChange(tab)}
-              className={`flex items-center gap-3 p-4 rounded-xl border-2 text-left transition-all
+              // En móvil, "Pendientes" ocupa 2 columnas para destacarlo
+              className={`flex items-center gap-2 md:gap-3 p-3 md:p-4 rounded-xl border-2 text-left transition-all
+                ${idx === 0 ? 'col-span-2 md:col-span-1' : ''}
                 ${activeTab === tab ? active : `${base} ${hover}`}`}
             >
               <div className="flex-1 min-w-0">
-                <p className="text-3xl font-black tabular-nums leading-none">{count}</p>
-                <p className="text-sm font-bold mt-1">{label}</p>
-                <p className="text-xs opacity-60 mt-0.5 truncate">{sub}</p>
+                <p className="text-2xl md:text-3xl font-black tabular-nums leading-none">{count}</p>
+                <p className="text-xs md:text-sm font-bold mt-1">{label}</p>
+                <p className="text-[10px] md:text-xs opacity-60 mt-0.5 truncate">{sub}</p>
               </div>
-              <Icon className="w-7 h-7 opacity-25 shrink-0" />
+              <Icon className="w-6 h-6 md:w-7 md:h-7 opacity-25 shrink-0" />
             </button>
           ))}
         </div>
 
-        {/* Fila 2: métricas informativas */}
-        <div className="grid grid-cols-6 gap-2">
+        {/* Fila 2: métricas informativas — 3 columnas en móvil (scroll), 6 en desktop */}
+        <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
 
-          {/* Entregadas hoy — clickeable, navega al tab con filtro */}
+          {/* Entregadas hoy */}
           <button
             onClick={() => {
               setActiveTab('recuperadas')
               setEntregadasFilter(f => (activeTab === 'recuperadas' && f === 'hoy') ? null : 'hoy')
               setCurrentPage(1)
             }}
-            className={`flex flex-col items-center justify-center p-3 rounded-lg border transition-all
+            className={`flex flex-col items-center justify-center p-2.5 md:p-3 rounded-lg border transition-all
               ${activeTab === 'recuperadas' && entregadasFilter === 'hoy'
                 ? 'bg-green-100 border-green-400 ring-2 ring-green-300/50 text-green-800'
                 : 'bg-green-50 text-green-700 border-green-100 hover:bg-green-100 hover:border-green-300 cursor-pointer'
               }`}
           >
-            <p className="text-xl font-black tabular-nums leading-none">{perf?.recuperadasHoy ?? '…'}</p>
-            <p className="text-[10px] font-medium mt-1 text-center leading-tight opacity-80">Entregadas hoy</p>
+            <p className="text-lg md:text-xl font-black tabular-nums leading-none">{perf?.recuperadasHoy ?? '…'}</p>
+            <p className="text-[9px] md:text-[10px] font-medium mt-1 text-center leading-tight opacity-80">Entregadas hoy</p>
           </button>
 
-          {/* Entregadas ayer — clickeable */}
+          {/* Entregadas ayer */}
           <button
             onClick={() => {
               setActiveTab('recuperadas')
               setEntregadasFilter(f => (activeTab === 'recuperadas' && f === 'ayer') ? null : 'ayer')
               setCurrentPage(1)
             }}
-            className={`flex flex-col items-center justify-center p-3 rounded-lg border transition-all
+            className={`flex flex-col items-center justify-center p-2.5 md:p-3 rounded-lg border transition-all
               ${activeTab === 'recuperadas' && entregadasFilter === 'ayer'
                 ? 'bg-green-100 border-green-400 ring-2 ring-green-300/50 text-green-800'
                 : 'bg-green-50/60 text-green-600 border-green-100 hover:bg-green-100 hover:border-green-300 cursor-pointer'
               }`}
           >
-            <p className="text-xl font-black tabular-nums leading-none">{perf?.recuperadasAyer ?? '…'}</p>
-            <p className="text-[10px] font-medium mt-1 text-center leading-tight opacity-80">Entregadas ayer</p>
+            <p className="text-lg md:text-xl font-black tabular-nums leading-none">{perf?.recuperadasAyer ?? '…'}</p>
+            <p className="text-[9px] md:text-[10px] font-medium mt-1 text-center leading-tight opacity-80">Entregadas ayer</p>
           </button>
 
           {([
@@ -593,9 +959,9 @@ export default function NovedadPage() {
             },
           ] as const).map(({ label, count, cls }) => (
             <div key={label}
-                 className={`flex flex-col items-center justify-center p-3 rounded-lg border ${cls}`}>
-              <p className="text-xl font-black tabular-nums leading-none">{count}</p>
-              <p className="text-[10px] font-medium mt-1 text-center leading-tight opacity-80">{label}</p>
+                 className={`flex flex-col items-center justify-center p-2.5 md:p-3 rounded-lg border ${cls}`}>
+              <p className="text-lg md:text-xl font-black tabular-nums leading-none">{count}</p>
+              <p className="text-[9px] md:text-[10px] font-medium mt-1 text-center leading-tight opacity-80">{label}</p>
             </div>
           ))}
         </div>
@@ -611,35 +977,35 @@ export default function NovedadPage() {
         </div>
       )}
 
-      {/* ── Tabla + buscador + tabs ── */}
+      {/* ── Tabla/Cards + buscador + tabs ── */}
       {(loading || allOrders.length > 0 || recuperadasDbOrders.length > 0) && (
         <div className="bg-white rounded-xl border-2 border-red-200 overflow-hidden shadow-sm">
 
           {/* Info header */}
-          <div className="px-5 py-3 bg-red-50 border-b border-red-200 flex items-center gap-2">
+          <div className="px-4 py-2.5 md:px-5 md:py-3 bg-red-50 border-b border-red-200 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
-            <p className="text-sm font-semibold text-red-800">
+            <p className="text-xs md:text-sm font-semibold text-red-800">
               Prioriza contactar primero los pedidos con 2 o más intentos
             </p>
           </div>
 
           {/* Buscador */}
-          <div className="px-4 py-3 border-b border-red-100 bg-white">
-            <div className="relative max-w-lg">
+          <div className="px-3 py-2.5 md:px-4 md:py-3 border-b border-red-100 bg-white">
+            <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Buscar por guía, nombre, teléfono, ciudad o motivo…"
-                className="w-full pl-9 pr-4 py-2 text-sm border border-gray-200 rounded-lg
+                placeholder="Buscar guía, nombre, teléfono, ciudad…"
+                className="w-full pl-9 pr-4 py-2.5 md:py-2 text-sm border border-gray-200 rounded-lg
                            focus:outline-none focus:ring-2 focus:ring-red-300 focus:border-red-300
                            placeholder:text-gray-400"
               />
             </div>
           </div>
 
-          {/* Tabs de filtro */}
+          {/* Tabs de filtro — touch-friendly */}
           {!loading && (
             <div className="flex border-b border-red-100 overflow-x-auto">
               {TAB_META.map(({ tab, label }) => {
@@ -651,8 +1017,9 @@ export default function NovedadPage() {
                   <button
                     key={tab}
                     onClick={() => handleTabChange(tab)}
-                    className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold
-                                border-b-2 transition-colors whitespace-nowrap shrink-0
+                    className={`flex items-center gap-1.5 px-3 md:px-4 py-3 md:py-2.5
+                                text-xs font-semibold border-b-2 transition-colors
+                                whitespace-nowrap shrink-0 min-h-[44px]
                       ${isActive
                         ? 'border-red-500 text-red-700 bg-red-50/60'
                         : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -701,9 +1068,49 @@ export default function NovedadPage() {
             </div>
           )}
 
-          {/* Tabla — novedades activas */}
+          {/* ── MOBILE: Cards novedades activas (< md) ── */}
           {!loading && activeTab !== 'recuperadas' && pagedOrders.length > 0 && (
-            <table className="w-full text-sm">
+            <div className="md:hidden divide-y divide-red-50">
+              <div className="p-3 space-y-3">
+                {pagedOrders.map(order => {
+                  const nombre    = order.customer_name ?? ''
+                  const intentos  = order.delivery_attempts ?? 0
+                  const accion    = actionMap[order.id]
+                  const busy      = !!loadingRow[order.id]
+
+                  const lastRawFecha = order.tracking_novedades?.at(-1)?.fecha ?? null
+                  const novedadSrc   = order.last_novedad_at ?? (lastRawFecha ? parseEFIDate(lastRawFecha) : null)
+
+                  const dias = daysInNovedad(order)
+                  const sug  = intentos === 2 ? supervisorSuggestion(dias) : null
+
+                  const isHighlighted = !!(trackingParam && order.tracking_number === trackingParam)
+
+                  return (
+                    <NovedadCard
+                      key={order.id}
+                      order={order}
+                      accion={accion}
+                      busy={busy}
+                      novedadSrc={novedadSrc}
+                      dias={dias}
+                      sug={sug}
+                      onContacted={() => postAction(order.id, 'contacted', 'contacted')}
+                      onRescheduled={() => postAction(order.id, 'rescheduled', 'rescheduled')}
+                      onNoAnswer={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
+                      onNoSalvable={() => markNoSalvable(order.id)}
+                      onRecuperada={() => markRecuperada(order.id)}
+                      isHighlighted={isHighlighted}
+                    />
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ── DESKTOP: Tabla novedades activas (≥ md) ── */}
+          {!loading && activeTab !== 'recuperadas' && pagedOrders.length > 0 && (
+            <table className="hidden md:table w-full text-sm">
               <thead className="bg-red-50/60 border-b border-red-100">
                 <tr>
                   {['Guía', 'Cliente', 'Ciudad', 'Intentos', 'Motivo', 'Contactar', 'Acción', ''].map(h => (
@@ -777,7 +1184,7 @@ export default function NovedadPage() {
                         </p>
                       </td>
 
-                      {/* Ciudad — fallback a province o dirección corta */}
+                      {/* Ciudad */}
                       <td className="px-3 py-2.5">
                         {(() => {
                           const ubicacion = order.city
@@ -973,9 +1380,18 @@ export default function NovedadPage() {
             </table>
           )}
 
-          {/* Tabla — ✓ Entregadas */}
+          {/* ── MOBILE: Cards entregadas (< md) ── */}
           {!loading && activeTab === 'recuperadas' && pagedRecuperadas.length > 0 && (
-            <table className="w-full text-sm">
+            <div className="md:hidden p-3 space-y-3">
+              {pagedRecuperadas.map(({ order, delivered_at }) => (
+                <EntregadaCard key={order.id} order={order} delivered_at={delivered_at} />
+              ))}
+            </div>
+          )}
+
+          {/* ── DESKTOP: Tabla ✓ Entregadas (≥ md) ── */}
+          {!loading && activeTab === 'recuperadas' && pagedRecuperadas.length > 0 && (
+            <table className="hidden md:table w-full text-sm">
               <thead className="bg-green-50/60 border-b border-green-100">
                 <tr>
                   {['Guía', 'Cliente', 'Teléfono', 'Ubicación', 'Entregado', 'Intentos previos', ''].map(h => (
@@ -996,7 +1412,6 @@ export default function NovedadPage() {
                   return (
                     <tr key={order.id} className="hover:bg-green-50/30 transition-colors">
 
-                      {/* Guía */}
                       <td className="px-3 py-2.5">
                         <p className="font-mono text-xs font-semibold text-gray-900 whitespace-nowrap">
                           {order.tracking_number ?? '—'}
@@ -1008,21 +1423,18 @@ export default function NovedadPage() {
                         )}
                       </td>
 
-                      {/* Cliente */}
                       <td className="px-3 py-2.5">
                         <p className="font-medium text-gray-900 text-sm leading-tight truncate max-w-[160px]">
                           {order.customer_name ?? '—'}
                         </p>
                       </td>
 
-                      {/* Teléfono */}
                       <td className="px-3 py-2.5">
                         <p className="font-mono text-xs text-gray-600">
                           {order.customer_phone ?? '—'}
                         </p>
                       </td>
 
-                      {/* Ubicación */}
                       <td className="px-3 py-2.5">
                         <div className="flex items-start gap-1 text-gray-600">
                           <MapPin className="w-3 h-3 text-gray-400 shrink-0 mt-0.5" />
@@ -1035,7 +1447,6 @@ export default function NovedadPage() {
                         )}
                       </td>
 
-                      {/* Entregado */}
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1">
                           <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
@@ -1052,7 +1463,6 @@ export default function NovedadPage() {
                         </p>
                       </td>
 
-                      {/* Intentos previos */}
                       <td className="px-3 py-2.5">
                         <span className={`inline-flex items-center gap-1 text-xs font-bold
                                          px-2 py-0.5 rounded-full tabular-nums
@@ -1074,7 +1484,6 @@ export default function NovedadPage() {
                         )}
                       </td>
 
-                      {/* Ver detalle */}
                       <td className="px-3 py-2.5">
                         <Link
                           href={`/orders/${order.id}`}
@@ -1094,31 +1503,35 @@ export default function NovedadPage() {
 
           {/* Paginación */}
           {!loading && totalPages > 1 && (
-            <div className="flex items-center justify-between px-5 py-3 border-t border-red-100 bg-red-50/40">
+            <div className="flex items-center justify-between px-4 py-3 md:px-5 border-t border-red-100 bg-red-50/40">
               <button
                 onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                 disabled={currentPage === 1}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg
                            border border-red-200 text-red-700 bg-white hover:bg-red-50
-                           disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                           disabled:opacity-40 disabled:cursor-not-allowed transition-colors
+                           min-h-[40px]"
               >
                 <ChevronLeft className="w-3.5 h-3.5" />
                 Anterior
               </button>
-              <span className="text-xs text-gray-500 tabular-nums">
-                Página <span className="font-bold text-gray-800">{currentPage}</span> de{' '}
+              <span className="text-xs text-gray-500 tabular-nums text-center">
+                <span className="font-bold text-gray-800">{currentPage}</span>/{' '}
                 <span className="font-bold text-gray-800">{totalPages}</span>
-                {' '}·{' '}
-                <span className="text-gray-400">
-                  {activeCount} resultado{activeCount !== 1 ? 's' : ''}
+                <span className="hidden sm:inline">
+                  {' '}·{' '}
+                  <span className="text-gray-400">
+                    {activeCount} resultado{activeCount !== 1 ? 's' : ''}
+                  </span>
                 </span>
               </span>
               <button
                 onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                 disabled={currentPage === totalPages}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg
                            border border-red-200 text-red-700 bg-white hover:bg-red-50
-                           disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                           disabled:opacity-40 disabled:cursor-not-allowed transition-colors
+                           min-h-[40px]"
               >
                 Siguiente
                 <ChevronRight className="w-3.5 h-3.5" />
@@ -1140,12 +1553,12 @@ export default function NovedadPage() {
       )}
 
       {/* ── Flujo recomendado ── */}
-      <div className="bg-gray-50 border border-gray-100 rounded-xl px-5 py-4">
+      <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3 md:px-5 md:py-4">
         <p className="text-xs text-gray-500 leading-relaxed">
           <strong className="text-gray-700">Flujo recomendado:</strong>{' '}
           Envía WhatsApp o llama para coordinar la nueva entrega →
-          Registra "Reprogramar" cuando el cliente confirme una nueva fecha →
-          Si no responde en 2 intentos, marca como "No salv." para gestionar la devolución.
+          Registra &quot;Reprogramar&quot; cuando el cliente confirme una nueva fecha →
+          Si no responde en 2 intentos, marca como &quot;No salv.&quot; para gestionar la devolución.
         </p>
       </div>
     </div>
