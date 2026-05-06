@@ -2,7 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 
 // Filtros base para un pedido pendiente de confirmación.
-// tracking_number IS NULL es el criterio crítico: si ya tiene guía, salió de la cola.
+// tracking_number IS NULL es el criterio crítico: si ya tiene guía, pasó a /despachados.
 const ACTIVE_PENDING = {
   source:              'shopify_webhook',
   confirmation_status: 'pending',
@@ -39,8 +39,6 @@ export async function GET() {
       { count: inalcanzables },
       { count: noDesean },
       { count: sinCobertura },
-      { count: confirmadosSinGuia },
-      { count: despachados },
     ] = await Promise.all([
 
       // Nunca contactados
@@ -52,7 +50,7 @@ export async function GET() {
       // Pendientes con más de 48h de antigüedad
       pendingBase().lt('created_at', cutoff48h),
 
-      // Confirmados hoy (métrica histórica)
+      // Confirmados hoy (métrica histórica, solo pedidos Shopify)
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
@@ -60,7 +58,7 @@ export async function GET() {
         .eq('confirmation_status', 'confirmed')
         .gte('customer_confirmed_at', todayIso),
 
-      // Contactados hoy (cualquier intento hoy)
+      // Contactados hoy (cualquier intento hoy, solo pedidos Shopify)
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
@@ -93,40 +91,18 @@ export async function GET() {
         .eq('confirmation_status', 'no_coverage')
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned'),
-
-      // B) Confirmados sin guía: confirmed + tracking_number IS NULL
-      supabase
-        .from('orders')
-        .select('*', { count: 'exact', head: true })
-        .eq('source', 'shopify_webhook')
-        .eq('confirmation_status', 'confirmed')
-        .is('tracking_number', null)
-        .neq('normalized_status', 'delivered')
-        .neq('normalized_status', 'returned'),
-
-      // C) Despachados: con tracking, no en estado final
-      supabase
-        .from('orders')
-        .select('*', { count: 'exact', head: true })
-        .eq('source', 'shopify_webhook')
-        .not('tracking_number', 'is', null)
-        .neq('normalized_status', 'delivered')
-        .neq('normalized_status', 'returned')
-        .neq('normalized_status', 'cancelled'),
     ])
 
     return NextResponse.json({
-      nuevos:             nuevos             ?? 0,
-      reintentar:         reintentar         ?? 0,
-      atrasados:          atrasados          ?? 0,
-      confirmadosHoy:     confirmadosHoy     ?? 0,
-      contactadosHoy:     contactadosHoy     ?? 0,
-      sinRespuesta:       reintentar         ?? 0,
-      inalcanzables:      inalcanzables      ?? 0,
-      noDesean:           noDesean           ?? 0,
-      sinCobertura:       sinCobertura       ?? 0,
-      confirmadosSinGuia: confirmadosSinGuia ?? 0,
-      despachados:        despachados        ?? 0,
+      nuevos:         nuevos         ?? 0,
+      reintentar:     reintentar     ?? 0,
+      atrasados:      atrasados      ?? 0,
+      confirmadosHoy: confirmadosHoy ?? 0,
+      contactadosHoy: contactadosHoy ?? 0,
+      sinRespuesta:   reintentar     ?? 0,
+      inalcanzables:  inalcanzables  ?? 0,
+      noDesean:       noDesean       ?? 0,
+      sinCobertura:   sinCobertura   ?? 0,
     })
   } catch (err) {
     console.error('[GET /api/confirmacion/stats]', err)

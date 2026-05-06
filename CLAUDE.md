@@ -13,8 +13,9 @@
 | Webhook Shopify `orders/create` | `/api/webhooks/shopify` | Activo — requiere ngrok en dev |
 | Cron de tracking EFI | `scripts/cron-tracking.mjs` → `/api/tracking/auto` | Cada 5 min, procesa in_transit / en_reparto / novedad / unknown |
 | Dashboard admin | `/dashboard` | KPIs + cola de trabajo + alertas SLA + tarjetas confirmados hoy/ayer |
-| Confirmación | `/confirmacion` | Stats en tiempo real, tabs, orden inteligente (solo `source='shopify_webhook'`) |
-| Confirmados | `/confirmados` | Pedidos con `confirmation_status='confirmed'`, filtros fecha, botón "Listo para despacho" |
+| Confirmación | `/confirmacion` | Solo pedidos `pending + tracking IS NULL`. Stats, tabs, orden inteligente (`source='shopify_webhook'`) |
+| Confirmados | `/confirmados` | Pedidos `confirmed + tracking IS NULL`. Filtros fecha, botón "Listo para despacho" |
+| Despachados | `/despachados` | Pedidos `tracking IS NOT NULL + no finalizados`. Vista monitoreo, refresh 5 min, mini KPI por estado |
 | Novedades | `/novedad` | Tabla acciones, métricas agente, filtros por intentos, mini KPI pipeline, tab Recuperadas |
 | Reparto | `/reparto` | Tabla criticidad por tiempo, acciones, métricas, mini KPI pipeline, tab Entregados DB-backed |
 | Tránsito | `/transito` | Pedidos `in_transit` sin movimiento, criticidad por horas, refresh 5 min |
@@ -47,7 +48,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
-| **P0 Paso 3: /confirmacion separada en 3 buckets (pendientes / sin guía / despachados)** | 2026-05-06 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx` |
+| **P0 Paso 3: /confirmacion limpia (solo pending+sin tracking), /confirmados ajustado, /despachados creado** | 2026-05-06 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `api/confirmados/route.ts`, `confirmados/page.tsx`, `api/despachados/route.ts`, `despachados/page.tsx`, `sidebar.tsx` |
 | **recover-shopify-orders: sincroniza tracking_number desde Shopify fulfillments** | 2026-05-06 | `src/app/api/admin/recover-shopify-orders/route.ts` |
 | **Fix cron: procesa todos los pedidos con tracking_number (no solo ACTIVE_STATUSES)** | 2026-05-05 | `src/app/api/tracking/auto/route.ts` |
 | **Fix parser: "Para entrega hoy" / "Salió para entrega" → en_reparto** | 2026-05-05 | `src/lib/tracking/efi-parser.ts` |
@@ -57,40 +58,50 @@
 | **Botones reorganizados en 2 filas** | 2026-05-05 | `confirmacion/page.tsx` |
 | **Toast + remoción de fila en /confirmacion** | 2026-05-05 | `confirmacion/page.tsx` |
 
-**P0 Paso 3 — /confirmacion separada en 3 buckets (2026-05-06):**
+**P0 Paso 3 — Separación en 3 módulos distintos (2026-05-06):**
 
-**Problema resuelto:** El tab "Nuevos" mostraba pedidos con `tracking_number` ya asignado (ya despachados), confundiendo al agente con ítems que ya están en proceso logístico.
+**Problema resuelto:** El tab "Nuevos" de /confirmacion mostraba pedidos con `tracking_number` ya asignado. En lugar de agregar tabs dentro de /confirmacion, se crearon módulos separados para mantener cada pantalla enfocada.
 
-**3 buckets de pedidos:**
+**3 módulos distintos:**
 
-| Bucket | Filtro DB | Acciones disponibles |
-|---|---|---|
-| **Pendientes** (Todos/Nuevos/Reintentar/Atrasados) | `confirmation_status='pending' AND tracking_number IS NULL AND normalized_status NOT IN (delivered, returned)` | Confirmó / No contesta / Sin cobertura / Canceló |
-| **Confirmados sin guía** (tab `✓ Sin guía`) | `confirmation_status='confirmed' AND tracking_number IS NULL AND normalized_status NOT IN (delivered, returned)` | Solo Ver detalle |
-| **Despachados** (tab `🚚 Despachados`) | `tracking_number IS NOT NULL AND normalized_status NOT IN (delivered, returned, cancelled)` | WA / Llamar / Ver detalle |
+| Módulo | URL | Filtro DB | Acciones |
+|---|---|---|---|
+| **Confirmación** | `/confirmacion` | `source='shopify_webhook' AND confirmation_status='pending' AND tracking_number IS NULL AND normalized_status NOT IN (delivered, returned)` | Confirmó / No contesta / Sin cobertura / Canceló |
+| **Confirmados** | `/confirmados` | `source='shopify_webhook' AND confirmation_status='confirmed' AND tracking_number IS NULL AND normalized_status NOT IN (delivered, returned)` | "Listo para despacho" (UI local) |
+| **Despachados** | `/despachados` | `source='shopify_webhook' AND tracking_number IS NOT NULL AND normalized_status NOT IN (delivered, returned, cancelled)` | WA / Llamar / Ver detalle (monitoreo) |
 
-**Lógica de la API (`GET /api/confirmacion`):**
-- 3 queries paralelas con `Promise.all`
-- Respuesta: `{ data, pendientes, confirmadosSinGuia, despachados, total }` — `data` se mantiene por backward compat
-- `total` = count de pendientes (workload del agente)
+**`/api/confirmacion/route.ts`:**
+- Ahora incluye `.is('tracking_number', null)` — pedidos con guía ya asignada NO aparecen en la cola de confirmación
 
-**Lógica de stats (`GET /api/confirmacion/stats`):**
-- `pendingBase()` ahora incluye `.is('tracking_number', null)` — los contadores de Nuevos/Reintentar/Atrasados solo cuentan pedidos sin guía
-- Nuevos contadores: `confirmadosSinGuia` y `despachados`
+**`/api/confirmacion/stats/route.ts`:**
+- `pendingBase()` incluye `.is('tracking_number', null)` — todos los contadores (Nuevos/Reintentar/Atrasados) excluyen pedidos despachados
+- `fetchData` tiene `try/finally` con `setLoading(false)` (fix de CLAUDE.md rule)
 
-**Lógica del page (`/confirmacion/page.tsx`):**
-- `orders` state = pendientes (sin tracking)
-- `confirmadosSinGuia` state = nuevo
-- `despachados` state = nuevo
-- `activeSource` memo: devuelve el array correcto según `activeTab` → unifica `filteredOrders` y `pagedOrders` para todos los tabs
-- `isPendingView / isDespachadosView / isConfirmSinGuiaView`: controlan qué tabla (headers + rows) se renderiza
-- Dashboard: Fila 1 (3 cards grandes: Nuevos/Reintentar/Atrasados) + Fila 2 (2 cards medianas: Confirmados sin guía / Despachados) + Fila 3 (6 métricas informativas)
-- `fetchData` ahora tiene `try/finally` (faltaba)
-- `STATUS_LABELS` y `STATUS_COLORS` de `@/types` usados en tabla Despachados
+**`/api/confirmados/route.ts`:**
+- Añadido `.is('tracking_number', null)` al query principal y a los stats `confirmados_hoy/ayer`
+- Stats ahora cuentan "confirmados sin guía hoy/ayer" (no "total confirmados")
 
-**Comportamiento automático:** Cuando `recover-shopify-orders` o el fulfillment webhook asigna un `tracking_number`, en el próximo refresh (cada 3 min) el pedido sale de Pendientes/Sin guía y aparece en Despachados automáticamente.
+**`/confirmados/page.tsx`:**
+- Textos actualizados: "Confirmados sin guía · Pendientes de asignar tracking"
+- Cards: "Sin guía hoy" / "Sin guía ayer"
 
-**Buscador:** Funciona sobre los 3 buckets (el `activeSource` memo une el array correcto antes del filtro).
+**`/api/despachados/route.ts` (NUEVO):**
+- Query: `tracking IS NOT NULL AND normalized_status NOT IN (delivered, returned, cancelled)`
+- Respuesta: `{ data, total, byStatus }` — `byStatus` es un Record<string, number> con conteo por normalized_status
+
+**`/despachados/page.tsx` (NUEVO):**
+- Banner azul con total "EN RUTA"
+- Mini KPI por estado (in_transit, en_reparto, novedad, unknown, pending) — solo muestra los presentes
+- Buscador por nombre, teléfono, #pedido, guía, ciudad
+- Tabla: Cliente, Guía, Ciudad/Producto, Monto, Estado logístico (con raw_status debajo), Último movimiento (relativo), WA/Llamar, Ver detalle
+- Auto-refresh cada 5 min (mismo ciclo que el cron de tracking)
+- Paginación PAGE_SIZE=50
+
+**`/sidebar.tsx`:**
+- `/despachados` añadido al nav de `admin` entre `/confirmados` y `/orders`
+- Icono: `Truck`, alert: `null`
+
+**Comportamiento automático:** Si `recover-shopify-orders` o un futuro webhook de fulfillment asigna `tracking_number`, en el próximo refresh el pedido desaparece de `/confirmacion` y `/confirmados` y aparece en `/despachados`.
 
 **Buscador /confirmacion:** `searchQuery` state filtra `activeSource` sobre `customer_name`, `customer_phone`, `order_number`. Resultado en `filteredOrders`. Paginación y contador de resultados usan `filteredOrders`. Reset al cambiar tab o búsqueda.
 
@@ -260,7 +271,7 @@ order_id: FK a orders
 | `agent` | Mis tareas, Pedidos |
 | `viewer` | Pedidos (solo lectura) |
 
-**Regla de visibilidad de /confirmados:** Solo `admin`. No visible para confirmation_agent, delivery_agent, ni ningún otro rol. La ruta existe y es accesible vía URL directa, pero no aparece en el nav.
+**Regla de visibilidad de /confirmados y /despachados:** Solo `admin`. No visibles para confirmation_agent, delivery_agent, ni ningún otro rol. Las rutas existen y son accesibles vía URL directa, pero no aparecen en el nav de otros roles.
 
 ### Roles y visibilidad de tareas (`/my-tasks`)
 
@@ -491,7 +502,7 @@ Cron no la procesa → sigue 'pending' para siempre en nuestra app
 **Plan de implementación:**
 1. **Paso 1 (retroactivo) ✅ IMPLEMENTADO:** `recover-shopify-orders` ahora incluye `fulfillments` en los `fields` de Shopify API. Extrae `order.fulfillments.find(f => f.tracking_number).tracking_number`. En Rama A (orden existente): actualiza si `tracking_number IS NULL` en DB (nunca sobreescribe). En Rama B (orden nueva): inserta con el tracking_number. Respuesta incluye `updated_tracking` como nuevo contador. Usa `normalized_status='pending'`  — el cron (con Fix #2) actualizará el estado real desde Effi en el siguiente ciclo.
 2. **Paso 2 (tiempo real, pendiente):** Crear `/api/webhooks/shopify/fulfillments/route.ts` — recibe `fulfillments/create`, busca orden por `shopify_order_id = payload.order_id`, actualiza `tracking_number` y `normalized_status='in_transit'` si estaba `pending`
-3. **Paso 3 (UI) ✅ IMPLEMENTADO (2026-05-06):** `/confirmacion` separada en 3 buckets: Pendientes (sin tracking), Confirmados sin guía, Despachados (con tracking). Tabs `✓ Sin guía` y `🚚 Despachados` añadidos. Stats actualizadas con `.is('tracking_number', null)` en pendingBase + nuevos contadores. Ver detalle completo en "Módulos activos — actualizaciones recientes".
+3. **Paso 3 (UI) ✅ IMPLEMENTADO (2026-05-06):** `/confirmacion` limpiada (solo `pending + tracking IS NULL`). `/confirmados` ajustado a `confirmed + tracking IS NULL`. `/despachados` creado como módulo independiente. Sidebar admin actualizado. Ver detalle completo en "Módulos activos — actualizaciones recientes".
 4. **Paso 4 (dashboard, pendiente):** Agregar métricas `confirmed_sin_guia` y `confirmadas_despachadas` en el dashboard admin principal (`/dashboard`)
 
 **Queries diagnóstico:**

@@ -31,6 +31,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/transito',     label: 'Tránsito',       icon: Box,             alert: null     },
     { href: '/confirmacion', label: 'Confirmación',   icon: ClipboardList,   alert: 'indigo' },
     { href: '/confirmados',  label: 'Confirmados',    icon: CheckCircle2,    alert: 'green'  },
+    { href: '/despachados',  label: 'Despachados',    icon: Truck,           alert: null     },
     { href: '/orders',       label: 'Pedidos',        icon: Package,         alert: null     },
     { href: '/imports',      label: 'Importar',       icon: Upload,          alert: null     },
     { href: '/performance',  label: 'Rendimiento',    icon: BarChart2,       alert: null     },

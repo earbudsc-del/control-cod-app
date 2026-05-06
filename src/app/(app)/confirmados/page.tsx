@@ -169,9 +169,9 @@ export default function ConfirmadosPage() {
                   </span>
                 )}
               </div>
-              <p className="text-white font-semibold">Pedidos confirmados</p>
+              <p className="text-white font-semibold">Confirmados sin guía</p>
               <p className="text-green-100 text-xs mt-0.5">
-                Listos para asignar número de guía y despachar
+                Pendientes de asignar número de tracking · Listos para despachar
               </p>
             </div>
           </div>
@@ -204,7 +204,7 @@ export default function ConfirmadosPage() {
         >
           <div className="flex-1 min-w-0">
             <p className="text-3xl font-black tabular-nums leading-none">{stats.confirmados_hoy}</p>
-            <p className="text-sm font-bold mt-1">Confirmados hoy</p>
+            <p className="text-sm font-bold mt-1">Sin guía hoy</p>
           </div>
           <CheckCircle2 className="w-7 h-7 opacity-25 shrink-0" />
         </button>
@@ -218,7 +218,7 @@ export default function ConfirmadosPage() {
         >
           <div className="flex-1 min-w-0">
             <p className="text-3xl font-black tabular-nums leading-none">{stats.confirmados_ayer}</p>
-            <p className="text-sm font-bold mt-1">Confirmados ayer</p>
+            <p className="text-sm font-bold mt-1">Sin guía ayer</p>
           </div>
           <Package className="w-7 h-7 opacity-25 shrink-0" />
         </button>
@@ -385,7 +385,7 @@ export default function ConfirmadosPage() {
             <p className="text-gray-500 font-medium">
               {searchQuery
                 ? `Sin resultados para "${searchQuery}"`
-                : 'No hay pedidos confirmados en este período'}
+                : 'No hay pedidos confirmados sin guía en este período'}
             </p>
             {activeFilter !== 'todos' && (
               <button

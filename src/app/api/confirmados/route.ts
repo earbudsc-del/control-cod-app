@@ -29,23 +29,30 @@ export async function GET(request: Request) {
     const hoy  = rdDayBounds(0)
     const ayer = rdDayBounds(1)
 
+    // Stats: confirmados sin guía por día (útil para saber cuántos quedaron pendientes)
     const [statsHoyRes, statsAyerRes] = await Promise.all([
       supabase.from('orders')
         .select('id', { count: 'exact', head: true })
         .eq('confirmation_status', 'confirmed')
+        .is('tracking_number', null)
         .gte('last_confirmation_attempt', hoy.start)
         .lte('last_confirmation_attempt', hoy.end),
       supabase.from('orders')
         .select('id', { count: 'exact', head: true })
         .eq('confirmation_status', 'confirmed')
+        .is('tracking_number', null)
         .gte('last_confirmation_attempt', ayer.start)
         .lte('last_confirmation_attempt', ayer.end),
     ])
 
+    // Pedidos confirmados SIN guía asignada todavía
     let query = supabase
       .from('orders')
       .select('id, order_number, customer_name, customer_phone, customer_address, city, product_summary, cod_amount, confirmation_method, last_confirmation_attempt, created_at, duplicate_alert, duplicate_of_order_id, duplicate_reason')
       .eq('confirmation_status', 'confirmed')
+      .is('tracking_number', null)
+      .neq('normalized_status', 'delivered')
+      .neq('normalized_status', 'returned')
       .order('last_confirmation_attempt', { ascending: false, nullsFirst: false })
       .limit(200)
 
