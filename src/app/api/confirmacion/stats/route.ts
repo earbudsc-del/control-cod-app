@@ -39,6 +39,9 @@ export async function GET() {
       { count: inalcanzables },
       { count: noDesean },
       { count: sinCobertura },
+      { count: pendingTotal },
+      { count: confirmadosSinGuia },
+      { count: despachados },
     ] = await Promise.all([
 
       // Nunca contactados
@@ -91,18 +94,44 @@ export async function GET() {
         .eq('confirmation_status', 'no_coverage')
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned'),
+
+      // Total cola de confirmación (para pipeline nav)
+      pendingBase(),
+
+      // Confirmados sin guía (para pipeline nav)
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('source', 'shopify_webhook')
+        .eq('confirmation_status', 'confirmed')
+        .is('tracking_number', null)
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned'),
+
+      // Despachados con guía activa (para pipeline nav)
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('source', 'shopify_webhook')
+        .not('tracking_number', 'is', null)
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned')
+        .neq('normalized_status', 'cancelled'),
     ])
 
     return NextResponse.json({
-      nuevos:         nuevos         ?? 0,
-      reintentar:     reintentar     ?? 0,
-      atrasados:      atrasados      ?? 0,
-      confirmadosHoy: confirmadosHoy ?? 0,
-      contactadosHoy: contactadosHoy ?? 0,
-      sinRespuesta:   reintentar     ?? 0,
-      inalcanzables:  inalcanzables  ?? 0,
-      noDesean:       noDesean       ?? 0,
-      sinCobertura:   sinCobertura   ?? 0,
+      nuevos:             nuevos             ?? 0,
+      reintentar:         reintentar         ?? 0,
+      atrasados:          atrasados          ?? 0,
+      confirmadosHoy:     confirmadosHoy     ?? 0,
+      contactadosHoy:     contactadosHoy     ?? 0,
+      sinRespuesta:       reintentar         ?? 0,
+      inalcanzables:      inalcanzables      ?? 0,
+      noDesean:           noDesean           ?? 0,
+      sinCobertura:       sinCobertura       ?? 0,
+      pendingTotal:       pendingTotal       ?? 0,
+      confirmadosSinGuia: confirmadosSinGuia ?? 0,
+      despachados:        despachados        ?? 0,
     })
   } catch (err) {
     console.error('[GET /api/confirmacion/stats]', err)

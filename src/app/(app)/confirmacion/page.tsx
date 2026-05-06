@@ -10,7 +10,7 @@ import {
   ClipboardList, RefreshCw, MessageCircle, Phone,
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, RotateCcw, Clock, Inbox, TrendingUp,
-  AlertTriangle, MapPinOff, ChevronLeft, ChevronRight, Search,
+  AlertTriangle, MapPinOff, ChevronLeft, ChevronRight, Search, Truck,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage } from '@/lib/alert-helpers'
@@ -22,15 +22,18 @@ type Tab           = 'all' | 'nuevos' | 'reintentar' | 'atrasados' | 'duplicados
 type ContactMethod = 'call' | 'whatsapp' | 'other'
 
 interface ConfirmStats {
-  nuevos:         number
-  reintentar:     number
-  atrasados:      number
-  confirmadosHoy: number
-  contactadosHoy: number
-  sinRespuesta:   number
-  inalcanzables:  number
-  noDesean:       number
-  sinCobertura:   number
+  nuevos:             number
+  reintentar:         number
+  atrasados:          number
+  confirmadosHoy:     number
+  contactadosHoy:     number
+  sinRespuesta:       number
+  inalcanzables:      number
+  noDesean:           number
+  sinCobertura:       number
+  pendingTotal:       number
+  confirmadosSinGuia: number
+  despachados:        number
 }
 
 interface ConfirmResult {
@@ -445,6 +448,56 @@ export default function ConfirmacionPage() {
           </div>
         </div>
       )}
+
+      {/* ── Pipeline de navegación ── */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="flex items-stretch divide-x divide-gray-100">
+
+          {/* Paso 1 — ACTIVO */}
+          <div className="flex-1 flex items-center gap-3 px-5 py-3.5 bg-indigo-600">
+            <ClipboardList className="w-5 h-5 text-indigo-200 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold text-indigo-200 uppercase tracking-wider">Paso 1</p>
+              <p className="text-sm font-bold text-white leading-tight">Confirmación</p>
+              <p className="text-2xl font-black tabular-nums text-white leading-none">{loading ? '…' : total}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-center w-8 bg-gray-50 shrink-0">
+            <ChevronRight className="w-4 h-4 text-gray-300" />
+          </div>
+
+          {/* Paso 2 — Link a /confirmados */}
+          <Link href="/confirmados"
+            className="flex-1 flex items-center gap-3 px-5 py-3.5 hover:bg-green-50 transition-colors group">
+            <CheckCircle2 className="w-5 h-5 text-gray-300 group-hover:text-green-400 shrink-0 transition-colors" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 2</p>
+              <p className="text-sm font-bold text-gray-600 group-hover:text-green-700 leading-tight transition-colors">Sin guía</p>
+              <p className="text-2xl font-black tabular-nums text-green-600 leading-none">
+                {stats ? stats.confirmadosSinGuia : '…'}
+              </p>
+            </div>
+          </Link>
+
+          <div className="flex items-center justify-center w-8 bg-gray-50 shrink-0">
+            <ChevronRight className="w-4 h-4 text-gray-300" />
+          </div>
+
+          {/* Paso 3 — Link a /despachados */}
+          <Link href="/despachados"
+            className="flex-1 flex items-center gap-3 px-5 py-3.5 hover:bg-blue-50 transition-colors group">
+            <Truck className="w-5 h-5 text-gray-300 group-hover:text-blue-400 shrink-0 transition-colors" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 3</p>
+              <p className="text-sm font-bold text-gray-600 group-hover:text-blue-700 leading-tight transition-colors">Despachados</p>
+              <p className="text-2xl font-black tabular-nums text-blue-600 leading-none">
+                {stats ? stats.despachados : '…'}
+              </p>
+            </div>
+          </Link>
+        </div>
+      </div>
 
       {/* ── Dashboard operativo ── */}
       {stats && (

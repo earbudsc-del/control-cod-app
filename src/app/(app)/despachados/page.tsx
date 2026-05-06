@@ -8,7 +8,7 @@ import { type Order, STATUS_LABELS, STATUS_COLORS } from '@/types'
 import {
   Truck, RefreshCw, MessageCircle, Phone,
   MapPin, ExternalLink, Search, ChevronLeft, ChevronRight,
-  Package,
+  Package, ClipboardList, CheckCircle2,
 } from 'lucide-react'
 
 const PAGE_SIZE = 50
@@ -54,14 +54,22 @@ export default function DespachadosPage() {
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const [searchQuery, setSearchQuery] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
+  const [pipelineCounts, setPipelineCounts] = useState<{ pendingTotal: number; confirmadosSinGuia: number } | null>(null)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const res: ApiResponse = await fetch('/api/despachados').then(r => r.json())
+      const [res, pipelineRes] = await Promise.all([
+        fetch('/api/despachados').then(r => r.json() as Promise<ApiResponse>),
+        fetch('/api/confirmacion/stats').then(r => r.json()),
+      ])
       setOrders(res.data     ?? [])
       setTotal(res.total     ?? 0)
       setByStatus(res.byStatus ?? {})
+      setPipelineCounts({
+        pendingTotal:       pipelineRes.pendingTotal       ?? 0,
+        confirmadosSinGuia: pipelineRes.confirmadosSinGuia ?? 0,
+      })
       setLastRefresh(new Date())
     } catch (err) {
       console.error('[despachados/fetchData]', err)
@@ -156,6 +164,56 @@ export default function DespachadosPage() {
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
               Refrescar
             </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Pipeline de navegación ── */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="flex items-stretch divide-x divide-gray-100">
+
+          {/* Paso 1 — Link a /confirmacion */}
+          <Link href="/confirmacion"
+            className="flex-1 flex items-center gap-3 px-5 py-3.5 hover:bg-indigo-50 transition-colors group">
+            <ClipboardList className="w-5 h-5 text-gray-300 group-hover:text-indigo-400 shrink-0 transition-colors" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 1</p>
+              <p className="text-sm font-bold text-gray-600 group-hover:text-indigo-700 leading-tight transition-colors">Confirmación</p>
+              <p className="text-2xl font-black tabular-nums text-indigo-600 leading-none">
+                {pipelineCounts ? pipelineCounts.pendingTotal : '…'}
+              </p>
+            </div>
+          </Link>
+
+          <div className="flex items-center justify-center w-8 bg-gray-50 shrink-0">
+            <ChevronRight className="w-4 h-4 text-gray-300" />
+          </div>
+
+          {/* Paso 2 — Link a /confirmados */}
+          <Link href="/confirmados"
+            className="flex-1 flex items-center gap-3 px-5 py-3.5 hover:bg-green-50 transition-colors group">
+            <CheckCircle2 className="w-5 h-5 text-gray-300 group-hover:text-green-400 shrink-0 transition-colors" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 2</p>
+              <p className="text-sm font-bold text-gray-600 group-hover:text-green-700 leading-tight transition-colors">Sin guía</p>
+              <p className="text-2xl font-black tabular-nums text-green-600 leading-none">
+                {pipelineCounts ? pipelineCounts.confirmadosSinGuia : '…'}
+              </p>
+            </div>
+          </Link>
+
+          <div className="flex items-center justify-center w-8 bg-gray-50 shrink-0">
+            <ChevronRight className="w-4 h-4 text-gray-300" />
+          </div>
+
+          {/* Paso 3 — ACTIVO */}
+          <div className="flex-1 flex items-center gap-3 px-5 py-3.5 bg-blue-600">
+            <Truck className="w-5 h-5 text-blue-200 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold text-blue-200 uppercase tracking-wider">Paso 3</p>
+              <p className="text-sm font-bold text-white leading-tight">Despachados</p>
+              <p className="text-2xl font-black tabular-nums text-white leading-none">{loading ? '…' : total}</p>
+            </div>
           </div>
         </div>
       </div>
