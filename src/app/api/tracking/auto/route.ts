@@ -3,33 +3,22 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { updateOrderTracking } from '@/lib/tracking/update-order'
 import { createTaskIfNotExists, resolveAutoTasks } from '@/lib/tasks/auto-tasks'
 
-// Estados finales: el cron NO los re-procesa (EFI ya no cambiará de estado)
+// Vercel Cron: máximo 60 s por ejecución (requiere plan Pro)
+export const maxDuration = 60
+
 const FINAL_STATUSES = ['delivered', 'returned', 'cancelled']
 const BATCH_SIZE     = 5
 const BATCH_DELAY_MS = 1_500
+
+type SB = Awaited<ReturnType<typeof createServiceClient>>
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export async function POST(req: Request) {
-  const cronSecret = process.env.CRON_SECRET
-  const isCron = !!(cronSecret && req.headers.get('x-cron-secret') === cronSecret)
+// ── Lógica de tracking compartida entre GET (Vercel Cron) y POST (script local) ──
 
-  // Elegir cliente según origen de la llamada:
-  // - cron: service role → bypasea RLS
-  // - usuario: cliente normal con sesión
-  const supabase = isCron
-    ? await createServiceClient()
-    : await createClient()
-
-  if (!isCron) {
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) {
-      return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
-    }
-  }
-
+async function runTracking(supabase: SB, logPrefix: string): Promise<NextResponse> {
   const { data: orders, error: fetchErr } = await supabase
     .from('orders')
     .select('id, tracking_number, normalized_status, last_tracking_update, store_id')
@@ -38,20 +27,13 @@ export async function POST(req: Request) {
     .order('last_tracking_update', { ascending: true, nullsFirst: true })
     .limit(200)
 
-  // [DEBUG] — remover cuando ya no sea necesario
-  console.log('[auto-tracking][debug] fetchErr:', fetchErr)
-  console.log('[auto-tracking][debug] pedidos encontrados:', orders?.length ?? 0)
-  if (orders && orders.length > 0) {
-    orders.slice(0, 5).forEach(o => {
-      console.log(`  guía=${o.tracking_number}  status=${o.normalized_status}  last_update=${o.last_tracking_update ?? 'null'}`)
-    })
-  }
-
   if (fetchErr) {
+    console.error(`${logPrefix} error fetching orders:`, fetchErr)
     return NextResponse.json({ error: 'Error al obtener pedidos' }, { status: 500 })
   }
 
   if (!orders || orders.length === 0) {
+    console.log(`${logPrefix} processed=0 updated=0 failed=0`)
     return NextResponse.json({ processed: 0, updated: 0, failed: 0 })
   }
 
@@ -60,8 +42,7 @@ export async function POST(req: Request) {
   const errors: Array<{ orderId: string; error: string }> = []
 
   for (let i = 0; i < orders.length; i += BATCH_SIZE) {
-    const batch = orders.slice(i, i + BATCH_SIZE)
-
+    const batch   = orders.slice(i, i + BATCH_SIZE)
     const results = await Promise.all(
       batch.map(o => updateOrderTracking(o.id, o.tracking_number, supabase))
     )
@@ -89,18 +70,12 @@ export async function POST(req: Request) {
 
     await Promise.all(taskPromises)
 
-    if (i + BATCH_SIZE < orders.length) {
-      await sleep(BATCH_DELAY_MS)
-    }
+    if (i + BATCH_SIZE < orders.length) await sleep(BATCH_DELAY_MS)
   }
 
-  console.log(
-    `[auto-tracking] processed=${orders.length} updated=${updated} failed=${failed}`,
-  )
+  console.log(`${logPrefix} processed=${orders.length} updated=${updated} failed=${failed}`)
 
-  // Confirmation tasks para pedidos sin confirmar (normalized_status = 'pending')
-  // Necesario para pedidos importados por Excel: el import no llama a createTaskIfNotExists,
-  // a diferencia del webhook que lo hace al insertar.
+  // Confirmation tasks para pedidos importados por Excel (no crean task en import)
   const { data: pendingOrders } = await supabase
     .from('orders')
     .select('id, store_id')
@@ -118,7 +93,7 @@ export async function POST(req: Request) {
         }).catch(e => console.error('[auto-tasks][confirmation]', o.id, e)),
       ),
     )
-    console.log(`[auto-tasks] confirmation tasks checked for ${pendingOrders.length} pending orders`)
+    console.log(`${logPrefix} confirmation tasks checked for ${pendingOrders.length} pending orders`)
   }
 
   return NextResponse.json({
@@ -127,4 +102,41 @@ export async function POST(req: Request) {
     failed,
     ...(errors.length > 0 && { errors: errors.slice(0, 20) }),
   })
+}
+
+// ── GET — Vercel Cron ─────────────────────────────────────────────────────────
+// Vercel envía: GET /api/tracking/auto
+// Header:       Authorization: Bearer <CRON_SECRET>
+
+export async function GET(req: Request) {
+  const cronSecret = process.env.CRON_SECRET
+  const auth       = req.headers.get('authorization')
+
+  if (!cronSecret || auth !== `Bearer ${cronSecret}`) {
+    return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
+  }
+
+  console.log('[vercel-cron] tracking iniciado')
+  const supabase = await createServiceClient()
+  return runTracking(supabase, '[vercel-cron]')
+}
+
+// ── POST — script local / ejecución manual ────────────────────────────────────
+// Header: x-cron-secret: <CRON_SECRET>  → usa service role (bypass RLS)
+// Sin header                             → requiere sesión activa
+
+export async function POST(req: Request) {
+  const cronSecret = process.env.CRON_SECRET
+  const isCron     = !!(cronSecret && req.headers.get('x-cron-secret') === cronSecret)
+
+  const supabase = isCron
+    ? await createServiceClient()
+    : await createClient()
+
+  if (!isCron) {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
+  }
+
+  return runTracking(supabase as SB, '[auto-tracking]')
 }

@@ -11,7 +11,7 @@
 | Módulo | Ruta / archivo | Estado |
 |---|---|---|
 | Webhook Shopify `orders/create` | `/api/webhooks/shopify` | Activo — requiere ngrok en dev |
-| Cron de tracking EFI | `scripts/cron-tracking.mjs` → `/api/tracking/auto` | Cada 5 min, procesa in_transit / en_reparto / novedad / unknown |
+| Cron de tracking EFI | `vercel.json` → `GET /api/tracking/auto` (Vercel Cron) | Cada 5 min en producción, sin dependencia de PC local |
 | Dashboard admin | `/dashboard` | KPIs + cola de trabajo + alertas SLA + tarjetas confirmados hoy/ayer |
 | Confirmación | `/confirmacion` | Solo pedidos `pending + tracking IS NULL`. Stats, tabs, orden inteligente (`source='shopify_webhook'`) |
 | Confirmados | `/confirmados` | Pedidos `confirmed + tracking IS NULL`. Filtros fecha, botón "Listo para despacho" |
@@ -48,6 +48,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Vercel Cron Job: tracking en producción cada 5 min sin dependencia de PC local** | 2026-05-06 | `vercel.json` (nuevo), `api/tracking/auto/route.ts` |
 | **Gestión de usuarios mejorada: email, último login, última acción, confirm dialog en rol** | 2026-05-06 | `api/profiles/route.ts`, `src/types/index.ts`, `settings/page.tsx` |
 | **Pipeline nav: barra horizontal Confirmación → Sin guía → Despachados en los 3 módulos** | 2026-05-06 | `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `confirmados/page.tsx`, `despachados/page.tsx` |
 | **P0 Paso 3: /confirmacion limpia (solo pending+sin tracking), /confirmados ajustado, /despachados creado** | 2026-05-06 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `api/confirmados/route.ts`, `confirmados/page.tsx`, `api/despachados/route.ts`, `despachados/page.tsx`, `sidebar.tsx` |
@@ -301,11 +302,49 @@ order_id: FK a orders
 
 ### Auto-tracking (cron)
 
-- Endpoint: `POST /api/tracking/auto`
-- Seguridad: header `x-cron-secret` = env `CRON_SECRET`
-- Usa `SUPABASE_SERVICE_ROLE_KEY` (bypass RLS)
-- Procesa: **todos los pedidos con `tracking_number IS NOT NULL`** excepto estados finales (`delivered`, `returned`, `cancelled`). Incluye `pending`, `in_transit`, `en_reparto`, `novedad`, `unknown`.
-- Script: `scripts/cron-tracking.mjs` — intervalo 5 min, ejecuta inmediatamente al iniciar
+**Producción — Vercel Cron Job (principal):**
+- Configurado en `vercel.json`: `GET /api/tracking/auto` cada `*/5 * * * *`
+- Vercel llama el endpoint con header `Authorization: Bearer <CRON_SECRET>`
+- `CRON_SECRET` es generado automáticamente por Vercel al detectar el `vercel.json` con crons
+- Requiere **Vercel Pro** (plan Hobby solo permite crons diarios)
+- `maxDuration = 60` segundos por ejecución (configurable en `route.ts`)
+- Logs en Vercel Dashboard → Functions → `/api/tracking/auto`: `[vercel-cron] processed=N updated=N failed=N`
+
+**Desarrollo local — script (secundario):**
+- Script: `npm run cron:tracking` → `scripts/cron-tracking.mjs`
+- Llama `POST http://localhost:3000/api/tracking/auto` con header `x-cron-secret: <CRON_SECRET>`
+- Solo funciona con el dev server corriendo (`npm run dev`)
+
+**Autenticación dual del endpoint:**
+| Origen | Método | Header | Cliente Supabase |
+|---|---|---|---|
+| Vercel Cron | `GET` | `Authorization: Bearer <CRON_SECRET>` | service role (bypass RLS) |
+| Script local | `POST` | `x-cron-secret: <CRON_SECRET>` | service role (bypass RLS) |
+| Manual (admin logado) | `POST` | ninguno | session del usuario |
+
+**Lógica del cron:**
+- Procesa todos los pedidos con `tracking_number IS NOT NULL` excepto estados finales (`delivered`, `returned`, `cancelled`)
+- Incluye `pending`, `in_transit`, `en_reparto`, `novedad`, `unknown`
+- Batch de 5 pedidos en paralelo + delay de 1.5s entre batches (rate limiting EFI)
+- Después del tracking: crea confirmation tasks para pedidos `pending` sin task (pedidos de Excel)
+- Máximo 200 pedidos por ejecución
+
+**Cómo verificar que funciona en producción:**
+1. Vercel Dashboard → tu proyecto → Settings → Cron Jobs: debe aparecer `/api/tracking/auto` con schedule `*/5 * * * *`
+2. Vercel Dashboard → Functions → ver logs de `/api/tracking/auto` con `[vercel-cron]` prefix
+3. `GET https://tu-app.vercel.app/api/tracking/auto` con header `Authorization: Bearer <tu-CRON_SECRET>` → responde `{ processed, updated, failed }`
+
+**Cómo desactivarlo temporalmente:**
+- En Vercel Dashboard → Settings → Cron Jobs → deshabilitar el job
+- O eliminar el bloque `crons` de `vercel.json` y redeploy
+
+**Variables de entorno requeridas en Vercel:**
+| Variable | Fuente | Uso |
+|---|---|---|
+| `CRON_SECRET` | Auto-generado por Vercel al agregar crons | Valida llamadas del cron y del script local |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase Dashboard → Settings → API | Bypass RLS en el cron |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase Dashboard → Settings → API | Conexión a DB |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase Dashboard → Settings → API | Conexión a DB |
 
 ### Componentes compartidos
 
