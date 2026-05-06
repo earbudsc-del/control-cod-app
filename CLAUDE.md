@@ -20,7 +20,7 @@
 | Reparto | `/reparto` | Tabla criticidad por tiempo, acciones, métricas, mini KPI pipeline, tab Entregados DB-backed |
 | Tránsito | `/transito` | Pedidos `in_transit` sin movimiento, criticidad por horas, refresh 5 min |
 | My-tasks | `/my-tasks` | Filtrado por rol automáticamente |
-| Panel admin | `/settings` | Ver usuarios, asignar roles |
+| Panel admin | `/settings` | Ver usuarios (con email, último login, última acción), asignar roles con confirm dialog |
 | Auth + sesión | `middleware.ts` | Funcional — tokens se refrescan correctamente |
 | Sidebar dinámico | `components/layout/sidebar.tsx` | Nav por rol desde `NAV_BY_ROLE` |
 | Duplicados | webhook + `/orders/[id]` | Detecta por customer_phone en ventana 7 días |
@@ -48,6 +48,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Gestión de usuarios mejorada: email, último login, última acción, confirm dialog en rol** | 2026-05-06 | `api/profiles/route.ts`, `src/types/index.ts`, `settings/page.tsx` |
 | **Pipeline nav: barra horizontal Confirmación → Sin guía → Despachados en los 3 módulos** | 2026-05-06 | `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `confirmados/page.tsx`, `despachados/page.tsx` |
 | **P0 Paso 3: /confirmacion limpia (solo pending+sin tracking), /confirmados ajustado, /despachados creado** | 2026-05-06 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `api/confirmados/route.ts`, `confirmados/page.tsx`, `api/despachados/route.ts`, `despachados/page.tsx`, `sidebar.tsx` |
 | **recover-shopify-orders: sincroniza tracking_number desde Shopify fulfillments** | 2026-05-06 | `src/app/api/admin/recover-shopify-orders/route.ts` |
@@ -524,6 +525,33 @@ SELECT count(*) FROM orders WHERE tracking_number IS NOT NULL AND normalized_sta
 -- Distribución por source
 SELECT source, count(*), count(*) FILTER (WHERE tracking_number IS NOT NULL) as con_tracking
 FROM orders GROUP BY source;
+```
+
+### P1 — Tracking de jornada y actividad por agente (pendiente)
+
+**Estado actual (2026-05-06):** `/settings` muestra email, último login (`last_sign_in_at` de auth.users) y última acción (MAX created_at en agent_actions). No hay tracking de tiempo activo ni sesiones.
+
+**Qué falta para un dashboard de agentes completo:**
+
+| Feature | Qué requiere |
+|---|---|
+| Registrar login/logout | Tabla `agent_sessions (id, agent_id, login_at, logout_at)` + hook en login/logout |
+| Horas conectadas por agente | Derivado de `agent_sessions` (SUM logout_at - login_at) |
+| Acciones por agente por día | Ya disponible vía `agent_actions` — solo falta la query de agregación |
+| Dashboard de rendimiento por agente | `/api/admin/agent-stats` que devuelve: sesiones, horas, acciones_hoy, confirmaciones, entregas por agente |
+| Historial de actividad | Timeline de `agent_actions` filtrado por agent_id — ya existe la tabla, falta la UI |
+| Estado online/offline en tiempo real | Supabase Realtime Presence channel con heartbeat periódico desde el cliente |
+
+**Approxi implementación de sesiones sin migración (usando existing columns):**
+- No existe columna en `profiles` para guardar sesión activa
+- Requiere nueva tabla `agent_sessions` o columna `last_seen_at` en `profiles`
+- `last_seen_at` = mínimo viable: se actualiza con un ping periódico desde el cliente (ej. cada 5 min)
+- "Conectado" = `last_seen_at > now() - 10 min`
+
+**Migración sugerida cuando se implemente:**
+```sql
+ALTER TABLE profiles ADD COLUMN last_seen_at timestamptz;
+CREATE INDEX idx_profiles_last_seen ON profiles(last_seen_at);
 ```
 
 ### P1 — Botón "Listo para despacho" → persistir en DB

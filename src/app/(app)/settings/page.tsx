@@ -1,10 +1,22 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import type { Profile, SlaRule, StatusPattern } from '@/types'
-import { Settings, Users, Clock, List, Save, CheckCircle2 } from 'lucide-react'
+import { Settings, Users, Clock, List, CheckCircle2, AlertCircle, Mail } from 'lucide-react'
+
+function fmtRelative(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000)
+  if (mins < 1)   return 'Hace menos de 1 min'
+  if (mins < 60)  return `Hace ${mins} min`
+  const h = Math.floor(mins / 60)
+  if (h < 24)    return `Hace ${h}h`
+  const d = Math.floor(h / 24)
+  if (d < 7)     return `Hace ${d}d`
+  if (d < 30)    return `Hace ${Math.floor(d / 7)} sem`
+  return `Hace más de ${Math.floor(d / 30)} mes(es)`
+}
 
 const ROLE_OPTIONS: { value: string; label: string }[] = [
   { value: 'admin',              label: 'Administrador'          },
@@ -25,6 +37,8 @@ export default function SettingsPage() {
   const [patterns, setPatterns]   = useState<StatusPattern[]>([])
   const [loading, setLoading]     = useState(true)
   const [saved, setSaved]         = useState(false)
+  const [saveError, setSaveError] = useState(false)
+  const [roleMap, setRoleMap]     = useState<Record<string, string>>({})
 
   useEffect(() => {
     Promise.all([
@@ -32,21 +46,32 @@ export default function SettingsPage() {
       fetch('/api/settings/sla').then(r => r.json()).catch(() => []),
       fetch('/api/settings/patterns').then(r => r.json()).catch(() => []),
     ]).then(([profs, sla, pats]) => {
-      setProfiles(profs ?? [])
+      const profList: Profile[] = profs ?? []
+      setProfiles(profList)
       setSlaRules(sla ?? [])
       setPatterns(pats ?? [])
+      const map: Record<string, string> = {}
+      for (const p of profList) map[p.id] = p.role
+      setRoleMap(map)
       setLoading(false)
     })
   }, [])
 
-  async function handleSaveRole(id: string, role: string, full_name: string) {
-    await fetch('/api/profiles', {
+  async function handleSaveRole(id: string, role: string, full_name: string): Promise<boolean> {
+    const res = await fetch('/api/profiles', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, role, full_name }),
     })
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+    if (res.ok) {
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+      return true
+    } else {
+      setSaveError(true)
+      setTimeout(() => setSaveError(false), 3000)
+      return false
+    }
   }
 
   const TABS = [
@@ -74,6 +99,11 @@ export default function SettingsPage() {
             <CheckCircle2 className="w-4 h-4" /> Guardado
           </span>
         )}
+        {saveError && (
+          <span className="flex items-center gap-1 text-sm text-red-600 ml-auto">
+            <AlertCircle className="w-4 h-4" /> Error al guardar
+          </span>
+        )}
       </div>
 
       {/* Tabs */}
@@ -94,41 +124,98 @@ export default function SettingsPage() {
       {/* Tab: Usuarios */}
       {tab === 'users' && (
         <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-          <div className="px-5 py-4 border-b border-gray-50">
+          <div className="px-5 py-3.5 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between">
             <p className="text-sm text-gray-500">
-              Los usuarios se crean desde el{' '}
-              <strong>Dashboard de Supabase Auth</strong>.
-              Aquí puedes cambiar roles y nombres.
+              Usuarios creados desde{' '}
+              <strong className="text-gray-700">Supabase Auth</strong>.
+              Nombre y rol editables aquí.
             </p>
+            <span className="text-xs text-gray-400 font-medium tabular-nums">
+              {profiles.length} usuario{profiles.length !== 1 ? 's' : ''}
+            </span>
           </div>
+
           <div className="divide-y divide-gray-50">
-            {profiles.map(profile => (
-              <div key={profile.id} className="flex items-center gap-4 px-5 py-4">
-                <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                  <span className="text-blue-700 font-bold text-sm">
-                    {profile.full_name.charAt(0).toUpperCase()}
-                  </span>
+            {profiles.map(profile => {
+              const initial     = (profile.full_name || '?').charAt(0).toUpperCase()
+              const currentRole = roleMap[profile.id] ?? profile.role
+              const currentLabel = ROLE_OPTIONS.find(r => r.value === currentRole)?.label ?? currentRole
+
+              return (
+                <div key={profile.id} className="flex items-start gap-4 px-5 py-4">
+
+                  {/* Avatar */}
+                  <div className="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center shrink-0 mt-0.5">
+                    <span className="text-blue-700 font-bold text-sm">{initial}</span>
+                  </div>
+
+                  {/* Identidad */}
+                  <div className="flex-1 min-w-0">
+                    <input
+                      defaultValue={profile.full_name}
+                      className="text-sm font-semibold text-gray-900 bg-transparent border-b border-transparent
+                                 hover:border-gray-200 focus:border-blue-400 focus:outline-none
+                                 px-1 py-0.5 w-full max-w-xs"
+                      onBlur={e => {
+                        const name = e.target.value.trim()
+                        if (name && name !== profile.full_name) {
+                          handleSaveRole(profile.id, currentRole, name)
+                        }
+                      }}
+                    />
+
+                    {/* Email */}
+                    <div className="flex items-center gap-1.5 mt-1 px-1">
+                      <Mail className="w-3 h-3 text-gray-300 shrink-0" />
+                      <span className="text-xs font-mono text-gray-500 truncate">
+                        {profile.email ?? <span className="text-gray-300 italic">sin email</span>}
+                      </span>
+                    </div>
+
+                    {/* Actividad */}
+                    <div className="flex items-center gap-4 mt-1 px-1 flex-wrap">
+                      <span className="flex items-center gap-1 text-[11px] text-gray-400">
+                        <Clock className="w-3 h-3 shrink-0" />
+                        Login: {fmtRelative(profile.last_sign_in_at)}
+                      </span>
+                      {profile.last_activity && (
+                        <span className="text-[11px] text-gray-400">
+                          · Acción: {fmtRelative(profile.last_activity)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Selector de rol */}
+                  <div className="shrink-0 flex flex-col items-end gap-1.5">
+                    <select
+                      value={currentRole}
+                      onChange={async e => {
+                        const newRole  = e.target.value
+                        const newLabel = ROLE_OPTIONS.find(r => r.value === newRole)?.label ?? newRole
+                        const ok = window.confirm(
+                          `¿Confirmar cambio de rol?\n\n` +
+                          `Usuario: ${profile.full_name}\n` +
+                          (profile.email ? `Email: ${profile.email}\n` : '') +
+                          `\nNuevo rol: ${newLabel}`
+                        )
+                        if (!ok) return
+                        setRoleMap(prev => ({ ...prev, [profile.id]: newRole }))
+                        const saved = await handleSaveRole(profile.id, newRole, profile.full_name)
+                        if (!saved) setRoleMap(prev => ({ ...prev, [profile.id]: profile.role }))
+                      }}
+                      className="text-sm border border-gray-200 rounded-lg px-3 py-1.5
+                                 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    >
+                      {ROLE_OPTIONS.map(({ value, label }) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                    <span className="text-[10px] text-gray-400 font-mono pr-0.5">{profile.id.slice(0, 8)}…</span>
+                  </div>
                 </div>
-                <div className="flex-1">
-                  <input
-                    defaultValue={profile.full_name}
-                    className="text-sm font-medium text-gray-900 bg-transparent border-b border-transparent
-                               hover:border-gray-200 focus:border-blue-400 focus:outline-none px-1 py-0.5 w-full"
-                    onBlur={e => handleSaveRole(profile.id, profile.role, e.target.value)}
-                  />
-                </div>
-                <select
-                  defaultValue={profile.role}
-                  onChange={e => handleSaveRole(profile.id, e.target.value, profile.full_name)}
-                  className="text-sm border border-gray-200 rounded-lg px-3 py-1.5
-                             focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {ROLE_OPTIONS.map(({ value, label }) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}

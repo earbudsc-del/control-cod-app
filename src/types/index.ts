@@ -62,6 +62,9 @@ export interface Profile {
   full_name: string
   role: UserRole
   created_at: string
+  email:           string | null
+  last_sign_in_at: string | null
+  last_activity:   string | null
 }
 
 export interface SlaRule {
