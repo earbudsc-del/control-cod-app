@@ -1,12 +1,11 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 
-// Filtros base que debe cumplir un pedido para estar en la cola activa de confirmación.
-// Deben coincidir exactamente con los de GET /api/confirmacion.
+// Filtros base para un pedido pendiente de confirmación.
+// tracking_number IS NULL es el criterio crítico: si ya tiene guía, salió de la cola.
 const ACTIVE_PENDING = {
   source:              'shopify_webhook',
   confirmation_status: 'pending',
-  // normalized_status NOT IN ('delivered', 'returned') → se aplica con .neq() en cada query
 } as const
 
 export async function GET() {
@@ -20,13 +19,14 @@ export async function GET() {
     const todayIso  = todayStart.toISOString()
     const cutoff48h = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
 
-    // Shorthand para el bloque de filtros comunes a la cola pendiente activa
+    // Base para cola pendiente: sin tracking, sin estados finales
     const pendingBase = () =>
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('source',              ACTIVE_PENDING.source)
         .eq('confirmation_status', ACTIVE_PENDING.confirmation_status)
+        .is('tracking_number', null)
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned')
 
@@ -39,18 +39,20 @@ export async function GET() {
       { count: inalcanzables },
       { count: noDesean },
       { count: sinCobertura },
+      { count: confirmadosSinGuia },
+      { count: despachados },
     ] = await Promise.all([
 
-      // Nunca contactados — mismos filtros que la tabla visible
+      // Nunca contactados
       pendingBase().or('confirmation_attempts.is.null,confirmation_attempts.eq.0'),
 
-      // 1–2 intentos sin éxito — mismos filtros que la tabla visible
+      // 1–2 intentos sin éxito
       pendingBase().gte('confirmation_attempts', 1).lte('confirmation_attempts', 2),
 
-      // Pendientes con más de 48 h de antigüedad — mismos filtros que la tabla visible
+      // Pendientes con más de 48h de antigüedad
       pendingBase().lt('created_at', cutoff48h),
 
-      // Confirmados hoy (métrica histórica, solo pedidos Shopify)
+      // Confirmados hoy (métrica histórica)
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
@@ -58,14 +60,14 @@ export async function GET() {
         .eq('confirmation_status', 'confirmed')
         .gte('customer_confirmed_at', todayIso),
 
-      // Contactados hoy (cualquier intento hoy, solo pedidos Shopify)
+      // Contactados hoy (cualquier intento hoy)
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('source', 'shopify_webhook')
         .gte('last_confirmation_attempt', todayIso),
 
-      // Inalcanzables activos (solo pedidos Shopify)
+      // Inalcanzables activos
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
@@ -74,7 +76,7 @@ export async function GET() {
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned'),
 
-      // No desean activos (solo pedidos Shopify)
+      // No desean (cancelados)
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
@@ -83,7 +85,7 @@ export async function GET() {
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned'),
 
-      // Sin cobertura activos (solo pedidos Shopify)
+      // Sin cobertura
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
@@ -91,18 +93,40 @@ export async function GET() {
         .eq('confirmation_status', 'no_coverage')
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned'),
+
+      // B) Confirmados sin guía: confirmed + tracking_number IS NULL
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('source', 'shopify_webhook')
+        .eq('confirmation_status', 'confirmed')
+        .is('tracking_number', null)
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned'),
+
+      // C) Despachados: con tracking, no en estado final
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('source', 'shopify_webhook')
+        .not('tracking_number', 'is', null)
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned')
+        .neq('normalized_status', 'cancelled'),
     ])
 
     return NextResponse.json({
-      nuevos:         nuevos         ?? 0,
-      reintentar:     reintentar     ?? 0,
-      atrasados:      atrasados      ?? 0,
-      confirmadosHoy: confirmadosHoy ?? 0,
-      contactadosHoy: contactadosHoy ?? 0,
-      sinRespuesta:   reintentar     ?? 0,
-      inalcanzables:  inalcanzables  ?? 0,
-      noDesean:       noDesean       ?? 0,
-      sinCobertura:   sinCobertura   ?? 0,
+      nuevos:             nuevos             ?? 0,
+      reintentar:         reintentar         ?? 0,
+      atrasados:          atrasados          ?? 0,
+      confirmadosHoy:     confirmadosHoy     ?? 0,
+      contactadosHoy:     contactadosHoy     ?? 0,
+      sinRespuesta:       reintentar         ?? 0,
+      inalcanzables:      inalcanzables      ?? 0,
+      noDesean:           noDesean           ?? 0,
+      sinCobertura:       sinCobertura       ?? 0,
+      confirmadosSinGuia: confirmadosSinGuia ?? 0,
+      despachados:        despachados        ?? 0,
     })
   } catch (err) {
     console.error('[GET /api/confirmacion/stats]', err)

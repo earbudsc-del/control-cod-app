@@ -47,6 +47,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **P0 Paso 3: /confirmacion separada en 3 buckets (pendientes / sin guía / despachados)** | 2026-05-06 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx` |
 | **recover-shopify-orders: sincroniza tracking_number desde Shopify fulfillments** | 2026-05-06 | `src/app/api/admin/recover-shopify-orders/route.ts` |
 | **Fix cron: procesa todos los pedidos con tracking_number (no solo ACTIVE_STATUSES)** | 2026-05-05 | `src/app/api/tracking/auto/route.ts` |
 | **Fix parser: "Para entrega hoy" / "Salió para entrega" → en_reparto** | 2026-05-05 | `src/lib/tracking/efi-parser.ts` |
@@ -56,7 +57,42 @@
 | **Botones reorganizados en 2 filas** | 2026-05-05 | `confirmacion/page.tsx` |
 | **Toast + remoción de fila en /confirmacion** | 2026-05-05 | `confirmacion/page.tsx` |
 
-**Buscador /confirmacion:** `searchQuery` state filtra `displayedOrders` sobre `customer_name`, `customer_phone`, `order_number`. Resultado en `filteredOrders`. Paginación y contador de resultados usan `filteredOrders`. Reset al cambiar tab o búsqueda.
+**P0 Paso 3 — /confirmacion separada en 3 buckets (2026-05-06):**
+
+**Problema resuelto:** El tab "Nuevos" mostraba pedidos con `tracking_number` ya asignado (ya despachados), confundiendo al agente con ítems que ya están en proceso logístico.
+
+**3 buckets de pedidos:**
+
+| Bucket | Filtro DB | Acciones disponibles |
+|---|---|---|
+| **Pendientes** (Todos/Nuevos/Reintentar/Atrasados) | `confirmation_status='pending' AND tracking_number IS NULL AND normalized_status NOT IN (delivered, returned)` | Confirmó / No contesta / Sin cobertura / Canceló |
+| **Confirmados sin guía** (tab `✓ Sin guía`) | `confirmation_status='confirmed' AND tracking_number IS NULL AND normalized_status NOT IN (delivered, returned)` | Solo Ver detalle |
+| **Despachados** (tab `🚚 Despachados`) | `tracking_number IS NOT NULL AND normalized_status NOT IN (delivered, returned, cancelled)` | WA / Llamar / Ver detalle |
+
+**Lógica de la API (`GET /api/confirmacion`):**
+- 3 queries paralelas con `Promise.all`
+- Respuesta: `{ data, pendientes, confirmadosSinGuia, despachados, total }` — `data` se mantiene por backward compat
+- `total` = count de pendientes (workload del agente)
+
+**Lógica de stats (`GET /api/confirmacion/stats`):**
+- `pendingBase()` ahora incluye `.is('tracking_number', null)` — los contadores de Nuevos/Reintentar/Atrasados solo cuentan pedidos sin guía
+- Nuevos contadores: `confirmadosSinGuia` y `despachados`
+
+**Lógica del page (`/confirmacion/page.tsx`):**
+- `orders` state = pendientes (sin tracking)
+- `confirmadosSinGuia` state = nuevo
+- `despachados` state = nuevo
+- `activeSource` memo: devuelve el array correcto según `activeTab` → unifica `filteredOrders` y `pagedOrders` para todos los tabs
+- `isPendingView / isDespachadosView / isConfirmSinGuiaView`: controlan qué tabla (headers + rows) se renderiza
+- Dashboard: Fila 1 (3 cards grandes: Nuevos/Reintentar/Atrasados) + Fila 2 (2 cards medianas: Confirmados sin guía / Despachados) + Fila 3 (6 métricas informativas)
+- `fetchData` ahora tiene `try/finally` (faltaba)
+- `STATUS_LABELS` y `STATUS_COLORS` de `@/types` usados en tabla Despachados
+
+**Comportamiento automático:** Cuando `recover-shopify-orders` o el fulfillment webhook asigna un `tracking_number`, en el próximo refresh (cada 3 min) el pedido sale de Pendientes/Sin guía y aparece en Despachados automáticamente.
+
+**Buscador:** Funciona sobre los 3 buckets (el `activeSource` memo une el array correcto antes del filtro).
+
+**Buscador /confirmacion:** `searchQuery` state filtra `activeSource` sobre `customer_name`, `customer_phone`, `order_number`. Resultado en `filteredOrders`. Paginación y contador de resultados usan `filteredOrders`. Reset al cambiar tab o búsqueda.
 
 **`no_coverage` — confirmation_status:** valor de texto puro, no requiere migración de DB. API endpoint acepta la acción, inserta nota "Pedido marcado como Sin cobertura" en tabla `notes`. Stats API añade conteo `sinCobertura`. Performance API añade `sinCoberturaHoy`. Page muestra badge naranja, conteo en "Mi día" y en grid de métricas. Botón usa icono `MapPinOff` naranja.
 
@@ -455,8 +491,8 @@ Cron no la procesa → sigue 'pending' para siempre en nuestra app
 **Plan de implementación:**
 1. **Paso 1 (retroactivo) ✅ IMPLEMENTADO:** `recover-shopify-orders` ahora incluye `fulfillments` en los `fields` de Shopify API. Extrae `order.fulfillments.find(f => f.tracking_number).tracking_number`. En Rama A (orden existente): actualiza si `tracking_number IS NULL` en DB (nunca sobreescribe). En Rama B (orden nueva): inserta con el tracking_number. Respuesta incluye `updated_tracking` como nuevo contador. Usa `normalized_status='pending'`  — el cron (con Fix #2) actualizará el estado real desde Effi en el siguiente ciclo.
 2. **Paso 2 (tiempo real, pendiente):** Crear `/api/webhooks/shopify/fulfillments/route.ts` — recibe `fulfillments/create`, busca orden por `shopify_order_id = payload.order_id`, actualiza `tracking_number` y `normalized_status='in_transit'` si estaba `pending`
-3. **Paso 3 (UI, pendiente):** En `/confirmacion`, filtrar del tab activo las `confirmed + tracking IS NOT NULL`. Agregar contador "Despachadas"
-4. **Paso 4 (dashboard, pendiente):** Agregar métricas `confirmed_sin_guia` y `confirmadas_despachadas`
+3. **Paso 3 (UI) ✅ IMPLEMENTADO (2026-05-06):** `/confirmacion` separada en 3 buckets: Pendientes (sin tracking), Confirmados sin guía, Despachados (con tracking). Tabs `✓ Sin guía` y `🚚 Despachados` añadidos. Stats actualizadas con `.is('tracking_number', null)` en pendingBase + nuevos contadores. Ver detalle completo en "Módulos activos — actualizaciones recientes".
+4. **Paso 4 (dashboard, pendiente):** Agregar métricas `confirmed_sin_guia` y `confirmadas_despachadas` en el dashboard admin principal (`/dashboard`)
 
 **Queries diagnóstico:**
 ```sql
