@@ -21,7 +21,7 @@ import {
 import {
   ArrowLeft, MessageSquare, Zap, UserCheck, Clock,
   AlertTriangle, CheckCircle2, RotateCcw, Phone, ShieldAlert, RefreshCw,
-  MapPinOff, Navigation, HelpCircle,
+  MapPinOff, Navigation, HelpCircle, AlertCircle,
 } from 'lucide-react'
 import { checkCoverage } from '@/lib/alert-helpers'
 
@@ -46,36 +46,49 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const { id } = use(params)
   const router = useRouter()
 
-  const [detail, setDetail]       = useState<OrderDetail | null>(null)
-  const [loading, setLoading]     = useState(true)
-  const [agents, setAgents]       = useState<Profile[]>([])
-  const [noteText, setNoteText]   = useState('')
-  const [savingNote, setSavingNote] = useState(false)
-  const [actionType, setActionType] = useState<ActionType>('contacted')
+  const [detail, setDetail]           = useState<OrderDetail | null>(null)
+  const [loadError, setLoadError]     = useState<string | null>(null)
+  const [loading, setLoading]         = useState(true)
+  const [agents, setAgents]           = useState<Profile[]>([])
+  const [noteText, setNoteText]       = useState('')
+  const [savingNote, setSavingNote]   = useState(false)
+  const [actionType, setActionType]   = useState<ActionType>('contacted')
   const [contactResult, setContactResult] = useState<ContactResult>('no_answer')
-  const [actionNotes, setActionNotes] = useState('')
-  const [savingAction, setSavingAction] = useState(false)
+  const [actionNotes, setActionNotes]     = useState('')
+  const [savingAction, setSavingAction]   = useState(false)
   const [actionFeedback, setActionFeedback] = useState<'success' | 'error' | null>(null)
-  const [selectedAgent, setSelectedAgent] = useState('')
+  const [selectedAgent, setSelectedAgent]   = useState('')
   const [assignFeedback, setAssignFeedback] = useState<'success' | 'error' | null>(null)
-  const [showHistorial, setShowHistorial] = useState(false)
-  // ID de la tarea activa asociada a este pedido (si existe y está asignada al usuario)
+  const [showHistorial, setShowHistorial]   = useState(false)
   const [taskId, setTaskId] = useState<string | null>(null)
 
   async function load() {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const [detailRes, agentsRes, tasksRes]: [any, any, { tasks: any[] }] = await Promise.all([
-      fetch(`/api/orders/${id}`).then(r => r.json()),
-      fetch('/api/profiles').then(r => r.json()),
-      fetch('/api/my-tasks').then(r => r.json()),
-    ])
-    setDetail(detailRes)
-    setAgents(agentsRes ?? [])
-    setSelectedAgent(detailRes.order?.assigned_to ?? '')
-    // Buscar tarea activa asignada al usuario para este pedido
-    const task = (tasksRes.tasks ?? []).find((t: { order_id: string | null }) => t.order_id === id)
-    setTaskId(task?.id ?? null)
-    setLoading(false)
+    setLoadError(null)
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const [detailRes, agentsRes, tasksRes]: [any, any, { tasks: any[] }] = await Promise.all([
+        fetch(`/api/orders/${id}`).then(r => r.json()),
+        fetch('/api/profiles').then(r => r.json()),
+        fetch('/api/my-tasks').then(r => r.json()),
+      ])
+
+      // La API puede devolver { error: '...' } en vez de la estructura esperada
+      if (!detailRes?.order) {
+        setLoadError(detailRes?.error ?? 'Pedido no encontrado')
+        return
+      }
+
+      setDetail(detailRes)
+      setAgents(agentsRes ?? [])
+      setSelectedAgent(detailRes.order?.assigned_to ?? '')
+      const task = (tasksRes.tasks ?? []).find((t: { order_id: string | null }) => t.order_id === id)
+      setTaskId(task?.id ?? null)
+    } catch (err) {
+      console.error('[orders/[id]] load error:', err)
+      setLoadError('Error al cargar el pedido. Verifica tu conexión e intenta de nuevo.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function patchTask(body: Record<string, unknown>) {
@@ -184,28 +197,80 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     load()
   }
 
+  // ── Estados de carga y error ────────────────────────────────────────────────
+
   if (loading) return (
     <div className="flex items-center justify-center h-64">
       <Spinner className="w-8 h-8 text-blue-600" />
     </div>
   )
 
-  if (!detail) return <p className="text-gray-500">Pedido no encontrado.</p>
+  if (loadError) return (
+    <div className="flex flex-col items-center justify-center h-64 gap-4 px-4 text-center">
+      <AlertCircle className="w-10 h-10 text-red-400" />
+      <div>
+        <p className="text-gray-700 font-medium">No se pudo cargar el pedido</p>
+        <p className="text-gray-500 text-sm mt-1">{loadError}</p>
+      </div>
+      <div className="flex gap-3">
+        <button
+          onClick={load}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium
+                     bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Reintentar
+        </button>
+        <button
+          onClick={() => router.back()}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium
+                     border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          Volver
+        </button>
+      </div>
+    </div>
+  )
 
-  const { order, notes, actions, assignments, attempts, history } = detail
-  const slaStatus  = getSlaStatus(order.sla_deadline, order.sla_breached)
-  const coverage   = checkCoverage(order.customer_address, order.city)
+  // Doble guardia: null y estructura inesperada (detail sin order)
+  if (!detail?.order) return (
+    <div className="px-4 py-8 text-center">
+      <p className="text-gray-500">Pedido no encontrado.</p>
+      <button onClick={() => router.back()} className="text-blue-600 text-sm mt-2 hover:underline">
+        Volver
+      </button>
+    </div>
+  )
+
+  const { order } = detail
+  // Arrays con fallback defensivo — protege contra respuestas de API malformadas
+  const notes       = detail.notes       ?? []
+  const actions     = detail.actions     ?? []
+  const assignments = detail.assignments ?? []
+  const attempts    = detail.attempts    ?? []
+  const history     = detail.history     ?? []
+
+  const slaStatus = getSlaStatus(order.sla_deadline, order.sla_breached)
+  const coverage  = checkCoverage(order.customer_address, order.city)
 
   return (
-    <div className="space-y-6 max-w-5xl">
+    <div className="space-y-4 md:space-y-6 max-w-5xl">
+
       {/* Header */}
-      <div className="flex items-start gap-4">
-        <button onClick={() => router.back()} className="mt-1 text-gray-400 hover:text-gray-600">
+      <div className="flex items-start gap-3">
+        <button
+          onClick={() => router.back()}
+          className="mt-1 p-1 -ml-1 text-gray-400 hover:text-gray-600 rounded-lg
+                     hover:bg-gray-100 transition-colors"
+        >
           <ArrowLeft className="w-5 h-5" />
         </button>
-        <div className="flex-1">
-          <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="text-xl font-bold font-mono text-gray-900">{order.tracking_number}</h1>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="text-lg md:text-xl font-bold font-mono text-gray-900 break-all">
+              {order.tracking_number}
+            </h1>
             <StatusBadge status={order.normalized_status} />
             {order.classification && <ClassificationBadge classification={order.classification} />}
             {order.is_at_risk && (
@@ -228,15 +293,13 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
         )}
       </div>
 
-      {/* Banner de pedido duplicado */}
+      {/* Banner duplicado */}
       {order.duplicate_alert && order.duplicate_of_order_id && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 px-5 py-4
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 md:px-5 md:py-4
                         flex items-start gap-3">
           <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
-          <div>
-            <p className="font-semibold text-amber-800 text-sm">
-              ⚠️ Pedido duplicado detectado
-            </p>
+          <div className="min-w-0">
+            <p className="font-semibold text-amber-800 text-sm">⚠️ Pedido duplicado detectado</p>
             <p className="text-sm text-amber-700 mt-0.5">
               Este cliente ya tiene otro pedido reciente con el mismo teléfono.{' '}
               <Link
@@ -252,13 +315,11 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
       {/* Banner fuera de cobertura */}
       {coverage.isOutOfCoverage && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-4
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 md:px-5 md:py-4
                         flex items-start gap-3">
           <MapPinOff className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
-          <div>
-            <p className="font-semibold text-red-800 text-sm">
-              🚫 Posible zona fuera de cobertura
-            </p>
+          <div className="min-w-0">
+            <p className="font-semibold text-red-800 text-sm">🚫 Posible zona fuera de cobertura</p>
             <p className="text-sm text-red-700 mt-0.5">
               Verificar antes de confirmar o despachar.
               {coverage.matchedZones.length > 0 && (
@@ -271,13 +332,11 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
       {/* Banner destino especial */}
       {!coverage.isOutOfCoverage && coverage.isSpecialDestination && (
-        <div className="rounded-xl border border-blue-200 bg-blue-50 px-5 py-4
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 md:px-5 md:py-4
                         flex items-start gap-3">
           <Navigation className="w-5 h-5 text-blue-500 mt-0.5 shrink-0" />
-          <div>
-            <p className="font-semibold text-blue-800 text-sm">
-              Destino especial — coordinación requerida
-            </p>
+          <div className="min-w-0">
+            <p className="font-semibold text-blue-800 text-sm">Destino especial — coordinación requerida</p>
             <p className="text-sm text-blue-700 mt-0.5">
               Esta zona requiere coordinación adicional antes del despacho.
               {coverage.matchedZones.length > 0 && (
@@ -290,13 +349,11 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
       {/* Banner zona desconocida */}
       {!coverage.isOutOfCoverage && !coverage.isSpecialDestination && coverage.isUnknownZone && (
-        <div className="rounded-xl border border-yellow-200 bg-yellow-50 px-5 py-4
+        <div className="rounded-xl border border-yellow-200 bg-yellow-50 px-4 py-3 md:px-5 md:py-4
                         flex items-start gap-3">
           <HelpCircle className="w-5 h-5 text-yellow-500 mt-0.5 shrink-0" />
-          <div>
-            <p className="font-semibold text-yellow-800 text-sm">
-              🟡 Zona no verificada
-            </p>
+          <div className="min-w-0">
+            <p className="font-semibold text-yellow-800 text-sm">🟡 Zona no verificada</p>
             <p className="text-sm text-yellow-700 mt-0.5">
               Confirmar ubicación exacta antes de despachar. La ciudad no está registrada en la matriz de cobertura.
             </p>
@@ -304,22 +361,52 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
         </div>
       )}
 
-      <div className="grid lg:grid-cols-3 gap-6">
-        {/* Columna izquierda — datos del pedido */}
+      {/* Grid principal — 1 col en móvil, 3 en lg */}
+      <div className="grid lg:grid-cols-3 gap-4 md:gap-6">
+
+        {/* Columna izquierda */}
         <div className="lg:col-span-2 space-y-4">
+
           {/* Info del pedido */}
-          <div className="bg-white rounded-xl border border-gray-100 p-5">
+          <div className="bg-white rounded-xl border border-gray-100 p-4 md:p-5">
             <h2 className="font-semibold text-gray-900 text-sm mb-4">Información del pedido</h2>
-            <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
-              <div><dt className="text-gray-400 text-xs mb-0.5">Cliente</dt><dd className="font-medium text-gray-800">{order.customer_name ?? '—'}</dd></div>
-              <div><dt className="text-gray-400 text-xs mb-0.5">Teléfono</dt><dd className="font-medium text-gray-800">{order.customer_phone ?? '—'}</dd></div>
-              <div className="col-span-2"><dt className="text-gray-400 text-xs mb-0.5">Dirección</dt><dd className="font-medium text-gray-800">{order.customer_address ?? '—'}</dd></div>
-              <div><dt className="text-gray-400 text-xs mb-0.5">Ciudad</dt><dd>{order.city ?? '—'}</dd></div>
-              <div><dt className="text-gray-400 text-xs mb-0.5">Provincia</dt><dd>{order.province ?? '—'}</dd></div>
-              <div className="col-span-2"><dt className="text-gray-400 text-xs mb-0.5">Producto</dt><dd>{order.product_summary ?? '—'}</dd></div>
-              <div><dt className="text-gray-400 text-xs mb-0.5">Monto COD</dt><dd className="font-bold text-green-700">{formatCurrency(order.cod_amount)}</dd></div>
-              <div><dt className="text-gray-400 text-xs mb-0.5">Carrier</dt><dd>{order.carrier ?? '—'}</dd></div>
-              <div><dt className="text-gray-400 text-xs mb-0.5">Último contacto</dt><dd>{order.last_contact_at ? timeAgo(order.last_contact_at) : '—'}</dd></div>
+            <dl className="grid grid-cols-2 gap-x-4 md:gap-x-6 gap-y-3 text-sm">
+              <div>
+                <dt className="text-gray-400 text-xs mb-0.5">Cliente</dt>
+                <dd className="font-medium text-gray-800">{order.customer_name ?? '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-gray-400 text-xs mb-0.5">Teléfono</dt>
+                <dd className="font-medium text-gray-800 break-all">{order.customer_phone ?? '—'}</dd>
+              </div>
+              <div className="col-span-2">
+                <dt className="text-gray-400 text-xs mb-0.5">Dirección</dt>
+                <dd className="font-medium text-gray-800">{order.customer_address ?? '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-gray-400 text-xs mb-0.5">Ciudad</dt>
+                <dd>{order.city ?? '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-gray-400 text-xs mb-0.5">Provincia</dt>
+                <dd>{order.province ?? '—'}</dd>
+              </div>
+              <div className="col-span-2">
+                <dt className="text-gray-400 text-xs mb-0.5">Producto</dt>
+                <dd>{order.product_summary ?? '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-gray-400 text-xs mb-0.5">Monto COD</dt>
+                <dd className="font-bold text-green-700">{formatCurrency(order.cod_amount)}</dd>
+              </div>
+              <div>
+                <dt className="text-gray-400 text-xs mb-0.5">Carrier</dt>
+                <dd>{order.carrier ?? '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-gray-400 text-xs mb-0.5">Último contacto</dt>
+                <dd>{order.last_contact_at ? timeAgo(order.last_contact_at) : '—'}</dd>
+              </div>
               {order.last_contact_result && (
                 <div className="col-span-2">
                   <dt className="text-gray-400 text-xs mb-0.5">Resultado contacto</dt>
@@ -331,14 +418,14 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
           {/* Tracking EFI */}
           {(order.delivery_attempts > 0 || order.last_tracking_update || order.last_attempt_reason) && (
-            <div className="bg-white rounded-xl border border-gray-100 p-5">
+            <div className="bg-white rounded-xl border border-gray-100 p-4 md:p-5">
               <h2 className="font-semibold text-gray-900 text-sm mb-4 flex items-center gap-2">
                 <RefreshCw className="w-4 h-4 text-gray-400" />
                 Tracking EFI
               </h2>
 
-              {/* Métricas principales */}
-              <dl className="grid grid-cols-3 gap-x-6 gap-y-3 text-sm">
+              {/* Métricas — 2 cols en móvil, 3 en sm+ */}
+              <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 md:gap-x-6 gap-y-3 text-sm">
                 <div>
                   <dt className="text-gray-400 text-xs mb-0.5">Intentos de entrega</dt>
                   <dd className={`font-bold text-base ${
@@ -353,7 +440,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   <dt className="text-gray-400 text-xs mb-0.5">Estado EFI</dt>
                   <dd className="text-gray-600 italic text-xs leading-tight mt-0.5">{order.raw_status ?? '—'}</dd>
                 </div>
-                <div>
+                <div className="col-span-2 sm:col-span-1">
                   <dt className="text-gray-400 text-xs mb-0.5">Última actualización</dt>
                   <dd className="text-gray-600 text-xs leading-tight mt-0.5">
                     {order.last_tracking_update ? formatDate(order.last_tracking_update, true) : '—'}
@@ -361,7 +448,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 </div>
               </dl>
 
-              {/* Última observación del mensajero */}
+              {/* Última observación */}
               {order.last_attempt_reason && (
                 <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200">
                   <p className="text-xs font-semibold text-amber-700 mb-1">
@@ -371,7 +458,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 </div>
               )}
 
-              {/* Historial de novedades — visible directo */}
+              {/* Historial de novedades */}
               {order.tracking_novedades && order.tracking_novedades.length > 0 && (
                 <div className="mt-4 border-t border-gray-50 pt-4">
                   <p className="text-xs font-semibold text-gray-600 mb-2">
@@ -391,14 +478,16 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 </div>
               )}
 
-              {/* Historial de estados — detrás de toggle */}
+              {/* Historial de estados */}
               {order.tracking_history && order.tracking_history.length > 0 && (
                 <div className="mt-4 border-t border-gray-50 pt-4">
                   <button
                     onClick={() => setShowHistorial(v => !v)}
                     className="text-xs text-blue-600 hover:text-blue-700 font-medium"
                   >
-                    {showHistorial ? 'Ocultar historial de estados' : `Ver historial de estados (${order.tracking_history.length})`}
+                    {showHistorial
+                      ? 'Ocultar historial de estados'
+                      : `Ver historial de estados (${order.tracking_history.length})`}
                   </button>
                   {showHistorial && (
                     <div className="mt-3 space-y-1">
@@ -417,26 +506,30 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
           {/* Intentos de entrega */}
           {attempts.length > 0 && (
-            <div className="bg-white rounded-xl border border-gray-100 p-5">
+            <div className="bg-white rounded-xl border border-gray-100 p-4 md:p-5">
               <h2 className="font-semibold text-gray-900 text-sm mb-4">
                 Intentos de entrega
                 <span className="ml-2 text-xs text-gray-400 font-normal">
-                  {attempts.filter(a => a.is_valid).length} válidos · {attempts.filter(a => !a.is_valid).length} inválidos
+                  {attempts.filter(a => a.is_valid).length} válidos ·{' '}
+                  {attempts.filter(a => !a.is_valid).length} inválidos
                 </span>
               </h2>
               <div className="space-y-2">
                 {attempts.map(attempt => (
-                  <div key={attempt.id} className={`flex items-center gap-3 p-3 rounded-lg
+                  <div key={attempt.id} className={`flex items-start gap-3 p-3 rounded-lg
                     ${!attempt.is_valid ? 'bg-red-50 border border-red-100' : 'bg-gray-50'}`}>
-                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center
+                                    text-xs font-bold shrink-0 mt-0.5
                       ${!attempt.is_valid ? 'bg-red-200 text-red-700' : 'bg-blue-100 text-blue-700'}`}>
                       {attempt.attempt_number}
                     </div>
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <p className="text-sm text-gray-700">
                         Intento #{attempt.attempt_number}
                         {attempt.attempted_at && ` · ${formatDate(attempt.attempted_at)}`}
-                        {attempt.source === 'manual' && <span className="ml-1 text-xs text-gray-400">(manual)</span>}
+                        {attempt.source === 'manual' && (
+                          <span className="ml-1 text-xs text-gray-400">(manual)</span>
+                        )}
                       </p>
                       {!attempt.is_valid && attempt.invalid_reason && (
                         <p className="text-xs text-red-600 mt-0.5">
@@ -444,21 +537,22 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                           {attempt.invalid_notes && ` — ${attempt.invalid_notes}`}
                         </p>
                       )}
+                      {attempt.is_valid && (
+                        <div className="flex gap-1 mt-1.5 flex-wrap">
+                          {INVALID_REASONS.slice(0, 2).map(r => (
+                            <button
+                              key={r.value}
+                              onClick={() => handleInvalidateAttempt(attempt.id, r.value)}
+                              className="text-xs px-2 py-1 rounded border border-red-200
+                                         text-red-600 hover:bg-red-50 transition-colors"
+                              title={r.label}
+                            >
+                              {r.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    {attempt.is_valid && (
-                      <div className="flex gap-1">
-                        {INVALID_REASONS.slice(0, 2).map(r => (
-                          <button
-                            key={r.value}
-                            onClick={() => handleInvalidateAttempt(attempt.id, r.value)}
-                            className="text-xs px-2 py-1 rounded border border-red-200 text-red-600 hover:bg-red-50"
-                            title={r.label}
-                          >
-                            {r.label}
-                          </button>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
@@ -466,14 +560,15 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           )}
 
           {/* Acciones del agente */}
-          <div className="bg-white rounded-xl border border-gray-100 p-5">
+          <div className="bg-white rounded-xl border border-gray-100 p-4 md:p-5">
             <h2 className="font-semibold text-gray-900 text-sm mb-4">Registrar acción</h2>
             <div className="space-y-3">
-              <div className="flex gap-3 flex-wrap">
+              <div className="flex gap-2 flex-col sm:flex-row">
                 <select
                   value={actionType}
                   onChange={e => setActionType(e.target.value as ActionType)}
-                  className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2
+                             focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   {(Object.keys(ACTION_LABELS) as ActionType[])
                     .filter(t => t !== 'note_added')
@@ -485,7 +580,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   <select
                     value={contactResult}
                     onChange={e => setContactResult(e.target.value as ContactResult)}
-                    className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2
+                               focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     {(Object.keys(CONTACT_RESULT_LABELS) as ContactResult[]).map(r => (
                       <option key={r} value={r}>{CONTACT_RESULT_LABELS[r]}</option>
@@ -497,7 +593,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 value={actionNotes}
                 onChange={e => setActionNotes(e.target.value)}
                 placeholder="Nota sobre esta acción (opcional)"
-                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2
+                           focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <div className="flex items-center gap-3">
                 <Button onClick={handleAddAction} disabled={savingAction} size="sm">
@@ -505,7 +602,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   Registrar acción
                 </Button>
                 {actionFeedback && (
-                  <span className={`text-sm font-medium ${actionFeedback === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                  <span className={`text-sm font-medium
+                    ${actionFeedback === 'success' ? 'text-green-600' : 'text-red-600'}`}>
                     {actionFeedback === 'success' ? 'Acción registrada' : 'Error al registrar'}
                   </span>
                 )}
@@ -518,16 +616,21 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 {actions.map(action => (
                   <div key={action.id} className="flex gap-3 text-sm">
                     <div className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-2 shrink-0" />
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <p className="text-gray-800">
+                        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                         <span className="font-medium">{(action as any).profile?.full_name ?? '—'}</span>
                         {' — '}
                         {ACTION_LABELS[action.action_type]}
                         {action.contact_result && (
-                          <span className="text-gray-500"> · {CONTACT_RESULT_LABELS[action.contact_result]}</span>
+                          <span className="text-gray-500">
+                            {' · '}{CONTACT_RESULT_LABELS[action.contact_result]}
+                          </span>
                         )}
                       </p>
-                      {action.notes && <p className="text-xs text-gray-500 mt-0.5">{action.notes}</p>}
+                      {action.notes && (
+                        <p className="text-xs text-gray-500 mt-0.5">{action.notes}</p>
+                      )}
                       <p className="text-xs text-gray-400 mt-0.5">{timeAgo(action.created_at)}</p>
                     </div>
                   </div>
@@ -537,11 +640,13 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           </div>
 
           {/* Notas internas */}
-          <div className="bg-white rounded-xl border border-gray-100 p-5">
+          <div className="bg-white rounded-xl border border-gray-100 p-4 md:p-5">
             <h2 className="font-semibold text-gray-900 text-sm mb-4 flex items-center gap-2">
               <MessageSquare className="w-4 h-4 text-gray-400" />
               Notas internas
-              {notes.length > 0 && <span className="text-xs text-gray-400 font-normal">({notes.length})</span>}
+              {notes.length > 0 && (
+                <span className="text-xs text-gray-400 font-normal">({notes.length})</span>
+              )}
             </h2>
 
             <div className="flex gap-2">
@@ -563,6 +668,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 <div key={note.id} className="bg-gray-50 rounded-lg p-3">
                   <p className="text-sm text-gray-800">{note.content}</p>
                   <p className="text-xs text-gray-400 mt-1">
+                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                     {(note as any).profile?.full_name ?? '—'} · {timeAgo(note.created_at)}
                   </p>
                 </div>
@@ -576,6 +682,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
         {/* Columna derecha — panel de control */}
         <div className="space-y-4">
+
           {/* Asignar responsable */}
           <div className="bg-white rounded-xl border border-gray-100 p-4">
             <h3 className="font-semibold text-gray-900 text-sm mb-3 flex items-center gap-2">
@@ -597,7 +704,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
               Actualizar
             </Button>
             {assignFeedback && (
-              <p className={`text-xs font-medium mt-1 ${assignFeedback === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+              <p className={`text-xs font-medium mt-1
+                ${assignFeedback === 'success' ? 'text-green-600' : 'text-red-600'}`}>
                 {assignFeedback === 'success' ? 'Responsable actualizado' : 'Error actualizando'}
               </p>
             )}
@@ -607,7 +715,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 <p className="text-xs text-gray-400 mb-2">Historial de asignaciones</p>
                 {assignments.map(a => (
                   <p key={a.id} className="text-xs text-gray-600">
+                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                     {(a as any).assigned_profile?.full_name ?? '—'}
+                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                     <span className="text-gray-400"> por {(a as any).assigned_by_profile?.full_name ?? '—'}</span>
                     <span className="text-gray-300"> · {formatDate(a.assigned_at)}</span>
                   </p>
@@ -630,10 +740,10 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                       : 'border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50'
                     }`}
                 >
-                  {cls === null ? 'Sin clasificar' :
-                   cls === 'critical'  ? 'Crítico' :
-                   cls === 'urgent'    ? 'Urgente' :
-                   cls === 'follow_up' ? 'Seguimiento' : 'Reclamo'}
+                  {cls === null       ? 'Sin clasificar' :
+                   cls === 'critical' ? 'Crítico'        :
+                   cls === 'urgent'   ? 'Urgente'        :
+                   cls === 'follow_up'? 'Seguimiento'    : 'Reclamo'}
                 </button>
               ))}
             </div>
@@ -644,28 +754,32 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             <h3 className="font-semibold text-gray-900 text-sm mb-3">Resultado final</h3>
             <div className="space-y-1.5">
               {([
-                { value: 'pending',   label: 'Pendiente',   icon: Clock,          color: 'text-gray-600' },
-                { value: 'delivered', label: 'Entregado',   icon: CheckCircle2,   color: 'text-green-600' },
-                { value: 'returned',  label: 'Devuelto',    icon: RotateCcw,      color: 'text-red-600' },
-                { value: 'recovered', label: 'Recuperado',  icon: ShieldAlert,    color: 'text-blue-600' },
-                { value: 'no_action', label: 'Sin acción',  icon: AlertTriangle,  color: 'text-amber-600' },
-              ] as { value: FollowUpResult; label: string; icon: React.ElementType; color: string }[]).map(({ value, label, icon: Icon, color }) => (
-                <button
-                  key={value}
-                  onClick={() => handleFollowUpResult(value)}
-                  className={`flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-left
-                    border transition-colors
-                    ${order.follow_up_result === value
-                      ? 'border-blue-500 bg-blue-50'
-                      : 'border-gray-100 hover:bg-gray-50'
-                    }`}
-                >
-                  <Icon className={`w-4 h-4 ${color}`} />
-                  <span className={order.follow_up_result === value ? 'font-medium text-blue-700' : 'text-gray-700'}>
-                    {label}
-                  </span>
-                </button>
-              ))}
+                { value: 'pending',   label: 'Pendiente',  icon: Clock,         color: 'text-gray-600'  },
+                { value: 'delivered', label: 'Entregado',  icon: CheckCircle2,  color: 'text-green-600' },
+                { value: 'returned',  label: 'Devuelto',   icon: RotateCcw,     color: 'text-red-600'   },
+                { value: 'recovered', label: 'Recuperado', icon: ShieldAlert,   color: 'text-blue-600'  },
+                { value: 'no_action', label: 'Sin acción', icon: AlertTriangle, color: 'text-amber-600' },
+              ] as { value: FollowUpResult; label: string; icon: React.ElementType; color: string }[]).map(
+                ({ value, label, icon: Icon, color }) => (
+                  <button
+                    key={value}
+                    onClick={() => handleFollowUpResult(value)}
+                    className={`flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm
+                                text-left border transition-colors
+                      ${order.follow_up_result === value
+                        ? 'border-blue-500 bg-blue-50'
+                        : 'border-gray-100 hover:bg-gray-50'
+                      }`}
+                  >
+                    <Icon className={`w-4 h-4 ${color}`} />
+                    <span className={order.follow_up_result === value
+                      ? 'font-medium text-blue-700'
+                      : 'text-gray-700'}>
+                      {label}
+                    </span>
+                  </button>
+                )
+              )}
             </div>
           </div>
 
@@ -680,8 +794,12 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 {history.slice(0, 8).map(h => (
                   <div key={h.id} className="text-xs text-gray-600">
                     <span className="font-medium">{h.field}</span>
-                    {' '}{h.old_value ?? 'vacío'} → <span className="text-blue-700">{h.new_value ?? 'vacío'}</span>
-                    <p className="text-gray-400">{(h as any).profile?.full_name ?? 'Sistema'} · {timeAgo(h.created_at)}</p>
+                    {' '}{h.old_value ?? 'vacío'} →{' '}
+                    <span className="text-blue-700">{h.new_value ?? 'vacío'}</span>
+                    <p className="text-gray-400">
+                      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                      {(h as any).profile?.full_name ?? 'Sistema'} · {timeAgo(h.created_at)}
+                    </p>
                   </div>
                 ))}
               </div>
