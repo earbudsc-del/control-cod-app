@@ -1,6 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
-import { Sidebar } from '@/components/layout/sidebar'
+import { NavShell } from '@/components/layout/nav-shell'
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient()
@@ -17,10 +17,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const role = profile?.role ?? 'agent'
 
   return (
-    <div className="min-h-screen flex">
-      <Sidebar role={role} />
-      <main className="flex-1 ml-56 min-h-screen">
-        <div className="p-6 max-w-screen-xl mx-auto">
+    <div className="min-h-screen bg-gray-50">
+      {/* NavShell: topbar móvil + overlay + sidebar (drawer en móvil, fija en desktop) */}
+      <NavShell role={role} />
+      <main className="md:ml-56 min-h-screen">
+        {/* pt-14 en móvil para compensar el topbar fijo (h-14); md:pt-0 en desktop */}
+        <div className="pt-14 md:pt-0 px-4 py-4 md:p-6 max-w-screen-xl mx-auto">
           {children}
         </div>
       </main>

@@ -1,12 +1,13 @@
 'use client'
 
+import { useEffect, useRef } from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import {
   LayoutDashboard, Package, Upload, BarChart2,
   Settings, LogOut, Truck, Bike, AlertCircle, ClipboardList,
-  ListTodo, TrendingUp, Box, CheckCircle2,
+  ListTodo, TrendingUp, Box, CheckCircle2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
@@ -62,13 +63,11 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/transito',       label: 'Tránsito',       icon: Box,        alert: null    },
   ],
 
-  // Fallback para role = 'agent' (usuarios migrados sin rol especializado)
   agent: [
     { href: '/my-tasks',     label: 'Mis tareas',     icon: ListTodo,        alert: null     },
     { href: '/orders',       label: 'Pedidos',        icon: Package,         alert: null     },
   ],
 
-  // viewer: solo lectura, acceso mínimo
   viewer: [
     { href: '/orders',       label: 'Pedidos',        icon: Package,         alert: null     },
   ],
@@ -77,12 +76,22 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
 // ─── Componente ─────────────────────────────────────────────────────────────
 
 interface SidebarProps {
-  role: UserRole | string
+  role:     UserRole | string
+  isOpen?:  boolean
+  onClose?: () => void
 }
 
-export function Sidebar({ role }: SidebarProps) {
-  const pathname = usePathname()
-  const router   = useRouter()
+export function Sidebar({ role, isOpen = false, onClose }: SidebarProps) {
+  const pathname  = usePathname()
+  const didMount  = useRef(false)
+
+  // Auto-cierra el drawer en móvil cuando el usuario navega
+  useEffect(() => {
+    if (!didMount.current) { didMount.current = true; return }
+    onClose?.()
+  // pathname cambia al navegar — ignorar onClose en deps para evitar loop
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname])
 
   const nav = NAV_BY_ROLE[role] ?? NAV_BY_ROLE['agent']
 
@@ -93,14 +102,30 @@ export function Sidebar({ role }: SidebarProps) {
   }
 
   return (
-    <aside className="fixed inset-y-0 left-0 w-56 bg-gray-900 flex flex-col z-30">
+    <aside className={cn(
+      'fixed inset-y-0 left-0 w-56 bg-gray-900 flex flex-col z-50',
+      'transition-transform duration-300 ease-in-out',
+      // Móvil: oculto por defecto, visible cuando isOpen
+      // Desktop (md+): siempre visible independientemente de isOpen
+      isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
+    )}>
 
       {/* Brand */}
-      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-gray-800">
-        <div className="flex items-center justify-center w-8 h-8 bg-blue-600 rounded-lg shrink-0">
-          <Truck className="w-4 h-4 text-white" />
+      <div className="flex items-center justify-between px-4 py-5 border-b border-gray-800">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center justify-center w-8 h-8 bg-blue-600 rounded-lg shrink-0">
+            <Truck className="w-4 h-4 text-white" />
+          </div>
+          <span className="text-white font-semibold text-sm">Control COD</span>
         </div>
-        <span className="text-white font-semibold text-sm">Control COD</span>
+        {/* Botón X — solo en móvil */}
+        <button
+          onClick={onClose}
+          className="md:hidden p-1.5 text-gray-400 hover:text-white rounded-lg transition-colors"
+          aria-label="Cerrar menú"
+        >
+          <X className="w-4 h-4" />
+        </button>
       </div>
 
       {/* Nav */}
@@ -117,7 +142,7 @@ export function Sidebar({ role }: SidebarProps) {
               key={href}
               href={href}
               className={cn(
-                'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
+                'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
                 active && isAmber  && 'bg-amber-700/50 text-amber-200',
                 active && isRed    && 'bg-red-900/50 text-red-200',
                 active && isIndigo && 'bg-indigo-700/50 text-indigo-200',

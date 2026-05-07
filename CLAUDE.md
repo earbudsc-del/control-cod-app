@@ -22,7 +22,8 @@
 | My-tasks | `/my-tasks` | Filtrado por rol automáticamente |
 | Panel admin | `/settings` | Ver usuarios (con email, último login, última acción), asignar roles con confirm dialog |
 | Auth + sesión | `middleware.ts` | Funcional — tokens se refrescan correctamente |
-| Sidebar dinámico | `components/layout/sidebar.tsx` | Nav por rol desde `NAV_BY_ROLE` |
+| Sidebar dinámico | `components/layout/sidebar.tsx` | Nav por rol desde `NAV_BY_ROLE`. Drawer en móvil, fija en desktop |
+| Nav Shell | `components/layout/nav-shell.tsx` | Client Component: topbar hamburger (móvil) + overlay + estado open/close |
 | Duplicados | webhook + `/orders/[id]` | Detecta por customer_phone en ventana 7 días |
 | Parser EFI | `src/lib/tracking/efi-parser.ts` | Basado en divs `tracking-item/content`, fallback a tablas |
 | Pipeline mini KPI | `components/shared/flujo-kpis.tsx` | Generadas → Tránsito → En reparto (en /novedad y /reparto) |
@@ -48,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Layout global responsive: sidebar drawer en móvil, topbar hamburger, contenido full-width** | 2026-05-06 | `layout.tsx`, `sidebar.tsx`, `nav-shell.tsx` (nuevo) |
 | **Responsive/mobile-first en /novedad: cards para móvil, tabla se mantiene en desktop** | 2026-05-06 | `novedad/page.tsx` |
 | **Vercel Cron Job: tracking en producción cada 5 min sin dependencia de PC local** | 2026-05-06 | `vercel.json` (nuevo), `api/tracking/auto/route.ts` |
 | **Gestión de usuarios mejorada: email, último login, última acción, confirm dialog en rol** | 2026-05-06 | `api/profiles/route.ts`, `src/types/index.ts`, `settings/page.tsx` |
@@ -209,6 +211,68 @@
 - **`markRecuperada(orderId)`:** acción manual que patchea `follow_up_result='recovered'` y saca el pedido de `activeOrders`. El tab "Entregadas" NO se actualiza inmediatamente al marcar — espera el próximo fetchData para mostrar datos EFI actualizados.
 
 **Archivos modificados (2026-05-03):** `src/app/(app)/novedad/page.tsx`
+
+### Layout global — Responsive mobile (2026-05-06)
+
+**Problema resuelto:** En móvil, `main` tenía `ml-56` fijo y la sidebar era `fixed` siempre visible → el contenido principal quedaba comprimido a ~166px en pantallas de 390px.
+
+**Arquitectura del nuevo layout:**
+
+```
+AppLayout (Server Component — layout.tsx)
+  ├── NavShell (Client Component — nav-shell.tsx)  [gestiona estado open/close]
+  │     ├── <header> topbar móvil (hamburger ☰ + brand) — solo visible < md
+  │     ├── overlay oscuro (backdrop) — solo cuando sidebar está abierta en móvil
+  │     └── <Sidebar> (con isOpen + onClose props)
+  └── <main> md:ml-56 — sin margin en móvil, margen en desktop
+        └── div pt-14 md:pt-0 — espacio para topbar fija en móvil
+```
+
+**`src/components/layout/nav-shell.tsx` (NUEVO — Client Component):**
+- `useState(false)` → controla si el drawer está abierto
+- Renderiza el topbar móvil (`md:hidden`): botón ☰ + brand "Control COD"
+- Renderiza overlay (`z-40`) cuando `open=true` — `onClick` cierra el drawer
+- Renderiza `<Sidebar isOpen={open} onClose={() => setOpen(false)} />`
+
+**`src/components/layout/sidebar.tsx` (MODIFICADO):**
+- Props nuevas: `isOpen?: boolean`, `onClose?: () => void`
+- Clase dinámica: `isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'`
+  - Móvil cerrado: `-translate-x-full` (sidebar fuera de pantalla, a la izquierda)
+  - Móvil abierto: `translate-x-0` (sidebar visible como drawer)
+  - Desktop siempre: `md:translate-x-0` (sidebar fija, sin importar isOpen)
+- `transition-transform duration-300 ease-in-out` → animación suave
+- Botón ✕ en el header del sidebar — `md:hidden` (solo en móvil)
+- `useEffect([pathname])` con ref `didMount` → auto-cierra el drawer al navegar
+- Tap targets de nav links: `py-2.5` (antes `py-2`) para mejor usabilidad táctil
+- `useRouter` eliminado (no se usaba)
+
+**`src/app/(app)/layout.tsx` (MODIFICADO):**
+- `import { NavShell }` en lugar de `{ Sidebar }`
+- `main className="md:ml-56 min-h-screen"` — sin `flex-1` ni `ml-56` base
+- `div className="pt-14 md:pt-0 px-4 py-4 md:p-6 max-w-screen-xl mx-auto"`
+  - `pt-14`: espacio bajo el topbar fijo en móvil (el topbar mide h-14)
+  - `md:pt-0`: en desktop no hay topbar, padding normal
+  - `px-4 py-4 md:p-6`: padding menor en móvil, el habitual en desktop
+- No se pasa `role` a `Sidebar` directamente — va a través de `NavShell`
+
+**Z-index layers:**
+- `z-30` — topbar móvil
+- `z-40` — overlay (cubre contenido + topbar cuando sidebar está abierta)
+- `z-50` — sidebar/drawer (siempre encima del overlay)
+
+**Roles, auth y nav:** Sin cambios. `NAV_BY_ROLE` intacto. `isAgentOrAbove()` intacto. El Server Component sigue pasando el `role` al `NavShell`.
+
+**Cómo probarlo:**
+1. `npm run dev`
+2. Chrome DevTools → Toggle Device Toolbar → iPhone 14 Pro (390px)
+3. Verificar: header gris con ☰ y "Control COD" en top; contenido en full-width
+4. Tocar ☰ → sidebar desliza de izquierda con animación suave + overlay oscuro
+5. Tocar fuera (overlay) → sidebar se cierra
+6. Tocar ✕ en el sidebar → sidebar se cierra
+7. Navegar a otro módulo desde el sidebar → sidebar se cierra automáticamente
+8. Quitar Device Toolbar → sidebar fija desktop, sin topbar, layout idéntico al anterior
+
+**Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
 
 ### /novedad — Responsive mobile-first (2026-05-06)
 
