@@ -79,7 +79,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       }
 
       setDetail(detailRes)
-      setAgents(agentsRes ?? [])
+      setAgents(Array.isArray(agentsRes) ? agentsRes : [])
       setSelectedAgent(detailRes.order?.assigned_to ?? '')
       const task = (tasksRes.tasks ?? []).find((t: { order_id: string | null }) => t.order_id === id)
       setTaskId(task?.id ?? null)

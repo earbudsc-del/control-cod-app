@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Fix acceso /orders/[id] para confirmation_agent y novelty_agent: perfiles básicos para no-admins, setAgents resiliente** | 2026-05-06 | `api/profiles/route.ts`, `orders/[id]/page.tsx` |
 | **Fix crash /orders/[id] en móvil: try/catch en load(), guard de estructura API, null-safety en arrays** | 2026-05-06 | `orders/[id]/page.tsx` |
 | **Layout global responsive: sidebar drawer en móvil, topbar hamburger, contenido full-width** | 2026-05-06 | `layout.tsx`, `sidebar.tsx`, `nav-shell.tsx` (nuevo) |
 | **Responsive/mobile-first en /novedad: cards para móvil, tabla se mantiene en desktop** | 2026-05-06 | `novedad/page.tsx` |
@@ -133,6 +134,7 @@
 
 | Problema | Causa raíz | Fix aplicado |
 |---|---|---|
+| **Client-side exception en `/orders/[id]` para confirmation_agent y novelty_agent** | `GET /api/profiles` era admin-only (devolvía `403 { error: 'Solo admins' }`). `load()` hacía `setAgents(agentsRes ?? [])` → agentsRes era truthy (objeto `{error}`), no pasaba el `??` → `setAgents({ error: '...' })` → `agents.filter(...)` en render → **TypeError: agents.filter is not a function**. Fix dual: (1) `GET /api/profiles` retorna lista básica `(id, full_name, role)` para no-admins sin exponer email/auth data; (2) `setAgents(Array.isArray(agentsRes) ? agentsRes : [])` como defensa adicional. | `api/profiles/route.ts`, `orders/[id]/page.tsx` |
 | **Client-side exception en `/orders/[id]` desde móvil** | `load()` sin `try/catch` → si la API devuelve `{ error: '...' }` (401/404/500), `setDetail({ error })` hace que `!detail` sea `false` → `const { order } = detail` → `order = undefined` → `order.sla_deadline` → TypeError en render. En móvil se dispara más por sesiones expiradas o red intermitente. Fix: `try/catch/finally` con `setLoading(false)` en finally, estado `loadError`, guard `if (!detailRes?.order)` antes de setDetail, fallback `?? []` en todos los arrays, pantalla de error con botón Reintentar. | `orders/[id]/page.tsx` |
 | `/api/dashboard` devolvía 401 tras reinicio | `middleware.ts` hacía early return `/api` antes de `getUser()` → tokens nunca se refrescaban | Mover `getUser()` antes del `if (path.startsWith('/api')) return response` |
 | Logout → loading infinito | `router.push('/login') + router.refresh()` competían entre sí | `window.location.href = '/login'` |
@@ -388,6 +390,32 @@ order_id: FK a orders
 | `delivery_agent` | Mi rendimiento, En Reparto, Tránsito |
 | `agent` | Mis tareas, Pedidos |
 | `viewer` | Pedidos (solo lectura) |
+
+### Roles con acceso a /orders/[id]
+
+| Rol | Acceso | Notas operativas |
+|---|---|---|
+| `admin` | Completo — lectura + escritura + asignación | Dropdown agentes con email/auth data |
+| `ia_supervisor` | Completo — lectura + escritura + asignación | Dropdown agentes básico (sin email) |
+| `confirmation_agent` | Lectura + acciones + notas | Necesita ver detalle desde /confirmacion; dropdown agentes básico |
+| `novelty_agent` | Lectura + acciones + notas | Necesita ver detalle desde /novedad; dropdown agentes básico |
+| `delivery_agent` | Lectura + acciones + notas | Necesita ver detalle desde /reparto; dropdown agentes básico |
+| `agent` | Lectura + acciones + notas | Dropdown agentes básico |
+| `viewer` | Solo lectura (RLS permite SELECT vía `is_agent_or_above`) | — |
+
+**`GET /api/profiles` — comportamiento por rol:**
+- `admin`: lista completa con `email`, `last_sign_in_at`, `last_activity` (requiere service role key)
+- cualquier otro rol autenticado: lista básica `(id, full_name, role)` — solo lo necesario para el dropdown de asignación, sin datos sensibles
+
+**Motivo operativo:** `confirmation_agent` y `novelty_agent` usan el botón "Ver detalle" desde `/confirmacion` y `/novedad` respectivamente. Necesitan ver el timeline de acciones, notas internas, tracking EFI y datos del pedido para gestionar correctamente su cola de trabajo.
+
+**Cómo probar el fix de acceso /orders/[id] (2026-05-06):**
+1. `npm run dev` en `control-cod-app/`
+2. Login como `confirmation_agent` → ir a `/confirmacion` → tocar "Ver detalle" en cualquier pedido → debe abrir `/orders/[id]` sin crash
+3. Login como `novelty_agent` → ir a `/novedad` → tocar "Ver detalle" → debe abrir sin crash
+4. Verificar que la sección "Responsable" muestra el dropdown con los agentes disponibles (lista básica: nombre + rol)
+5. Verificar que el admin sigue viendo email + último login en `/settings` (datos completos intactos)
+6. Verificar que acciones (notas, registrar acción) siguen funcionando para los roles afectados
 
 **Regla de visibilidad de /confirmados y /despachados:** Solo `admin`. No visibles para confirmation_agent, delivery_agent, ni ningún otro rol. Las rutas existen y son accesibles vía URL directa, pero no aparecen en el nav de otros roles.
 

@@ -7,11 +7,17 @@ export async function GET() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
 
-    // Admin-only
     const { data: caller } = await supabase
       .from('profiles').select('role').eq('id', user.id).single()
+
+    // No-admins: devolver lista básica sin datos sensibles (email/auth)
+    // Necesario para el dropdown "Asignar responsable" en /orders/[id]
     if (caller?.role !== 'admin') {
-      return NextResponse.json({ error: 'Solo admins' }, { status: 403 })
+      const { data: profiles } = await supabase
+        .from('profiles')
+        .select('id, full_name, role')
+        .order('full_name')
+      return NextResponse.json(profiles ?? [])
     }
 
     const service = await createServiceClient()
