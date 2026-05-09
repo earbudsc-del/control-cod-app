@@ -13,12 +13,12 @@ import {
   AlertTriangle, MapPinOff, ChevronLeft, ChevronRight, Search, Truck,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
-import { checkCoverage } from '@/lib/alert-helpers'
+import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 
 const MAX_ATTEMPTS = 3
 const MS_48H       = 48 * 60 * 60 * 1000
 
-type Tab           = 'all' | 'nuevos' | 'reintentar' | 'atrasados' | 'duplicados' | 'cobertura' | 'zona_desconocida'
+type Tab           = 'all' | 'nuevos' | 'reintentar' | 'atrasados' | 'duplicados' | 'cobertura' | 'zona_desconocida' | 'santo_domingo'
 type ContactMethod = 'call' | 'whatsapp' | 'other'
 
 interface ConfirmStats {
@@ -34,6 +34,8 @@ interface ConfirmStats {
   pendingTotal:       number
   confirmadosSinGuia: number
   despachados:        number
+  santoDomingoPendientes?:        number
+  santoDomingoConfirmadosSinGuia?: number
 }
 
 interface ConfirmResult {
@@ -87,6 +89,7 @@ const TAB_META: { tab: Tab; label: string }[] = [
   { tab: 'duplicados',       label: '⚠️ Duplicados'   },
   { tab: 'cobertura',        label: '🚫 Cobertura'    },
   { tab: 'zona_desconocida', label: '🟡 Zona desc.'   },
+  { tab: 'santo_domingo',    label: '🏙️ Sto. Domingo' },
 ]
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -150,11 +153,226 @@ function sortedAll(orders: Order[]): Order[] {
   return [...bucket1, ...bucket2, ...bucket3]
 }
 
+// ── Card móvil ────────────────────────────────────────────────────────────────
+
+interface ConfirmacionCardProps {
+  order:         Order
+  terminal:      string | undefined
+  totalAttempts: number
+  confidence:    string | undefined
+  busy:          boolean
+  isHighlighted: boolean
+  onConfirmed:   () => void
+  onNoAnswer:    () => void
+  onNoCoverage:  () => void
+  onCancelled:   () => void
+  onSetMethod:   (method: ContactMethod) => void
+}
+
+function ConfirmacionCard({
+  order, terminal, totalAttempts, confidence,
+  busy, isHighlighted, onConfirmed, onNoAnswer, onNoCoverage, onCancelled, onSetMethod,
+}: ConfirmacionCardProps) {
+  const nombre  = order.customer_name ?? ''
+  const waUrl   = whatsAppUrl(order.customer_phone, buildConfirmMsg(nombre, order.product_summary, order.cod_amount))
+  const telUrl  = callUrl(order.customer_phone)
+  const hasPhone = !!order.customer_phone
+  const cov     = checkCoverage(order.customer_address, order.city)
+  const hasDup  = !!order.duplicate_alert
+  const hasAlert = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
+
+  const confStatusKey = terminal
+    ? (terminal === 'wrong_number' ? 'unreachable' : terminal)
+    : ((order.confirmation_status === 'wrong_number' ? 'unreachable' : order.confirmation_status) ?? 'pending')
+  const statusBadge    = CONF_STATUS[confStatusKey]
+  const confidenceBadge = confidence ? CONFIDENCE[confidence] : null
+
+  return (
+    <div
+      className={`p-4 space-y-3
+        ${isHighlighted
+          ? 'bg-blue-50/80 ring-2 ring-inset ring-blue-400'
+          : hasAlert
+            ? 'bg-amber-50/50'
+            : 'bg-white'
+        }`}
+    >
+      {/* Fila 1: orden# + hora + alertas */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-mono text-xs text-gray-400">
+            {order.order_number ?? '—'}
+            <span className="mx-1 text-gray-300">·</span>
+            {formatOrderTime(order.shopify_created_at ?? order.created_at)}
+          </p>
+        </div>
+        <AlertBadges
+          duplicateAlert={order.duplicate_alert}
+          customerAddress={order.customer_address}
+          city={order.city}
+          province={order.province}
+        />
+      </div>
+
+      {/* Fila 2: cliente + teléfono */}
+      <div>
+        <p className="font-semibold text-gray-900 text-sm leading-tight">
+          {nombre || '—'}
+        </p>
+        <p className="font-mono text-xs text-gray-500 mt-0.5">
+          {order.customer_phone ?? '—'}
+        </p>
+      </div>
+
+      {/* Fila 3: ciudad + producto */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-1 text-gray-600">
+          <MapPin className="w-3 h-3 text-gray-400 shrink-0" />
+          <span className="text-xs">{order.city || '—'}</span>
+        </div>
+        {order.product_summary && (
+          <span className="text-[10px] text-gray-400 truncate max-w-[180px]">
+            {order.product_summary}
+          </span>
+        )}
+      </div>
+
+      {/* Fila 4: monto + intentos + estado + confianza */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-sm font-bold text-green-700">
+          {formatCurrency(order.cod_amount)}
+        </span>
+        {totalAttempts > 0 && (
+          <span className={`text-xs font-bold px-2 py-0.5 rounded-full
+            ${totalAttempts >= MAX_ATTEMPTS
+              ? 'bg-red-100 text-red-700'
+              : 'bg-amber-100 text-amber-700'}`}>
+            {totalAttempts}/{MAX_ATTEMPTS}
+          </span>
+        )}
+        {statusBadge && (
+          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusBadge.cls}`}>
+            {statusBadge.label}
+          </span>
+        )}
+        {confidenceBadge && (
+          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${confidenceBadge.cls}`}>
+            {confidenceBadge.label}
+          </span>
+        )}
+      </div>
+
+      {/* Acciones */}
+      {busy ? (
+        <div className="flex items-center justify-center py-2">
+          <Spinner className="w-5 h-5 text-indigo-500" />
+        </div>
+      ) : terminal ? (
+        <div className="flex items-center gap-2">
+          <span className={`inline-flex items-center gap-1.5 text-xs font-semibold
+                           px-3 py-1.5 rounded-full
+                           ${TERMINAL[terminal]?.color ?? 'bg-gray-100 text-gray-600'}`}>
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            {TERMINAL[terminal]?.label ?? terminal}
+          </span>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {/* WA + Llamar */}
+          {hasPhone && (
+            <div className="flex gap-2">
+              {waUrl && (
+                <a
+                  href={waUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => onSetMethod('whatsapp')}
+                  className="flex-1 flex items-center justify-center gap-2
+                             min-h-[44px] bg-green-500 hover:bg-green-600
+                             text-white text-sm font-semibold rounded-xl
+                             transition-colors shadow-sm"
+                >
+                  <MessageCircle className="w-4 h-4" />
+                  WhatsApp
+                </a>
+              )}
+              {telUrl && (
+                <a
+                  href={telUrl}
+                  onClick={() => onSetMethod('call')}
+                  className="flex-1 flex items-center justify-center gap-2
+                             min-h-[44px] bg-blue-500 hover:bg-blue-600
+                             text-white text-sm font-semibold rounded-xl
+                             transition-colors shadow-sm"
+                >
+                  <Phone className="w-4 h-4" />
+                  Llamar
+                </a>
+              )}
+            </div>
+          )}
+
+          {/* Grid 2×2 acciones */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onClick={onConfirmed}
+              className="flex items-center justify-center gap-1.5 min-h-[44px]
+                         bg-green-100 hover:bg-green-200 text-green-700
+                         text-sm font-medium rounded-xl transition-colors"
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              Confirmó
+            </button>
+            <button
+              onClick={onNoAnswer}
+              className="flex items-center justify-center gap-1.5 min-h-[44px]
+                         bg-amber-100 hover:bg-amber-200 text-amber-700
+                         text-sm font-medium rounded-xl transition-colors"
+            >
+              <PhoneMissed className="w-4 h-4 shrink-0" />
+              No contesta
+            </button>
+            <button
+              onClick={onNoCoverage}
+              className="flex items-center justify-center gap-1.5 min-h-[44px]
+                         bg-orange-100 hover:bg-orange-200 text-orange-700
+                         text-sm font-medium rounded-xl transition-colors"
+            >
+              <MapPinOff className="w-4 h-4 shrink-0" />
+              Sin cobertura
+            </button>
+            <button
+              onClick={onCancelled}
+              className="flex items-center justify-center gap-1.5 min-h-[44px]
+                         bg-gray-100 hover:bg-gray-200 text-gray-700
+                         text-sm font-medium rounded-xl transition-colors"
+            >
+              <XCircle className="w-4 h-4 shrink-0" />
+              Canceló
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Ver detalle */}
+      <Link
+        href={`/orders/${order.id}`}
+        className="flex items-center justify-center gap-1.5 w-full min-h-[36px]
+                   text-xs font-medium text-indigo-600 hover:text-indigo-800
+                   border border-indigo-200 rounded-lg hover:bg-indigo-50 transition-colors"
+      >
+        <ExternalLink className="w-3.5 h-3.5" />
+        Ver detalle
+      </Link>
+    </div>
+  )
+}
+
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function ConfirmacionPage() {
   const trackingParam = useSearchParams().get('tracking')
-  const rowRefs       = useRef<Map<string, HTMLTableRowElement>>(new Map())
+  const rowRefs       = useRef<Map<string, HTMLElement>>(new Map())
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [orders, setOrders]           = useState<Order[]>([])
@@ -220,9 +438,10 @@ export default function ConfirmacionPage() {
   }, [orders, trackingParam])
 
   const alertCounts = useMemo(() => ({
-    duplicados: orders.filter(o => o.duplicate_alert).length,
-    cobertura:  orders.filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage).length,
-    unknown:    orders.filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone).length,
+    duplicados:    orders.filter(o => o.duplicate_alert).length,
+    cobertura:     orders.filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage).length,
+    unknown:       orders.filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone).length,
+    santoDomingo:  orders.filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address)).length,
   }), [orders])
 
   const displayedOrders = useMemo(() => {
@@ -250,6 +469,8 @@ export default function ConfirmacionPage() {
         return [...orders].filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage)
       case 'zona_desconocida':
         return [...orders].filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone)
+      case 'santo_domingo':
+        return [...orders].filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address))
       default:
         return sortedAll(orders)
     }
@@ -356,14 +577,14 @@ export default function ConfirmacionPage() {
           <div className="absolute -right-8 -top-8 w-40 h-40 rounded-full bg-white" />
           <div className="absolute -right-2 -bottom-10 w-24 h-24 rounded-full bg-white" />
         </div>
-        <div className="relative px-6 py-5 flex items-center justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center justify-center w-12 h-12 bg-white/20 rounded-xl">
-              <ClipboardList className="w-6 h-6 text-white" />
+        <div className="relative px-4 py-4 md:px-6 md:py-5 flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3 md:gap-4">
+            <div className="flex items-center justify-center w-10 h-10 md:w-12 md:h-12 bg-white/20 rounded-xl">
+              <ClipboardList className="w-5 h-5 md:w-6 md:h-6 text-white" />
             </div>
             <div>
-              <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-black text-white tabular-nums">
+              <div className="flex items-center gap-2 md:gap-3">
+                <h1 className="text-xl md:text-2xl font-black text-white tabular-nums">
                   {loading ? '…' : total.toLocaleString()}
                 </h1>
                 {!loading && total > 0 && (
@@ -373,16 +594,16 @@ export default function ConfirmacionPage() {
                   </span>
                 )}
               </div>
-              <p className="text-white font-semibold">Confirmación de pedidos</p>
-              <p className="text-indigo-100 text-xs mt-0.5">
+              <p className="text-white font-semibold text-sm md:text-base">Confirmación de pedidos</p>
+              <p className="hidden md:block text-indigo-100 text-xs mt-0.5">
                 Solo pedidos sin guía · Confirma disponibilidad antes del despacho
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-4 shrink-0">
+          <div className="flex items-center gap-3 md:gap-4 shrink-0">
             {confirmedCount > 0 && (
-              <span className="text-sm text-green-200 font-semibold">
+              <span className="hidden md:inline text-sm text-green-200 font-semibold">
                 ✓ {confirmedCount} confirmados esta sesión
               </span>
             )}
@@ -393,10 +614,10 @@ export default function ConfirmacionPage() {
               onClick={fetchData}
               disabled={loading}
               className="flex items-center gap-2 bg-white/20 hover:bg-white/30 text-white
-                         text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+                         text-sm font-medium px-3 md:px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
             >
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              Refrescar
+              <span className="hidden md:inline">Refrescar</span>
             </button>
           </div>
         </div>
@@ -404,7 +625,7 @@ export default function ConfirmacionPage() {
 
       {/* ── Rendimiento del agente hoy ── */}
       {perf && (
-        <div className="bg-white rounded-xl border border-gray-200 px-5 py-3.5 shadow-sm">
+        <div className="bg-white rounded-xl border border-gray-200 px-4 md:px-5 py-3.5 shadow-sm">
           <div className="flex items-center gap-3 flex-wrap">
 
             <div className="flex items-center gap-1.5 shrink-0">
@@ -451,51 +672,53 @@ export default function ConfirmacionPage() {
 
       {/* ── Pipeline de navegación ── */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="flex items-stretch divide-x divide-gray-100">
+        <div className="overflow-x-auto">
+          <div className="flex items-stretch divide-x divide-gray-100 min-w-[320px]">
 
-          {/* Paso 1 — ACTIVO */}
-          <div className="flex-1 flex items-center gap-3 px-5 py-3.5 bg-indigo-600">
-            <ClipboardList className="w-5 h-5 text-indigo-200 shrink-0" />
-            <div className="min-w-0">
-              <p className="text-[10px] font-bold text-indigo-200 uppercase tracking-wider">Paso 1</p>
-              <p className="text-sm font-bold text-white leading-tight">Confirmación</p>
-              <p className="text-2xl font-black tabular-nums text-white leading-none">{loading ? '…' : total}</p>
+            {/* Paso 1 — ACTIVO */}
+            <div className="flex-1 flex items-center gap-2 md:gap-3 px-3 md:px-5 py-3.5 bg-indigo-600">
+              <ClipboardList className="w-4 md:w-5 h-4 md:h-5 text-indigo-200 shrink-0" />
+              <div className="min-w-0">
+                <p className="text-[10px] font-bold text-indigo-200 uppercase tracking-wider">Paso 1</p>
+                <p className="text-xs md:text-sm font-bold text-white leading-tight">Confirmación</p>
+                <p className="text-xl md:text-2xl font-black tabular-nums text-white leading-none">{loading ? '…' : total}</p>
+              </div>
             </div>
-          </div>
 
-          <div className="flex items-center justify-center w-8 bg-gray-50 shrink-0">
-            <ChevronRight className="w-4 h-4 text-gray-300" />
-          </div>
-
-          {/* Paso 2 — Link a /confirmados */}
-          <Link href="/confirmados"
-            className="flex-1 flex items-center gap-3 px-5 py-3.5 hover:bg-green-50 transition-colors group">
-            <CheckCircle2 className="w-5 h-5 text-gray-300 group-hover:text-green-400 shrink-0 transition-colors" />
-            <div className="min-w-0">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 2</p>
-              <p className="text-sm font-bold text-gray-600 group-hover:text-green-700 leading-tight transition-colors">Sin guía</p>
-              <p className="text-2xl font-black tabular-nums text-green-600 leading-none">
-                {stats ? stats.confirmadosSinGuia : '…'}
-              </p>
+            <div className="flex items-center justify-center w-7 md:w-8 bg-gray-50 shrink-0">
+              <ChevronRight className="w-4 h-4 text-gray-300" />
             </div>
-          </Link>
 
-          <div className="flex items-center justify-center w-8 bg-gray-50 shrink-0">
-            <ChevronRight className="w-4 h-4 text-gray-300" />
-          </div>
+            {/* Paso 2 — Link a /confirmados */}
+            <Link href="/confirmados"
+              className="flex-1 flex items-center gap-2 md:gap-3 px-3 md:px-5 py-3.5 hover:bg-green-50 transition-colors group">
+              <CheckCircle2 className="w-4 md:w-5 h-4 md:h-5 text-gray-300 group-hover:text-green-400 shrink-0 transition-colors" />
+              <div className="min-w-0">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 2</p>
+                <p className="text-xs md:text-sm font-bold text-gray-600 group-hover:text-green-700 leading-tight transition-colors">Sin guía</p>
+                <p className="text-xl md:text-2xl font-black tabular-nums text-green-600 leading-none">
+                  {stats ? stats.confirmadosSinGuia : '…'}
+                </p>
+              </div>
+            </Link>
 
-          {/* Paso 3 — Link a /despachados */}
-          <Link href="/despachados"
-            className="flex-1 flex items-center gap-3 px-5 py-3.5 hover:bg-blue-50 transition-colors group">
-            <Truck className="w-5 h-5 text-gray-300 group-hover:text-blue-400 shrink-0 transition-colors" />
-            <div className="min-w-0">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 3</p>
-              <p className="text-sm font-bold text-gray-600 group-hover:text-blue-700 leading-tight transition-colors">Despachados</p>
-              <p className="text-2xl font-black tabular-nums text-blue-600 leading-none">
-                {stats ? stats.despachados : '…'}
-              </p>
+            <div className="flex items-center justify-center w-7 md:w-8 bg-gray-50 shrink-0">
+              <ChevronRight className="w-4 h-4 text-gray-300" />
             </div>
-          </Link>
+
+            {/* Paso 3 — Link a /despachados */}
+            <Link href="/despachados"
+              className="flex-1 flex items-center gap-2 md:gap-3 px-3 md:px-5 py-3.5 hover:bg-blue-50 transition-colors group">
+              <Truck className="w-4 md:w-5 h-4 md:h-5 text-gray-300 group-hover:text-blue-400 shrink-0 transition-colors" />
+              <div className="min-w-0">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 3</p>
+                <p className="text-xs md:text-sm font-bold text-gray-600 group-hover:text-blue-700 leading-tight transition-colors">Despachados</p>
+                <p className="text-xl md:text-2xl font-black tabular-nums text-blue-600 leading-none">
+                  {stats ? stats.despachados : '…'}
+                </p>
+              </div>
+            </Link>
+          </div>
         </div>
       </div>
 
@@ -504,7 +727,7 @@ export default function ConfirmacionPage() {
         <div className="space-y-2">
 
           {/* Fila 1: tarjetas de acción clickeables */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
             {([
               {
                 tab:   'nuevos'     as Tab,
@@ -529,32 +752,42 @@ export default function ConfirmacionPage() {
               {
                 tab:   'atrasados'  as Tab,
                 count: stats.atrasados,
-                label: 'Atrasados +48h',
+                label: 'Atrasados',
                 sub:   'Más de 2 días pendiente',
                 Icon:  Clock,
                 base:  'border-red-200 bg-red-50 text-red-700',
                 active:'border-red-400 bg-red-100 text-red-800 ring-2 ring-red-300/50',
                 hover: 'hover:bg-red-100',
               },
+              {
+                tab:   'santo_domingo' as Tab,
+                count: stats.santoDomingoPendientes ?? alertCounts.santoDomingo,
+                label: 'Santo Domingo',
+                sub:   'Usar transporte local',
+                Icon:  MapPin,
+                base:  'border-purple-200 bg-purple-50 text-purple-700',
+                active:'border-purple-400 bg-purple-100 text-purple-800 ring-2 ring-purple-300/50',
+                hover: 'hover:bg-purple-100',
+              },
             ] as const).map(({ tab, count, label, sub, Icon, base, active, hover }) => (
               <button
                 key={tab}
                 onClick={() => { setActiveTab(prev => prev === tab ? 'all' : tab); setCurrentPage(1) }}
-                className={`flex items-center gap-3 p-4 rounded-xl border-2 text-left transition-all
+                className={`flex items-center gap-2 md:gap-3 p-3 md:p-4 rounded-xl border-2 text-left transition-all
                   ${activeTab === tab ? active : `${base} ${hover}`}`}
               >
                 <div className="flex-1 min-w-0">
-                  <p className="text-3xl font-black tabular-nums leading-none">{count}</p>
-                  <p className="text-sm font-bold mt-1">{label}</p>
-                  <p className="text-xs opacity-60 mt-0.5 truncate">{sub}</p>
+                  <p className="text-2xl md:text-3xl font-black tabular-nums leading-none">{count}</p>
+                  <p className="text-xs md:text-sm font-bold mt-1">{label}</p>
+                  <p className="hidden md:block text-xs opacity-60 mt-0.5 truncate">{sub}</p>
                 </div>
-                <Icon className="w-7 h-7 opacity-25 shrink-0" />
+                <Icon className="w-6 md:w-7 h-6 md:h-7 opacity-25 shrink-0" />
               </button>
             ))}
           </div>
 
           {/* Fila 2: métricas informativas */}
-          <div className="grid grid-cols-6 gap-2">
+          <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
             {([
               { label: 'Confirm. hoy',   count: stats.confirmadosHoy, cls: 'bg-green-50   text-green-700   border-green-100'  },
               { label: 'Contactados hoy',count: stats.contactadosHoy, cls: 'bg-blue-50    text-blue-700    border-blue-100'   },
@@ -596,15 +829,15 @@ export default function ConfirmacionPage() {
         </div>
       )}
 
-      {/* ── Tabla ── */}
+      {/* ── Tabla + Cards ── */}
       {(loading || total > 0) && (
         <div className="bg-white rounded-xl border-2 border-indigo-200 overflow-hidden shadow-sm">
 
           {/* Header informativo */}
-          <div className="px-5 py-3 bg-indigo-50 border-b border-indigo-200 flex items-center gap-2">
+          <div className="px-4 md:px-5 py-3 bg-indigo-50 border-b border-indigo-200 flex items-center gap-2">
             <ClipboardList className="w-4 h-4 text-indigo-600 shrink-0" />
-            <p className="text-sm font-semibold text-indigo-800">
-              Máximo {MAX_ATTEMPTS} intentos por pedido · Sin respuesta en 3 intentos → inalcanzable
+            <p className="text-xs md:text-sm font-semibold text-indigo-800">
+              Máx. {MAX_ATTEMPTS} intentos · Sin respuesta en 3 → inalcanzable
             </p>
           </div>
 
@@ -626,37 +859,40 @@ export default function ConfirmacionPage() {
 
           {/* Tabs de filtro rápido */}
           {!loading && (
-            <div className="flex border-b border-indigo-100">
-              {TAB_META.map(({ tab, label }) => {
-                const count = tab === 'all'              ? total
-                            : tab === 'nuevos'           ? (stats?.nuevos      ?? 0)
-                            : tab === 'reintentar'       ? (stats?.reintentar  ?? 0)
-                            : tab === 'atrasados'        ? (stats?.atrasados   ?? 0)
-                            : tab === 'duplicados'       ? alertCounts.duplicados
-                            : tab === 'cobertura'        ? alertCounts.cobertura
-                            :                             alertCounts.unknown
-                return (
-                  <button
-                    key={tab}
-                    onClick={() => { setActiveTab(tab); setCurrentPage(1) }}
-                    className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold
-                                border-b-2 transition-colors whitespace-nowrap
-                      ${activeTab === tab
-                        ? 'border-indigo-500 text-indigo-700 bg-indigo-50/60'
-                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                      }`}
-                  >
-                    {label}
-                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full
-                      ${activeTab === tab
-                        ? 'bg-indigo-500 text-white'
-                        : 'bg-gray-100 text-gray-500'
-                      }`}>
-                      {count}
-                    </span>
-                  </button>
-                )
-              })}
+            <div className="overflow-x-auto border-b border-indigo-100">
+              <div className="flex min-w-max">
+                {TAB_META.map(({ tab, label }) => {
+                  const count = tab === 'all'              ? total
+                              : tab === 'nuevos'           ? (stats?.nuevos      ?? 0)
+                              : tab === 'reintentar'       ? (stats?.reintentar  ?? 0)
+                              : tab === 'atrasados'        ? (stats?.atrasados   ?? 0)
+                              : tab === 'duplicados'       ? alertCounts.duplicados
+                              : tab === 'cobertura'        ? alertCounts.cobertura
+                              : tab === 'zona_desconocida' ? alertCounts.unknown
+                              :                             alertCounts.santoDomingo
+                  return (
+                    <button
+                      key={tab}
+                      onClick={() => { setActiveTab(tab); setCurrentPage(1) }}
+                      className={`flex items-center gap-1.5 min-h-[44px] px-4 py-2.5 text-xs font-semibold
+                                  border-b-2 transition-colors whitespace-nowrap
+                        ${activeTab === tab
+                          ? 'border-indigo-500 text-indigo-700 bg-indigo-50/60'
+                          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                        }`}
+                    >
+                      {label}
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full
+                        ${activeTab === tab
+                          ? 'bg-indigo-500 text-white'
+                          : 'bg-gray-100 text-gray-500'
+                        }`}>
+                        {count}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           )}
 
@@ -665,227 +901,265 @@ export default function ConfirmacionPage() {
               <Spinner className="w-6 h-6 text-indigo-500" />
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-indigo-50/60 border-b border-indigo-100">
-                  <tr>
-                    {['Cliente','Ubicación','Monto','Estado','Intentos','Contactar','Acción',''].map(h => (
-                      <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-indigo-800 whitespace-nowrap">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-indigo-50">
+            <>
+              {/* ── Cards móvil ── */}
+              {pagedOrders.length > 0 && (
+                <div className="md:hidden divide-y divide-indigo-50">
                   {pagedOrders.map(order => {
-                    const nombre        = order.customer_name ?? ''
-                    const waUrl         = whatsAppUrl(order.customer_phone, buildConfirmMsg(nombre, order.product_summary, order.cod_amount))
-                    const telUrl        = callUrl(order.customer_phone)
-                    const hasPhone      = !!order.customer_phone
-                    const busy          = !!loadingRow[order.id]
                     const terminal      = terminalMap[order.id]
                     const sessionAtt    = attemptsMap[order.id]
                     const totalAttempts = sessionAtt ?? (order.confirmation_attempts ?? 0)
-
-                    const isHighlighted  = trackingParam && order.tracking_number === trackingParam
-                    const hasDup         = !!order.duplicate_alert
-                    const cov            = checkCoverage(order.customer_address, order.city)
-                    const hasAlert       = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
-
+                    const confidence    = confidenceMap[order.id] ?? order.confirmation_confidence ?? undefined
+                    const busy          = !!loadingRow[order.id]
+                    const isHighlighted = !!(trackingParam && order.tracking_number === trackingParam)
                     return (
-                      <tr
+                      <div
                         key={order.id}
                         ref={el => { if (el) rowRefs.current.set(order.id, el) }}
-                        className={`transition-colors group
-                          ${isHighlighted
-                            ? 'ring-2 ring-inset ring-blue-500 bg-blue-50/60'
-                            : hasAlert
-                              ? 'bg-amber-50/40 hover:bg-amber-50/70'
-                              : 'hover:bg-indigo-50/30'
-                          }`}
                       >
-
-                        {/* Cliente + Teléfono + Guía + Hora + Alertas */}
-                        <td className="px-3 py-2.5">
-                          <p className="font-medium text-gray-900 text-sm leading-tight truncate max-w-[160px]">
-                            {nombre || '—'}
-                          </p>
-                          <p className="font-mono text-xs text-gray-500 mt-0.5">
-                            {order.customer_phone ?? '—'}
-                          </p>
-                          <p className="font-mono text-[10px] text-gray-400 mt-0.5">
-                            {order.order_number ?? '—'}
-                            <span className="mx-1 text-gray-300">·</span>
-                            {formatOrderTime(order.shopify_created_at ?? order.created_at)}
-                          </p>
-                          <AlertBadges
-                            duplicateAlert={order.duplicate_alert}
-                            customerAddress={order.customer_address}
-                            city={order.city}
-                          />
-                        </td>
-
-                        {/* Ubicación + Producto */}
-                        <td className="px-3 py-2.5 max-w-[140px]">
-                          <div className="flex items-center gap-1 text-gray-700">
-                            <MapPin className="w-3 h-3 text-gray-400 shrink-0" />
-                            <span className="text-xs truncate">{order.city || '—'}</span>
-                          </div>
-                          <p className="text-[10px] text-gray-400 truncate mt-0.5" title={order.product_summary ?? ''}>
-                            {order.product_summary ?? ''}
-                          </p>
-                        </td>
-
-                        {/* Monto */}
-                        <td className="px-3 py-2.5">
-                          <p className="text-sm font-semibold text-green-700 whitespace-nowrap">
-                            {formatCurrency(order.cod_amount)}
-                          </p>
-                        </td>
-
-                        {/* Estado + Confianza */}
-                        <td className="px-3 py-2.5">
-                          <div className="flex flex-col gap-1">
-                            {(() => {
-                              const raw   = terminalMap[order.id] ?? order.confirmation_status ?? 'pending'
-                              const key   = raw === 'wrong_number' ? 'unreachable' : raw
-                              const badge = CONF_STATUS[key]
-                              return badge ? (
-                                <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full w-fit ${badge.cls}`}>
-                                  {badge.label}
-                                </span>
-                              ) : null
-                            })()}
-                            {(() => {
-                              const conf  = confidenceMap[order.id] ?? order.confirmation_confidence
-                              if (!conf) return null
-                              const badge = CONFIDENCE[conf]
-                              return badge ? (
-                                <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full w-fit ${badge.cls}`}>
-                                  {badge.label}
-                                </span>
-                              ) : null
-                            })()}
-                          </div>
-                        </td>
-
-                        {/* Intentos */}
-                        <td className="px-3 py-2.5">
-                          {totalAttempts > 0 ? (
-                            <span className={`text-xs font-bold px-2 py-0.5 rounded-full
-                              ${totalAttempts >= MAX_ATTEMPTS
-                                ? 'bg-red-100 text-red-700'
-                                : 'bg-amber-100 text-amber-700'}`}>
-                              {totalAttempts}/{MAX_ATTEMPTS}
-                            </span>
-                          ) : (
-                            <span className="text-xs text-gray-400">—</span>
-                          )}
-                        </td>
-
-                        {/* Contactar */}
-                        <td className="px-3 py-2.5">
-                          {hasPhone ? (
-                            <div className="flex items-center gap-2">
-                              {waUrl && (
-                                <a href={waUrl} target="_blank" rel="noopener noreferrer"
-                                   onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'whatsapp' }))}
-                                   className="flex items-center gap-1 bg-green-500 hover:bg-green-600
-                                              text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg
-                                              transition-colors shadow-sm">
-                                  <MessageCircle className="w-3.5 h-3.5" />WA
-                                </a>
-                              )}
-                              {telUrl && (
-                                <a href={telUrl}
-                                   onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'call' }))}
-                                   className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
-                                              text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg
-                                              transition-colors shadow-sm">
-                                  <Phone className="w-3.5 h-3.5" />Llamar
-                                </a>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-xs text-gray-300 italic">Sin teléfono</span>
-                          )}
-                        </td>
-
-                        {/* Acción */}
-                        <td className="px-3 py-2.5">
-                          {busy ? (
-                            <Spinner className="w-4 h-4 text-indigo-500" />
-                          ) : terminal ? (
-                            <span className={`inline-flex items-center gap-1 text-xs font-semibold
-                                             px-2.5 py-1 rounded-full
-                                             ${TERMINAL[terminal]?.color ?? 'bg-gray-100 text-gray-600'}`}>
-                              <CheckCircle2 className="w-3 h-3" />
-                              {TERMINAL[terminal]?.label ?? terminal}
-                            </span>
-                          ) : (
-                            <div className="grid grid-cols-2 gap-1">
-                              {/* Fila 1 */}
-                              <button
-                                onClick={() => postConfirmation(order.id, 'confirmed')}
-                                className="flex items-center gap-1 bg-green-100 hover:bg-green-200
-                                           text-green-700 text-[11px] font-medium px-2 py-1 rounded
-                                           transition-colors whitespace-nowrap"
-                              >
-                                <CheckCircle2 className="w-3 h-3 shrink-0" />Confirmó
-                              </button>
-                              <button
-                                onClick={() => postConfirmation(order.id, 'no_answer')}
-                                className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
-                                           text-amber-700 text-[11px] font-medium px-2 py-1 rounded
-                                           transition-colors whitespace-nowrap"
-                              >
-                                <PhoneMissed className="w-3 h-3 shrink-0" />No contesta
-                              </button>
-                              {/* Fila 2 */}
-                              <button
-                                onClick={() => postConfirmation(order.id, 'no_coverage')}
-                                className="flex items-center gap-1 bg-orange-100 hover:bg-orange-200
-                                           text-orange-700 text-[11px] font-medium px-2 py-1 rounded
-                                           transition-colors whitespace-nowrap"
-                              >
-                                <MapPinOff className="w-3 h-3 shrink-0" />Sin cobertura
-                              </button>
-                              <button
-                                onClick={() => postConfirmation(order.id, 'cancelled')}
-                                className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
-                                           text-gray-700 text-[11px] font-medium px-2 py-1 rounded
-                                           transition-colors whitespace-nowrap"
-                              >
-                                <XCircle className="w-3 h-3 shrink-0" />Canceló
-                              </button>
-                            </div>
-                          )}
-                        </td>
-
-                        {/* Ver detalle */}
-                        <td className="px-3 py-2.5">
-                          <Link
-                            href={`/orders/${order.id}`}
-                            className="inline-flex items-center gap-1 text-xs font-medium
-                                       text-indigo-600 hover:text-indigo-800 whitespace-nowrap
-                                       hover:underline"
-                          >
-                            <ExternalLink className="w-3 h-3" />
-                            Ver detalle
-                          </Link>
-                        </td>
-                      </tr>
+                        <ConfirmacionCard
+                          order={order}
+                          terminal={terminal}
+                          totalAttempts={totalAttempts}
+                          confidence={confidence}
+                          busy={busy}
+                          isHighlighted={isHighlighted}
+                          onConfirmed={()    => postConfirmation(order.id, 'confirmed')}
+                          onNoAnswer={()     => postConfirmation(order.id, 'no_answer')}
+                          onNoCoverage={()   => postConfirmation(order.id, 'no_coverage')}
+                          onCancelled={()    => postConfirmation(order.id, 'cancelled')}
+                          onSetMethod={m     => setMethodMap(prev => ({ ...prev, [order.id]: m }))}
+                        />
+                      </div>
                     )
                   })}
-                </tbody>
-              </table>
-            </div>
+                </div>
+              )}
+
+              {/* ── Tabla desktop ── */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-indigo-50/60 border-b border-indigo-100">
+                    <tr>
+                      {['Cliente','Ubicación','Monto','Estado','Intentos','Contactar','Acción',''].map(h => (
+                        <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-indigo-800 whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-indigo-50">
+                    {pagedOrders.map(order => {
+                      const nombre        = order.customer_name ?? ''
+                      const waUrl         = whatsAppUrl(order.customer_phone, buildConfirmMsg(nombre, order.product_summary, order.cod_amount))
+                      const telUrl        = callUrl(order.customer_phone)
+                      const hasPhone      = !!order.customer_phone
+                      const busy          = !!loadingRow[order.id]
+                      const terminal      = terminalMap[order.id]
+                      const sessionAtt    = attemptsMap[order.id]
+                      const totalAttempts = sessionAtt ?? (order.confirmation_attempts ?? 0)
+
+                      const isHighlighted  = trackingParam && order.tracking_number === trackingParam
+                      const hasDup         = !!order.duplicate_alert
+                      const cov            = checkCoverage(order.customer_address, order.city)
+                      const hasAlert       = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
+
+                      return (
+                        <tr
+                          key={order.id}
+                          ref={el => { if (el) rowRefs.current.set(order.id, el) }}
+                          className={`transition-colors group
+                            ${isHighlighted
+                              ? 'ring-2 ring-inset ring-blue-500 bg-blue-50/60'
+                              : hasAlert
+                                ? 'bg-amber-50/40 hover:bg-amber-50/70'
+                                : 'hover:bg-indigo-50/30'
+                            }`}
+                        >
+
+                          {/* Cliente + Teléfono + Guía + Hora + Alertas */}
+                          <td className="px-3 py-2.5">
+                            <p className="font-medium text-gray-900 text-sm leading-tight truncate max-w-[160px]">
+                              {nombre || '—'}
+                            </p>
+                            <p className="font-mono text-xs text-gray-500 mt-0.5">
+                              {order.customer_phone ?? '—'}
+                            </p>
+                            <p className="font-mono text-[10px] text-gray-400 mt-0.5">
+                              {order.order_number ?? '—'}
+                              <span className="mx-1 text-gray-300">·</span>
+                              {formatOrderTime(order.shopify_created_at ?? order.created_at)}
+                            </p>
+                            <AlertBadges
+                              duplicateAlert={order.duplicate_alert}
+                              customerAddress={order.customer_address}
+                              city={order.city}
+                              province={order.province}
+                            />
+                          </td>
+
+                          {/* Ubicación + Producto */}
+                          <td className="px-3 py-2.5 max-w-[140px]">
+                            <div className="flex items-center gap-1 text-gray-700">
+                              <MapPin className="w-3 h-3 text-gray-400 shrink-0" />
+                              <span className="text-xs truncate">{order.city || '—'}</span>
+                            </div>
+                            <p className="text-[10px] text-gray-400 truncate mt-0.5" title={order.product_summary ?? ''}>
+                              {order.product_summary ?? ''}
+                            </p>
+                          </td>
+
+                          {/* Monto */}
+                          <td className="px-3 py-2.5">
+                            <p className="text-sm font-semibold text-green-700 whitespace-nowrap">
+                              {formatCurrency(order.cod_amount)}
+                            </p>
+                          </td>
+
+                          {/* Estado + Confianza */}
+                          <td className="px-3 py-2.5">
+                            <div className="flex flex-col gap-1">
+                              {(() => {
+                                const raw   = terminalMap[order.id] ?? order.confirmation_status ?? 'pending'
+                                const key   = raw === 'wrong_number' ? 'unreachable' : raw
+                                const badge = CONF_STATUS[key]
+                                return badge ? (
+                                  <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full w-fit ${badge.cls}`}>
+                                    {badge.label}
+                                  </span>
+                                ) : null
+                              })()}
+                              {(() => {
+                                const conf  = confidenceMap[order.id] ?? order.confirmation_confidence
+                                if (!conf) return null
+                                const badge = CONFIDENCE[conf]
+                                return badge ? (
+                                  <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full w-fit ${badge.cls}`}>
+                                    {badge.label}
+                                  </span>
+                                ) : null
+                              })()}
+                            </div>
+                          </td>
+
+                          {/* Intentos */}
+                          <td className="px-3 py-2.5">
+                            {totalAttempts > 0 ? (
+                              <span className={`text-xs font-bold px-2 py-0.5 rounded-full
+                                ${totalAttempts >= MAX_ATTEMPTS
+                                  ? 'bg-red-100 text-red-700'
+                                  : 'bg-amber-100 text-amber-700'}`}>
+                                {totalAttempts}/{MAX_ATTEMPTS}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400">—</span>
+                            )}
+                          </td>
+
+                          {/* Contactar */}
+                          <td className="px-3 py-2.5">
+                            {hasPhone ? (
+                              <div className="flex items-center gap-2">
+                                {waUrl && (
+                                  <a href={waUrl} target="_blank" rel="noopener noreferrer"
+                                     onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'whatsapp' }))}
+                                     className="flex items-center gap-1 bg-green-500 hover:bg-green-600
+                                                text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg
+                                                transition-colors shadow-sm">
+                                    <MessageCircle className="w-3.5 h-3.5" />WA
+                                  </a>
+                                )}
+                                {telUrl && (
+                                  <a href={telUrl}
+                                     onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'call' }))}
+                                     className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
+                                                text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg
+                                                transition-colors shadow-sm">
+                                    <Phone className="w-3.5 h-3.5" />Llamar
+                                  </a>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-gray-300 italic">Sin teléfono</span>
+                            )}
+                          </td>
+
+                          {/* Acción */}
+                          <td className="px-3 py-2.5">
+                            {busy ? (
+                              <Spinner className="w-4 h-4 text-indigo-500" />
+                            ) : terminal ? (
+                              <span className={`inline-flex items-center gap-1 text-xs font-semibold
+                                               px-2.5 py-1 rounded-full
+                                               ${TERMINAL[terminal]?.color ?? 'bg-gray-100 text-gray-600'}`}>
+                                <CheckCircle2 className="w-3 h-3" />
+                                {TERMINAL[terminal]?.label ?? terminal}
+                              </span>
+                            ) : (
+                              <div className="grid grid-cols-2 gap-1">
+                                {/* Fila 1 */}
+                                <button
+                                  onClick={() => postConfirmation(order.id, 'confirmed')}
+                                  className="flex items-center gap-1 bg-green-100 hover:bg-green-200
+                                             text-green-700 text-[11px] font-medium px-2 py-1 rounded
+                                             transition-colors whitespace-nowrap"
+                                >
+                                  <CheckCircle2 className="w-3 h-3 shrink-0" />Confirmó
+                                </button>
+                                <button
+                                  onClick={() => postConfirmation(order.id, 'no_answer')}
+                                  className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
+                                             text-amber-700 text-[11px] font-medium px-2 py-1 rounded
+                                             transition-colors whitespace-nowrap"
+                                >
+                                  <PhoneMissed className="w-3 h-3 shrink-0" />No contesta
+                                </button>
+                                {/* Fila 2 */}
+                                <button
+                                  onClick={() => postConfirmation(order.id, 'no_coverage')}
+                                  className="flex items-center gap-1 bg-orange-100 hover:bg-orange-200
+                                             text-orange-700 text-[11px] font-medium px-2 py-1 rounded
+                                             transition-colors whitespace-nowrap"
+                                >
+                                  <MapPinOff className="w-3 h-3 shrink-0" />Sin cobertura
+                                </button>
+                                <button
+                                  onClick={() => postConfirmation(order.id, 'cancelled')}
+                                  className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
+                                             text-gray-700 text-[11px] font-medium px-2 py-1 rounded
+                                             transition-colors whitespace-nowrap"
+                                >
+                                  <XCircle className="w-3 h-3 shrink-0" />Canceló
+                                </button>
+                              </div>
+                            )}
+                          </td>
+
+                          {/* Ver detalle */}
+                          <td className="px-3 py-2.5">
+                            <Link
+                              href={`/orders/${order.id}`}
+                              className="inline-flex items-center gap-1 text-xs font-medium
+                                         text-indigo-600 hover:text-indigo-800 whitespace-nowrap
+                                         hover:underline"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                              Ver detalle
+                            </Link>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
 
           {!loading && totalPages > 1 && (
-            <div className="flex items-center justify-between px-5 py-3 border-t border-indigo-100 bg-indigo-50/40">
+            <div className="flex items-center justify-between px-4 md:px-5 py-3 border-t border-indigo-100 bg-indigo-50/40">
               <button
                 onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                 disabled={currentPage === 1}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg
+                className="flex items-center gap-1.5 min-h-[40px] px-3 py-1.5 text-xs font-semibold rounded-lg
                            border border-indigo-200 text-indigo-700 bg-white hover:bg-indigo-50
                            disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
@@ -893,15 +1167,17 @@ export default function ConfirmacionPage() {
                 Anterior
               </button>
               <span className="text-xs text-gray-500 tabular-nums">
-                Página <span className="font-bold text-gray-800">{currentPage}</span> de{' '}
+                <span className="hidden md:inline">Página </span>
+                <span className="font-bold text-gray-800">{currentPage}</span>
+                <span className="hidden md:inline"> de </span>
+                <span className="md:hidden">/</span>
                 <span className="font-bold text-gray-800">{totalPages}</span>
-                {' '}·{' '}
-                <span className="text-gray-400">{filteredOrders.length} resultados</span>
+                <span className="hidden md:inline"> · <span className="text-gray-400">{filteredOrders.length} resultados</span></span>
               </span>
               <button
                 onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                 disabled={currentPage === totalPages}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg
+                className="flex items-center gap-1.5 min-h-[40px] px-3 py-1.5 text-xs font-semibold rounded-lg
                            border border-indigo-200 text-indigo-700 bg-white hover:bg-indigo-50
                            disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
@@ -920,7 +1196,7 @@ export default function ConfirmacionPage() {
       )}
 
       {/* ── Tip ── */}
-      <div className="bg-gray-50 border border-gray-100 rounded-xl px-5 py-4">
+      <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 md:px-5 py-4">
         <p className="text-xs text-gray-500 leading-relaxed">
           <strong className="text-gray-700">Flujo recomendado:</strong>{' '}
           Envía WhatsApp o llama → registra resultado →

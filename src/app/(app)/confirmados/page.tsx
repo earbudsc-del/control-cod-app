@@ -11,10 +11,10 @@ import {
   ChevronLeft, ChevronRight, ClipboardList,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
-import { checkCoverage } from '@/lib/alert-helpers'
+import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 
 type FilterType  = 'todos' | 'hoy' | 'ayer' | 'rango'
-type AlertFilter = 'todos' | 'duplicados' | 'cobertura' | 'zona_desconocida'
+type AlertFilter = 'todos' | 'duplicados' | 'cobertura' | 'zona_desconocida' | 'santo_domingo'
 
 interface ConfirmadoOrder {
   id:                        string
@@ -113,9 +113,10 @@ export default function ConfirmadosPage() {
   }
 
   const alertCounts = useMemo(() => ({
-    duplicados: orders.filter(o => o.duplicate_alert).length,
-    cobertura:  orders.filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage).length,
-    unknown:    orders.filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone).length,
+    duplicados:   orders.filter(o => o.duplicate_alert).length,
+    cobertura:    orders.filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage).length,
+    unknown:      orders.filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone).length,
+    santoDomingo: orders.filter(o => isSantoDomingoOrder(o.city, null, o.customer_address)).length,
   }), [orders])
 
   const displayed = useMemo(() => {
@@ -124,6 +125,7 @@ export default function ConfirmadosPage() {
     if (alertFilter === 'duplicados')       base = base.filter(o => o.duplicate_alert)
     if (alertFilter === 'cobertura')        base = base.filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage)
     if (alertFilter === 'zona_desconocida') base = base.filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone)
+    if (alertFilter === 'santo_domingo')    base = base.filter(o => isSantoDomingoOrder(o.city, null, o.customer_address))
 
     if (!searchQuery.trim()) return base
     const q = searchQuery.toLowerCase()
@@ -337,7 +339,7 @@ export default function ConfirmadosPage() {
       </div>
 
       {/* ── Filtros de alerta ── */}
-      {(alertCounts.duplicados > 0 || alertCounts.cobertura > 0 || alertCounts.unknown > 0) && (
+      {(alertCounts.duplicados > 0 || alertCounts.cobertura > 0 || alertCounts.unknown > 0 || alertCounts.santoDomingo > 0) && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 shrink-0">
@@ -398,6 +400,21 @@ export default function ConfirmadosPage() {
                   <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full
                     ${alertFilter === 'zona_desconocida' ? 'bg-white/30 text-white' : 'bg-yellow-100 text-yellow-700'}`}>
                     {alertCounts.unknown}
+                  </span>
+                </button>
+              )}
+              {alertCounts.santoDomingo > 0 && (
+                <button
+                  onClick={() => setAlertFilter(prev => prev === 'santo_domingo' ? 'todos' : 'santo_domingo')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors
+                    ${alertFilter === 'santo_domingo'
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-white text-purple-700 border border-purple-200 hover:bg-purple-50'}`}
+                >
+                  🏙️ Santo Domingo
+                  <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full
+                    ${alertFilter === 'santo_domingo' ? 'bg-white/30 text-white' : 'bg-purple-100 text-purple-700'}`}>
+                    {alertCounts.santoDomingo}
                   </span>
                 </button>
               )}
@@ -479,12 +496,18 @@ export default function ConfirmadosPage() {
                   const hasDup     = !!order.duplicate_alert
                   const cov        = checkCoverage(order.customer_address, order.city)
                   const hasAlert   = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
+                  const isSD       = isSantoDomingoOrder(order.city, null, order.customer_address)
 
                   return (
                     <tr
                       key={order.id}
                       className={`transition-colors
-                        ${hasAlert ? 'bg-amber-50/40 hover:bg-amber-50/70' : 'hover:bg-green-50/40'}`}
+                        ${isSD
+                          ? 'bg-purple-50/40 hover:bg-purple-50/70'
+                          : hasAlert
+                            ? 'bg-amber-50/40 hover:bg-amber-50/70'
+                            : 'hover:bg-green-50/40'
+                        }`}
                     >
 
                       {/* # Pedido */}

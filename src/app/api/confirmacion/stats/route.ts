@@ -30,6 +30,18 @@ export async function GET() {
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned')
 
+    // Filtro OR para pedidos de Santo Domingo / Distrito Nacional
+    const sdFilter = [
+      'city.ilike.%santo domingo%',
+      'city.ilike.%distrito nacional%',
+      'city.ilike.dn',
+      'province.ilike.%santo domingo%',
+      'province.ilike.%distrito nacional%',
+      'province.ilike.dn',
+      'customer_address.ilike.%santo domingo%',
+      'customer_address.ilike.%distrito nacional%',
+    ].join(',')
+
     const [
       { count: nuevos },
       { count: reintentar },
@@ -42,6 +54,8 @@ export async function GET() {
       { count: pendingTotal },
       { count: confirmadosSinGuia },
       { count: despachados },
+      { count: santoDomingoPendientes },
+      { count: santoDomingoConfirmadosSinGuia },
     ] = await Promise.all([
 
       // Nunca contactados
@@ -117,21 +131,37 @@ export async function GET() {
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned')
         .neq('normalized_status', 'cancelled'),
+
+      // Santo Domingo pendientes (transporte local)
+      pendingBase().or(sdFilter),
+
+      // Santo Domingo confirmados sin guía (transporte local)
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('source', 'shopify_webhook')
+        .eq('confirmation_status', 'confirmed')
+        .is('tracking_number', null)
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned')
+        .or(sdFilter),
     ])
 
     return NextResponse.json({
-      nuevos:             nuevos             ?? 0,
-      reintentar:         reintentar         ?? 0,
-      atrasados:          atrasados          ?? 0,
-      confirmadosHoy:     confirmadosHoy     ?? 0,
-      contactadosHoy:     contactadosHoy     ?? 0,
-      sinRespuesta:       reintentar         ?? 0,
-      inalcanzables:      inalcanzables      ?? 0,
-      noDesean:           noDesean           ?? 0,
-      sinCobertura:       sinCobertura       ?? 0,
-      pendingTotal:       pendingTotal       ?? 0,
-      confirmadosSinGuia: confirmadosSinGuia ?? 0,
-      despachados:        despachados        ?? 0,
+      nuevos:                        nuevos                        ?? 0,
+      reintentar:                    reintentar                    ?? 0,
+      atrasados:                     atrasados                     ?? 0,
+      confirmadosHoy:                confirmadosHoy                ?? 0,
+      contactadosHoy:                contactadosHoy                ?? 0,
+      sinRespuesta:                  reintentar                    ?? 0,
+      inalcanzables:                 inalcanzables                 ?? 0,
+      noDesean:                      noDesean                      ?? 0,
+      sinCobertura:                  sinCobertura                  ?? 0,
+      pendingTotal:                  pendingTotal                  ?? 0,
+      confirmadosSinGuia:            confirmadosSinGuia            ?? 0,
+      despachados:                   despachados                   ?? 0,
+      santoDomingoPendientes:        santoDomingoPendientes        ?? 0,
+      santoDomingoConfirmadosSinGuia: santoDomingoConfirmadosSinGuia ?? 0,
     })
   } catch (err) {
     console.error('[GET /api/confirmacion/stats]', err)

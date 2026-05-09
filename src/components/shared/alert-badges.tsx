@@ -1,10 +1,11 @@
-import { AlertTriangle, MapPinOff, Navigation, HelpCircle } from 'lucide-react'
-import { checkCoverage } from '@/lib/alert-helpers'
+import { AlertTriangle, MapPinOff, Navigation, HelpCircle, Building2 } from 'lucide-react'
+import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 
 interface AlertBadgesProps {
   duplicateAlert?:  boolean | null
   customerAddress?: string | null
   city?:            string | null
+  province?:        string | null
   className?:       string
 }
 
@@ -12,6 +13,7 @@ export function AlertBadges({
   duplicateAlert,
   customerAddress,
   city,
+  province,
   className = '',
 }: AlertBadgesProps) {
   const coverage    = checkCoverage(customerAddress, city)
@@ -19,8 +21,9 @@ export function AlertBadges({
   const showOoc     = coverage.isOutOfCoverage
   const showSpec    = !coverage.isOutOfCoverage && coverage.isSpecialDestination
   const showUnknown = !coverage.isOutOfCoverage && !coverage.isSpecialDestination && coverage.isUnknownZone
+  const showSD      = isSantoDomingoOrder(city, province, customerAddress)
 
-  if (!showDup && !showOoc && !showSpec && !showUnknown) return null
+  if (!showDup && !showOoc && !showSpec && !showUnknown && !showSD) return null
 
   return (
     <div className={`flex flex-wrap gap-1 mt-0.5 ${className}`}>
@@ -63,6 +66,17 @@ export function AlertBadges({
         >
           <HelpCircle className="w-2.5 h-2.5 shrink-0" />
           Zona desconocida
+        </span>
+      )}
+      {showSD && (
+        <span
+          className="inline-flex items-center gap-0.5 bg-purple-50 text-purple-700
+                     border border-purple-200 text-[10px] font-bold px-1.5 py-0.5
+                     rounded-full whitespace-nowrap"
+          title="Pedido Santo Domingo — usar transporte local, no EFI"
+        >
+          <Building2 className="w-2.5 h-2.5 shrink-0" />
+          SD / Transporte local
         </span>
       )}
     </div>

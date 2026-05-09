@@ -332,6 +332,20 @@ const _specIndex = SPECIAL_DESTINATION_ZONES.map(e  => ({ entry: e, terms: e.ter
 // Usado únicamente para determinar si la zona es "conocida" (no genera alertas propias)
 const _covIndex  = COVERAGE_ZONES.map(e             => ({ entry: e, terms: e.terms ?? termsFromName(e.name) }))
 
+// ── Santo Domingo / Transporte local ─────────────────────────────────────────
+
+// Pedidos a SD/DN se despachan por transporte local, no por EFI.
+const SD_PATTERN = /santo domingo|distrito nacional|\bdn\b/
+
+export function isSantoDomingoOrder(
+  city:     string | null | undefined,
+  province: string | null | undefined,
+  address:  string | null | undefined,
+): boolean {
+  const haystack = normalize(`${city ?? ''} ${province ?? ''} ${address ?? ''}`)
+  return SD_PATTERN.test(haystack)
+}
+
 // ── Función principal de detección ────────────────────────────────────────────
 
 export function checkCoverage(

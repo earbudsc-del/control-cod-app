@@ -13,11 +13,11 @@
 | Webhook Shopify `orders/create` | `/api/webhooks/shopify` | Activo — requiere ngrok en dev |
 | Cron de tracking EFI | `vercel.json` → `GET /api/tracking/auto` (Vercel Cron) | Cada 5 min en producción, sin dependencia de PC local |
 | Dashboard admin | `/dashboard` | KPIs + cola de trabajo + alertas SLA + tarjetas confirmados hoy/ayer |
-| Confirmación | `/confirmacion` | Solo pedidos `pending + tracking IS NULL`. Stats, tabs, orden inteligente (`source='shopify_webhook'`) |
+| Confirmación | `/confirmacion` | Solo pedidos `pending + tracking IS NULL`. Stats, tabs, orden inteligente. **Mobile-first cards + tabla desktop** |
 | Confirmados | `/confirmados` | Pedidos `confirmed + tracking IS NULL`. Filtros fecha, botón "Listo para despacho" |
 | Despachados | `/despachados` | Pedidos `tracking IS NOT NULL + no finalizados`. Vista monitoreo, refresh 5 min, mini KPI por estado |
-| Novedades | `/novedad` | Tabla acciones, métricas agente, filtros por intentos, mini KPI pipeline, tab Recuperadas |
-| Reparto | `/reparto` | Tabla criticidad por tiempo, acciones, métricas, mini KPI pipeline, tab Entregados DB-backed |
+| Novedades | `/novedad` | Tabla acciones, métricas agente, filtros por intentos, mini KPI pipeline, tab Recuperadas. **Mobile-first cards + tabla desktop** |
+| Reparto | `/reparto` | Tabla criticidad por tiempo, acciones, métricas, mini KPI pipeline, tab Entregados DB-backed. **Mobile-first cards + tabla desktop** |
 | Tránsito | `/transito` | Pedidos `in_transit` sin movimiento, criticidad por horas, refresh 5 min |
 | My-tasks | `/my-tasks` | Filtrado por rol automáticamente |
 | Panel admin | `/settings` | Ver usuarios (con email, último login, última acción), asignar roles con confirm dialog |
@@ -49,6 +49,9 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Santo Domingo / Transporte local: helper isSantoDomingoOrder, badge purple, tab en /confirmacion, filtro en /confirmados, contadores en stats API** | 2026-05-09 | `alert-helpers.ts`, `alert-badges.tsx`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `confirmados/page.tsx` |
+| **Responsive/mobile-first en /reparto: RepartoCard component, md:hidden cards + hidden md:table desktop** | 2026-05-06 | `reparto/page.tsx` |
+| **Responsive/mobile-first en /confirmacion: ConfirmacionCard component, md:hidden cards + hidden md:block desktop table** | 2026-05-06 | `confirmacion/page.tsx` |
 | **Fix acceso /orders/[id] para confirmation_agent y novelty_agent: perfiles básicos para no-admins, setAgents resiliente** | 2026-05-06 | `api/profiles/route.ts`, `orders/[id]/page.tsx` |
 | **Fix crash /orders/[id] en móvil: try/catch en load(), guard de estructura API, null-safety en arrays** | 2026-05-06 | `orders/[id]/page.tsx` |
 | **Layout global responsive: sidebar drawer en móvil, topbar hamburger, contenido full-width** | 2026-05-06 | `layout.tsx`, `sidebar.tsx`, `nav-shell.tsx` (nuevo) |
@@ -277,6 +280,128 @@ AppLayout (Server Component — layout.tsx)
 8. Quitar Device Toolbar → sidebar fija desktop, sin topbar, layout idéntico al anterior
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
+
+### Santo Domingo / Transporte local (2026-05-09)
+
+**Contexto:** Pedidos con destino Santo Domingo / Distrito Nacional se despachan por transporte local, NO por EFI. Se necesita identificarlos fácilmente desde que entran para no generarles guía EFI.
+
+**Criterios de detección — `isSantoDomingoOrder(city, province, address)`:**
+
+Regex: `/santo domingo|distrito nacional|\bdn\b/` aplicado sobre `normalize(city + province + address)`.
+
+| Término detectado | Ejemplos que matchean |
+|---|---|
+| `santo domingo` | "Santo Domingo", "Santo Domingo Este/Norte/Oeste", "Sto. Domingo" |
+| `distrito nacional` | "Distrito Nacional", "D.N." no (por el punto), "DN" sí (regex `\bdn\b`) |
+| `\bdn\b` | "DN" como ciudad o provincia — `\b` previene falsos positivos en palabras que contengan "dn" |
+
+**`normalize()` reutilizada** de `alert-helpers.ts`: lowercase + strip diacritics (NFD → /[̀-ͯ]/g).
+
+**Archivos modificados:**
+
+| Archivo | Qué hace |
+|---|---|
+| `src/lib/alert-helpers.ts` | Nueva función exportada `isSantoDomingoOrder(city, province, address): boolean` |
+| `src/components/shared/alert-badges.tsx` | Nueva prop opcional `province?: string \| null`. Muestra badge púrpura "SD / Transporte local" con icono `Building2` cuando `isSantoDomingoOrder` retorna true. **No rompe llamadas existentes** (province es opcional). |
+| `src/app/api/confirmacion/stats/route.ts` | Dos nuevos contadores vía ILIKE en la DB: `santoDomingoPendientes` (pendingBase + OR filter) y `santoDomingoConfirmadosSinGuia` (confirmados sin guía + OR filter). El OR filter usa `city.ilike.%santo domingo%`, `city.ilike.%distrito nacional%`, `city.ilike.dn`, `province.*`, `customer_address.*`. |
+| `src/app/(app)/confirmacion/page.tsx` | Tab `'🏙️ Sto. Domingo'` nuevo. Card de stats fila 1 ahora es `grid-cols-2 md:grid-cols-4` con 4ta tarjeta púrpura "Santo Domingo". AlertBadges en card + tabla reciben `province={order.province}`. Count del tab usa `stats.santoDomingoPendientes ?? alertCounts.santoDomingo`. |
+| `src/app/(app)/confirmados/page.tsx` | Filtro `'🏙️ Santo Domingo'` en panel Alertas (aparece solo si hay ≥1 pedido SD). Fila SD tiene fondo `bg-purple-50/40`. AlertBadges ya muestra badge SD automáticamente. |
+
+**UI en /confirmacion:**
+- Nueva tarjeta púrpura "Santo Domingo / Usar transporte local" en fila de stats — clickeable, activa el tab `santo_domingo`
+- Tab `'🏙️ Sto. Domingo'` en barra de tabs con conteo
+- Badge "SD / Transporte local" púrpura en cada pedido (mobile card + desktop table) vía `AlertBadges` con `province`
+
+**UI en /confirmados:**
+- Fondo `bg-purple-50/40` en filas SD
+- Badge "SD / Transporte local" en columna Cliente vía `AlertBadges`
+- Botón filtro `'🏙️ Santo Domingo'` en panel Alertas — solo visible si hay pedidos SD
+- Segundo click en el filtro lo desactiva (toggle)
+
+**No requiere migración de DB.** La detección es 100% client-side (frontend) y query-side (API stats con ILIKE). Sin nuevas columnas.
+
+**Pendiente futuro — integración transportadora local:**
+- Asignar transportadora local (ej. "Transporte Express DN") en el campo `carrier` o nueva tabla
+- Flujo separado: pedidos SD no pasan por asignación de tracking EFI
+- Webhook o API de la transportadora local para sincronizar estado
+- Tab/módulo propio en `/confirmados` o nuevo módulo `/local` si el volumen lo justifica
+- Por ahora: solo alerta/segmentación visual + acceso fácil, cero automatización
+
+**Cómo probar:**
+1. `npm run dev` en `control-cod-app/`
+2. Login como admin o confirmation_agent → ir a `/confirmacion`
+3. Si hay pedidos con city="Santo Domingo" o city="DN": ver badge púrpura "SD / Transporte local" en cada pedido
+4. La tarjeta "Santo Domingo" en la fila de stats muestra el conteo; click activa el tab `🏙️ Sto. Domingo`
+5. El tab filtra solo pedidos SD y los lista normalmente (mismas acciones disponibles)
+6. Ir a `/confirmados` → pedidos SD tienen fondo morado sutil y badge; filtro "🏙️ Santo Domingo" aparece en el panel Alertas si hay pedidos SD
+
+---
+
+### /reparto — Responsive mobile-first (2026-05-06)
+
+**Estrategia de breakpoint:** `md` (768px). Por debajo → cards. Por encima → tabla idéntica a la versión anterior.
+
+**Cambios por sección:**
+
+| Sección | Mobile (< md) | Desktop (≥ md) |
+|---|---|---|
+| Banner | Compacto `px-4 py-4`, subtítulo oculto `hidden md:block`, botón sin texto | Igual que antes |
+| Stats fila 1 (3 cards) | `p-3 gap-2`, subtítulo oculto en cada card | `p-4 gap-3` |
+| Stats fila 2 (5 cells) | `grid-cols-3` | `grid-cols-5` |
+| Tabs | `min-h-[44px]` touch target | Sin cambios |
+| Cards activas | `md:hidden divide-y divide-amber-50` — renderiza `RepartoCard` | No se renderiza |
+| Tabla activa | `hidden md:table w-full text-sm` | Intacta |
+| Paginación | `min-h-[40px]`, conteo abreviado | Sin cambios |
+
+**Subcomponente nuevo:** `RepartoCard` (antes del export default).
+- Props: `order, accion, busy, isEntregado, courierConfirmed, isHighlighted, onContactado, onEntrego, onNoAnswer, onEscalar`
+- Muestra: tracking + badge criticidad (header), cliente + teléfono, ciudad + tiempo en reparto, WA + Llamar (botones grandes 44px cuando sin acción), grid 2×2 (Contactado/Entregó/No responde/Escalar), o badge estado si ya tiene acción, Ver detalle link
+- `rowRefs` cambió de `HTMLTableRowElement` a `HTMLElement` para compatibilidad con divs de cards
+
+**Cómo probarlo:**
+1. `npm run dev` en `control-cod-app/`
+2. Chrome DevTools → Toggle Device Toolbar → iPhone 14 Pro (390px)
+3. Verificar cards con datos completos, botones WA/Llamar grandes y tocables, acciones 2×2
+4. Ejecutar acción → estado actualiza sin recargar
+5. Quitar Device Toolbar → tabla desktop idéntica a la original
+
+**Archivos modificados:** `src/app/(app)/reparto/page.tsx`
+
+---
+
+### /confirmacion — Responsive mobile-first (2026-05-06)
+
+**Estrategia de breakpoint:** `md` (768px). Por debajo → cards. Por encima → tabla idéntica a la versión anterior.
+
+**Cambios por sección:**
+
+| Sección | Mobile (< md) | Desktop (≥ md) |
+|---|---|---|
+| Banner | Compacto `px-4 py-4`, subtítulo oculto, botón sin texto, "confirmados sesión" oculto | Igual que antes |
+| Pipeline nav | `overflow-x-auto` wrapper, padding reducido `px-3`, `min-w-[320px]` inner | Igual que antes |
+| Stats fila 1 (3 cards) | `p-3 gap-2`, subtítulo ("+48h") oculto en label "Atrasados" → solo "Atrasados" | `p-4 gap-3` |
+| Stats fila 2 (6 cells) | `grid-cols-3` | `grid-cols-6` |
+| Tabs | `min-h-[44px]` touch target, `overflow-x-auto` con `min-w-max` inner | Sin cambios |
+| Cards activas | `md:hidden divide-y divide-indigo-50` — renderiza `ConfirmacionCard` | No se renderiza |
+| Tabla activa | `hidden md:block overflow-x-auto` wrapping `<table>` | Intacta |
+| Paginación | `min-h-[40px]`, conteo abreviado `X/Y` | Conteo completo |
+
+**Subcomponente nuevo:** `ConfirmacionCard` (antes del export default).
+- Props: `order, terminal, totalAttempts, confidence, busy, isHighlighted, onConfirmed, onNoAnswer, onNoCoverage, onCancelled, onSetMethod`
+- Muestra: orden# + hora + AlertBadges, cliente + teléfono, ciudad + producto, monto + intentos badge + estado/confianza badges, WA + Llamar (botones grandes 44px), grid 2×2 (Confirmó/No contesta/Sin cobertura/Canceló), o badge terminal si ya procesado, Ver detalle link
+- `rowRefs` cambió de `HTMLTableRowElement` a `HTMLElement`
+
+**Cómo probarlo:**
+1. `npm run dev` en `control-cod-app/`
+2. Chrome DevTools → Toggle Device Toolbar → iPhone 14 Pro (390px)
+3. Verificar cards con datos completos, alertas visibles (duplicados/cobertura), botones grandes
+4. Ejecutar "Confirmó" → badge verde aparece en card, pedido permanece visible
+5. Ejecutar "Canceló" → pedido desaparece después de 1.5s
+6. Quitar Device Toolbar → tabla desktop idéntica a la original
+
+**Archivos modificados:** `src/app/(app)/confirmacion/page.tsx`
+
+---
 
 ### /novedad — Responsive mobile-first (2026-05-06)
 
