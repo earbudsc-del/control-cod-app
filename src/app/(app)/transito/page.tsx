@@ -8,6 +8,7 @@ import type { Order } from '@/types'
 import {
   Package, RefreshCw, ShieldAlert, AlertTriangle,
   Clock, ExternalLink, MapPin, ChevronLeft, ChevronRight,
+  Search, X,
 } from 'lucide-react'
 import {
   transitSinceMs, horasEnTransito, transitCriticality,
@@ -19,6 +20,19 @@ import {
 interface OrdersResponse {
   data:       Order[]
   pagination: { total: number }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function cityDisplay(order: Order): string {
+  if (order.city && order.city.trim())     return order.city.trim()
+  if (order.province && order.province.trim()) return order.province.trim()
+  if (order.customer_address && order.customer_address.trim()) {
+    // Intenta extraer una ubicación del address (último segmento separado por coma)
+    const parts = order.customer_address.split(',').map(s => s.trim()).filter(Boolean)
+    if (parts.length > 0) return parts[parts.length - 1]
+  }
+  return 'Ubicación no registrada'
 }
 
 // ── Orden: más tiempo sin movimiento primero ──────────────────────────────────
@@ -43,15 +57,40 @@ export default function TransitoPage() {
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const [currentPage, setCurrentPage] = useState(1)
+  const [search, setSearch]           = useState('')
 
   const PAGE_SIZE = 50
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const res: OrdersResponse = await fetch('/api/orders?status=in_transit&limit=200&page=1').then(r => r.json())
-      setOrders(res.data ?? [])
+      const res: OrdersResponse = await fetch(
+        '/api/orders?status=in_transit&limit=200&page=1'
+      ).then(r => r.json())
+      const loaded = res.data ?? []
+      setOrders(loaded)
       setLastRefresh(new Date())
+
+      // ── Debug: muestra campos clave para diagnóstico de stuckSince ──
+      if (process.env.NODE_ENV !== 'production' || true) {
+        for (const o of loaded) {
+          const horas = horasEnTransito(o)
+          const crit  = transitCriticality(o)
+          console.log('[transito-debug]', {
+            tracking_number:      o.tracking_number,
+            raw_status:           o.raw_status,
+            normalized_status:    o.normalized_status,
+            status_since:         o.status_since,
+            shipment_created_at:  o.shipment_created_at,
+            last_tracking_update: o.last_tracking_update,
+            shopify_created_at:   o.shopify_created_at,
+            created_at:           o.created_at,
+            stuckSince_used:      o.status_since ?? o.shipment_created_at ?? o.shopify_created_at ?? o.created_at,
+            horas_calculadas:     Math.round(horas * 10) / 10,
+            categoria:            crit,
+          })
+        }
+      }
     } catch (err) {
       console.error('[transito/fetchData]', err)
     } finally {
@@ -65,12 +104,31 @@ export default function TransitoPage() {
     return () => clearInterval(interval)
   }, [fetchData])
 
+  // ── Búsqueda client-side ───────────────────────────────────────────────────
+
+  const filteredOrders = useMemo(() => {
+    if (!search.trim()) return orders
+    const q = search.trim().toLowerCase()
+    return orders.filter(o =>
+      (o.tracking_number  ?? '').toLowerCase().includes(q) ||
+      (o.order_number     ?? '').toLowerCase().includes(q) ||
+      (o.customer_name    ?? '').toLowerCase().includes(q) ||
+      (o.customer_phone   ?? '').toLowerCase().includes(q) ||
+      (o.city             ?? '').toLowerCase().includes(q) ||
+      (o.province         ?? '').toLowerCase().includes(q) ||
+      (o.raw_status       ?? '').toLowerCase().includes(q)
+    )
+  }, [orders, search])
+
+  // Reset página al cambiar búsqueda
+  useEffect(() => { setCurrentPage(1) }, [search])
+
   // ── Datos derivados ────────────────────────────────────────────────────────
 
-  const criticos = useMemo(() => orders.filter(o => horasEnTransito(o) >= 48),  [orders])
-  const riesgo   = useMemo(() => orders.filter(o => horasEnTransito(o) >= 24 && horasEnTransito(o) < 48), [orders])
-  const normales = useMemo(() => orders.filter(o => horasEnTransito(o) < 24),   [orders])
-  const sorted   = useMemo(() => sortedByStale(orders), [orders])
+  const criticos = useMemo(() => filteredOrders.filter(o => horasEnTransito(o) >= 48),  [filteredOrders])
+  const riesgo   = useMemo(() => filteredOrders.filter(o => horasEnTransito(o) >= 24 && horasEnTransito(o) < 48), [filteredOrders])
+  const normales = useMemo(() => filteredOrders.filter(o => horasEnTransito(o) < 24),   [filteredOrders])
+  const sorted   = useMemo(() => sortedByStale(filteredOrders), [filteredOrders])
 
   const pagedSorted = useMemo(
     () => sorted.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
@@ -200,6 +258,35 @@ export default function TransitoPage() {
         </div>
       )}
 
+      {/* ── Buscador ── */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+        <input
+          type="text"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Buscar por guía, pedido, cliente, teléfono, ciudad, provincia o estado EFI…"
+          className="w-full pl-9 pr-9 py-2.5 text-sm border border-gray-200 rounded-xl
+                     focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400
+                     placeholder:text-gray-400"
+        />
+        {search && (
+          <button
+            onClick={() => setSearch('')}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+      {search && (
+        <p className="text-xs text-gray-500 -mt-2">
+          {sorted.length === 0
+            ? 'Sin resultados para esa búsqueda'
+            : `${sorted.length} resultado${sorted.length !== 1 ? 's' : ''} para "${search}"`}
+        </p>
+      )}
+
       {/* ── Sin pedidos en tránsito ── */}
       {!loading && orders.length === 0 && (
         <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-6 text-center">
@@ -210,8 +297,18 @@ export default function TransitoPage() {
         </div>
       )}
 
+      {/* ── Sin resultados de búsqueda ── */}
+      {!loading && orders.length > 0 && sorted.length === 0 && search && (
+        <div className="bg-gray-50 border border-gray-200 rounded-xl px-5 py-6 text-center">
+          <p className="text-gray-600 font-medium">Sin resultados para &quot;{search}&quot;</p>
+          <button onClick={() => setSearch('')} className="text-blue-600 text-sm mt-1 underline">
+            Limpiar búsqueda
+          </button>
+        </div>
+      )}
+
       {/* ── Tabla ── */}
-      {(loading || orders.length > 0) && (
+      {(loading || sorted.length > 0) && (
         <div className="bg-white rounded-xl border-2 border-blue-100 overflow-hidden shadow-sm">
 
           <div className="px-5 py-3 bg-blue-50 border-b border-blue-100 flex items-center gap-2">
@@ -219,6 +316,11 @@ export default function TransitoPage() {
             <p className="text-sm font-semibold text-blue-800">
               Detalle · Ordenado por mayor tiempo sin movimiento
             </p>
+            {search && (
+              <span className="ml-auto text-xs text-blue-600 font-medium">
+                {sorted.length} resultado{sorted.length !== 1 ? 's' : ''}
+              </span>
+            )}
           </div>
 
           {/* Spinner */}
@@ -243,9 +345,11 @@ export default function TransitoPage() {
               </thead>
               <tbody className="divide-y divide-blue-50">
                 {pagedSorted.map(order => {
-                  const crit    = transitCriticality(order)
-                  const style   = TRANSIT_STYLES[crit]
-                  const lastSrc = order.last_tracking_update ?? order.status_since ?? order.updated_at
+                  const crit         = transitCriticality(order)
+                  const style        = TRANSIT_STYLES[crit]
+                  // Usa la misma fuente que transitSinceMs para mostrar la fecha base
+                  const stuckSinceTs = order.status_since ?? order.shipment_created_at ?? order.shopify_created_at ?? order.created_at
+                  const loc          = cityDisplay(order)
                   return (
                     <tr key={order.id} className={`transition-colors group ${style.row}`}>
 
@@ -278,8 +382,8 @@ export default function TransitoPage() {
                       <td className="px-3 py-2.5">
                         <div className="flex items-start gap-1 text-gray-600">
                           <MapPin className="w-3 h-3 text-gray-400 shrink-0 mt-0.5" />
-                          <span className="text-xs truncate max-w-[100px]">
-                            {order.city || order.province || '—'}
+                          <span className={`text-xs truncate max-w-[100px] ${loc === 'Ubicación no registrada' ? 'text-gray-400 italic' : ''}`}>
+                            {loc}
                           </span>
                         </div>
                         {order.city && order.province && order.city !== order.province && (
@@ -298,7 +402,7 @@ export default function TransitoPage() {
                           {sinMovimientoLabel(order)}
                         </p>
                         <p className="text-[10px] text-gray-400 mt-0.5">
-                          {formatEventDate(lastSrc)}
+                          {stuckSinceTs ? formatEventDate(stuckSinceTs) : '—'}
                         </p>
                       </td>
 
@@ -407,7 +511,9 @@ export default function TransitoPage() {
           </li>
         </ul>
         <p className="text-xs text-gray-400 mt-1">
-          El estado EFI mostrado es el último raw_status recibido del courier. "Generada" indica guía creada pero paquete aún no recogido.
+          El tiempo estancado se calcula desde <strong className="text-gray-500">status_since</strong> (fecha real del estado EFI),
+          con fallback a shipment_created_at → shopify_created_at → created_at.
+          El campo &quot;Último sync EFI&quot; (last_tracking_update) <em>no</em> se usa para este cálculo.
         </p>
       </div>
 

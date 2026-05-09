@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Fix crítico /transito stuckSince: `transitSinceMs` corregido para NO usar `last_tracking_update` (lo actualiza el cron cada 5 min). Nueva prioridad: status_since → shipment_created_at → shopify_created_at → created_at. Buscador funcional en /transito. Fallback ciudad "Ubicación no registrada". Logs debug server-side.** | 2026-05-09 | `transit-helpers.ts`, `transito/page.tsx` |
 | **novelty_agent: acceso a /reparto añadido (sidebar). raw_status visible en tabla desktop + mobile card de /reparto y /transito. Copy operativo de escalamiento con Effi/transportadora en info header y notas de ambas páginas. Alertas +24h y +48h en /transito.** | 2026-05-09 | `sidebar.tsx`, `reparto/page.tsx`, `transito/page.tsx` |
 | **Simplificación UX /confirmacion: tab "Nuevos" removido, tarjeta "Nuevos hoy" como KPI visual puro (sin navegación), `getLogisticsBadge` con `in_transit` explícito, 4 tabs operativos: Pedidos/Reintentar/Confirmados/Despachados** | 2026-05-09 | `confirmacion/page.tsx` |
 | **Refactor /confirmacion: nueva arquitectura UX estilo Shopify. Vista "Pedidos" server-paginated (todos los pedidos Shopify), 5 vistas (Pedidos/Nuevos/Reintentar/Confirmados sin guía/Despachados), badges de Estado confirmación + Estado logística, delay badge +24h/+48h, filtro fecha 30 días, API nueva /api/confirmacion/pedidos. `source` field añadido a Order type.** | 2026-05-09 | `confirmacion/page.tsx`, `api/confirmacion/pedidos/route.ts` (nuevo), `types/index.ts` |
@@ -205,7 +206,7 @@ tracking_number     IS NULL         -- si ya tiene guía → /despachados
 ### Tránsito
 - Muestra pedidos con `normalized_status = 'in_transit'`
 - Accesible para: admin, ia_supervisor, novelty_agent, delivery_agent
-- Criticidad por horas sin movimiento (usa `last_tracking_update` o `created_at` como fallback):
+- Criticidad por horas sin movimiento:
   - `>= 48h` → crítico (badge rojo)
   - `24h–48h` → riesgo (badge naranja)
   - `< 24h` → normal
@@ -213,6 +214,9 @@ tracking_number     IS NULL         -- si ya tiene guía → /despachados
 - Refresh cada 5 min (más lento que reparto/novedad — tránsito cambia menos)
 - **raw_status visible (2026-05-09):** columna "Estado EFI" muestra `order.raw_status` debajo del badge de criticidad — permite identificar "Generada" vs otros estados de tránsito
 - **Alertas de escalamiento (2026-05-09):** Banners separados para +24h (riesgo, amarillo) y +48h (crítico, rojo) con instrucción explícita de escalar con Effi / transportadora. Nota pie actualizada con guía operativa (Generada +24h, +48h, +72h)
+- **Buscador (2026-05-09):** Filtra client-side por tracking_number, order_number, customer_name, customer_phone, city, province, raw_status. Muestra count de resultados al buscar.
+- **stuckSince corregido (2026-05-09):** `transitSinceMs` usa `status_since ?? shipment_created_at ?? shopify_created_at ?? created_at` — NO usa `last_tracking_update` (ver sección "Fix crítico /transito stuckSince" más abajo)
+- **Fallback ciudad (2026-05-09):** `cityDisplay(order)` → city → province → último segmento de customer_address → "Ubicación no registrada". Ya no muestra "—" para pedidos sin ciudad.
 
 ### Novedad
 - `delivery_attempts >= 2` → prioridad de contacto (tab "2+ intentos")
@@ -304,7 +308,88 @@ AppLayout (Server Component — layout.tsx)
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
 
-### novelty_agent — Acceso a /reparto + visibilidad operativa (2026-05-09) ← ÚLTIMO CAMBIO
+### Fix crítico /transito stuckSince — "Hace menos de 1h" incorrecto (2026-05-09) ← ÚLTIMO CAMBIO
+
+**Problema confirmado:**
+- Guía 9000546686, cliente Manuel Manuel, generada el 30/04 02:51 p.m.
+- `raw_status = 'Generada'` → `normalized_status = 'in_transit'`
+- La app mostraba **"Hace menos de 1h"** — debía ser **Crítico +48h**
+
+**Causa raíz:**
+
+`transitSinceMs` en `transit-helpers.ts` usaba `last_tracking_update` como **primera** prioridad:
+
+```typescript
+// ANTES (incorrecto):
+order.last_tracking_update ?? order.status_since ?? order.updated_at
+```
+
+El cron `update-order.ts` escribe `last_tracking_update = new Date().toISOString()` en **cada** ejecución (cada 5 minutos), independientemente de si el estado cambió. Eso hace que cualquier guía estancada parezca "recién actualizada" en el cálculo de tiempo.
+
+**Fix aplicado:**
+
+```typescript
+// AHORA (correcto) en transit-helpers.ts:
+order.status_since        ??  // fecha real del estado EFI (historial_estados.at(0).fecha)
+order.shipment_created_at ??  // fecha de creación del envío en EFI
+order.shopify_created_at  ??  // fecha de creación del pedido en Shopify
+order.created_at              // fallback DB
+```
+
+`last_tracking_update` se mantiene en el UPDATE del cron (necesario para ordenar qué pedidos sincronizar primero), pero ya **no se usa** para calcular tiempo estancado.
+
+**Por qué `status_since` es la fuente correcta:**
+
+En `update-order.ts`, el cron setea:
+```typescript
+const firstEstado = tracking.historial_estados.at(0)  // más reciente (desc)
+const statusSince = parseEFIDate(firstEstado?.fecha)
+if (statusSince) updates.status_since = statusSince
+```
+`historial_estados` viene de EFI en orden descendente → `at(0)` = fecha real en que EFI registró el estado actual. Para "Generada" del 30/04, `status_since` = 30/04 02:51 PM → ~216h → Crítico +48h ✓
+
+**Fallback para pedidos sin `status_since`:**
+- `shipment_created_at` = `fecha_creacion` de EFI (también set por el cron, refleja creación del envío)
+- `shopify_created_at` = fecha Shopify del pedido
+- `created_at` = fecha de inserción en DB
+
+Cualquiera de estos es estable y no se actualiza en cada sync.
+
+**Archivos modificados:**
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/transit-helpers.ts` | `transitSinceMs` — nueva prioridad sin `last_tracking_update`. Comentario explicativo añadido. |
+| `src/app/(app)/transito/page.tsx` | `stuckSinceTs` en tabla usa la misma fuente que `transitSinceMs`. Buscador funcional. Fallback ciudad. Logs debug. |
+
+**Buscador /transito:**
+- Input con ícono Search + botón X para limpiar
+- Filtra client-side el array de 200 órdenes por: `tracking_number`, `order_number`, `customer_name`, `customer_phone`, `city`, `province`, `raw_status`
+- Muestra contador de resultados cuando hay búsqueda activa
+- Paginación se resetea al cambiar búsqueda
+- Las tarjetas de clasificación (Crítico/Riesgo/Normal) también filtran sobre `filteredOrders`
+
+**Fallback ciudad:**
+- `cityDisplay(order)`: city → province → último segmento de `customer_address` (separado por coma) → "Ubicación no registrada" (en itálica gris)
+
+**Logs debug (temporales):**
+- En `fetchData` del componente, tras cargar los datos, se imprime por consola del navegador:
+  `[transito-debug] { tracking_number, raw_status, normalized_status, status_since, shipment_created_at, last_tracking_update, shopify_created_at, created_at, stuckSince_used, horas_calculadas, categoria }`
+- Activo en todos los entornos (incluye producción temporalmente para validar)
+- Eliminar el bloque de debug cuando se confirme que 9000546686 muestra Crítico +48h
+
+**Cómo probar con guía 9000546686:**
+1. `npm run dev` en `control-cod-app/`
+2. Login como admin o novelty_agent → ir a `/transito`
+3. Buscar "9000546686" en el buscador → debe aparecer la guía
+4. Verificar que muestra: badge "Crítico +48h" (rojo) y tiempo > 48h
+5. Verificar que NO dice "Hace menos de 1h"
+6. Verificar en consola del navegador: `[transito-debug]` con `horas_calculadas > 200` y `categoria: 'critico'`
+7. La fecha base (`stuckSince_used`) debe ser ~30/04, NO una fecha de hoy
+8. Confirmar que guías recién generadas (hoy) aparecen como "Normal (0–1 día)"
+9. Confirmar que guías de ayer/antier aparecen en "Riesgo" o "Crítico" según corresponda
+
+### novelty_agent — Acceso a /reparto + visibilidad operativa (2026-05-09)
 
 **Qué se hizo:** Ampliación del perfil `novelty_agent` como supervisor operativo de logística. Ahora puede acceder a `/reparto` (además de `/novedad` y `/transito` que ya tenía). Se añadió `raw_status` visible en ambas páginas y copy operativo explícito de escalamiento con Effi / transportadora.
 
@@ -1043,6 +1128,13 @@ El componente `FlujoKpis` muestra en `/reparto` y `/novedad` un resumen horizont
 ---
 
 ## 5. PROBLEMAS IMPORTANTES YA RESUELTOS
+
+### /transito mostraba "Hace menos de 1h" para guías estancadas semanas (2026-05-09)
+- **Archivo:** `src/lib/transit-helpers.ts`
+- **Causa:** `transitSinceMs` usaba `last_tracking_update` como primera prioridad. El cron `update-order.ts` siempre setea `last_tracking_update = new Date().toISOString()` en cada ejecución (cada 5 min), aunque el estado no haya cambiado. Entonces una guía "Generada" del 30/04 aparecía con `last_tracking_update = hace 3 minutos` → `sinMovimientoLabel` devolvía "Hace menos de 1h" → no caía en Crítico ni Riesgo.
+- **Fix:** Cambio de prioridad en `transitSinceMs`: `status_since ?? shipment_created_at ?? shopify_created_at ?? created_at`. `last_tracking_update` dejó de usarse para stuckSince (sigue siendo útil para ordenar el batch del cron).
+- **`status_since`** es confiable: el cron lo setea desde `historial_estados.at(0).fecha` — la fecha real en que EFI registró el estado actual. Para una guía "Generada" del 30/04, `status_since` = 30/04 → ~200h → Crítico ✓
+- **Validar con:** buscar guía 9000546686 en `/transito` → debe mostrar Crítico +48h. Console del browser: `[transito-debug] horas_calculadas > 200`.
 
 ### Auth — middleware no refrescaba tokens
 - **Archivo:** `src/middleware.ts`

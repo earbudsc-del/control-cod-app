@@ -1,9 +1,23 @@
 import type { Order } from '@/types'
 
+/**
+ * Timestamp base para calcular tiempo estancado en tránsito.
+ * Prioridad: status_since (fecha real del estado EFI) →
+ *            shipment_created_at (creación envío EFI) →
+ *            shopify_created_at (creación pedido Shopify) →
+ *            created_at (fallback DB)
+ *
+ * NO usar last_tracking_update: el cron lo sobrescribe a "ahora()" en cada
+ * sync aunque el estado no haya cambiado, haciendo que guías estancadas
+ * meses aparezcan como "Hace menos de 1h".
+ */
 export function transitSinceMs(order: Order): number {
-  return new Date(
-    order.last_tracking_update ?? order.status_since ?? order.updated_at
-  ).getTime()
+  const ts =
+    order.status_since        ??
+    order.shipment_created_at ??
+    order.shopify_created_at  ??
+    order.created_at
+  return new Date(ts).getTime()
 }
 
 export function horasEnTransito(order: Order): number {
