@@ -241,6 +241,11 @@ function RepartoCard({
         </span>
       </div>
 
+      {order.raw_status && (
+        <p className="text-[11px] text-gray-500 mt-1 truncate" title={order.raw_status}>
+          EFI: {order.raw_status}
+        </p>
+      )}
       {order.delivery_attempts > 0 && (
         <p className="text-[11px] text-gray-400 mt-1">
           {order.delivery_attempts} intento{order.delivery_attempts > 1 ? 's' : ''} previos de entrega
@@ -720,11 +725,17 @@ export default function RepartoPage() {
         <div className="bg-white rounded-xl border-2 border-amber-200 overflow-hidden shadow-sm">
 
           {/* Info header */}
-          <div className="px-4 py-3 md:px-5 bg-amber-50 border-b border-amber-200 flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-            <p className="text-sm font-semibold text-amber-800">
-              Prioridad: pedidos críticos (+48h) primero · Escala al courier si no localizas al cliente
-            </p>
+          <div className="px-4 py-3 md:px-5 bg-amber-50 border-b border-amber-200 space-y-1">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <p className="text-sm font-semibold text-amber-800">
+                Prioridad: pedidos críticos (+48h) primero · Escala al courier si no localizas al cliente
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-0.5 pl-6 text-xs text-amber-700">
+              <span>+24h sin movimiento → escalar con Effi / transportadora</span>
+              <span className="font-bold">+48h Crítico → escalar con prioridad alta</span>
+            </div>
           </div>
 
           {/* Buscador */}
@@ -947,6 +958,12 @@ export default function RepartoPage() {
                           )}
                           {critStyle.badgeLabel}
                         </span>
+                        {order.raw_status && (
+                          <p className="text-[10px] text-gray-500 mt-0.5 truncate max-w-[120px]"
+                             title={order.raw_status}>
+                            {order.raw_status}
+                          </p>
+                        )}
                         {order.delivery_attempts > 0 && (
                           <p className="text-[10px] text-gray-500 mt-0.5">
                             {order.delivery_attempts} intento{order.delivery_attempts > 1 ? 's' : ''} prev.

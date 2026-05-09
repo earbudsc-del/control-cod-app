@@ -54,6 +54,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
   novelty_agent: [
     { href: '/mi-rendimiento', label: 'Mi rendimiento', icon: TrendingUp,  alert: null     },
     { href: '/novedad',        label: 'Novedades',      icon: AlertCircle, alert: 'red'    },
+    { href: '/reparto',        label: 'En Reparto',     icon: Bike,        alert: 'amber'  },
     { href: '/transito',       label: 'Tránsito',       icon: Box,         alert: null     },
   ],
 

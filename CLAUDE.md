@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **novelty_agent: acceso a /reparto añadido (sidebar). raw_status visible en tabla desktop + mobile card de /reparto y /transito. Copy operativo de escalamiento con Effi/transportadora en info header y notas de ambas páginas. Alertas +24h y +48h en /transito.** | 2026-05-09 | `sidebar.tsx`, `reparto/page.tsx`, `transito/page.tsx` |
 | **Simplificación UX /confirmacion: tab "Nuevos" removido, tarjeta "Nuevos hoy" como KPI visual puro (sin navegación), `getLogisticsBadge` con `in_transit` explícito, 4 tabs operativos: Pedidos/Reintentar/Confirmados/Despachados** | 2026-05-09 | `confirmacion/page.tsx` |
 | **Refactor /confirmacion: nueva arquitectura UX estilo Shopify. Vista "Pedidos" server-paginated (todos los pedidos Shopify), 5 vistas (Pedidos/Nuevos/Reintentar/Confirmados sin guía/Despachados), badges de Estado confirmación + Estado logística, delay badge +24h/+48h, filtro fecha 30 días, API nueva /api/confirmacion/pedidos. `source` field añadido a Order type.** | 2026-05-09 | `confirmacion/page.tsx`, `api/confirmacion/pedidos/route.ts` (nuevo), `types/index.ts` |
 | **Mejoras /confirmacion: redefinición tabs Nuevos/Atrasados, filtro de fecha Hoy/Ayer/7días/Rango, dropdown mobile para tabs, UX compacto desktop. Mejoras /reparto: guías viejas visibles (limit 500, sortBy=status_since_asc), fallback last_tracking_update, banner críticos. API: sortBy=status_since_asc en orders/route.ts** | 2026-05-09 | `api/confirmacion/stats/route.ts`, `api/orders/route.ts`, `confirmacion/page.tsx`, `reparto/page.tsx` |
@@ -210,6 +211,8 @@ tracking_number     IS NULL         -- si ya tiene guía → /despachados
   - `< 24h` → normal
 - Lógica centralizada en `src/lib/transit-helpers.ts` — reutilizada en `/transito` y `/reparto`
 - Refresh cada 5 min (más lento que reparto/novedad — tránsito cambia menos)
+- **raw_status visible (2026-05-09):** columna "Estado EFI" muestra `order.raw_status` debajo del badge de criticidad — permite identificar "Generada" vs otros estados de tránsito
+- **Alertas de escalamiento (2026-05-09):** Banners separados para +24h (riesgo, amarillo) y +48h (crítico, rojo) con instrucción explícita de escalar con Effi / transportadora. Nota pie actualizada con guía operativa (Generada +24h, +48h, +72h)
 
 ### Novedad
 - `delivery_attempts >= 2` → prioridad de contacto (tab "2+ intentos")
@@ -301,7 +304,61 @@ AppLayout (Server Component — layout.tsx)
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
 
-### /confirmacion — UX simplificada: 4 tabs + KPI "Nuevos hoy" (2026-05-09) ← ÚLTIMO CAMBIO
+### novelty_agent — Acceso a /reparto + visibilidad operativa (2026-05-09) ← ÚLTIMO CAMBIO
+
+**Qué se hizo:** Ampliación del perfil `novelty_agent` como supervisor operativo de logística. Ahora puede acceder a `/reparto` (además de `/novedad` y `/transito` que ya tenía). Se añadió `raw_status` visible en ambas páginas y copy operativo explícito de escalamiento con Effi / transportadora.
+
+**Archivos modificados:**
+
+| Archivo | Cambio |
+|---|---|
+| `src/components/layout/sidebar.tsx` | `/reparto` añadido a `novelty_agent` entre Novedades y Tránsito (icono `Bike`, alert `amber`) |
+| `src/app/(app)/reparto/page.tsx` | Info header actualizado con copy +24h/+48h y Effi. `raw_status` visible en tabla desktop (sub-línea bajo badge criticidad). `raw_status` visible en mobile card (`RepartoCard`, "EFI: ..."). |
+| `src/app/(app)/transito/page.tsx` | Columna "Estado EFI" con `raw_status`. Banners separados para +24h (riesgo) y +48h (crítico) con instrucción de escalar con Effi. Nota pie con guía operativa (+24h/+48h/+72h). |
+
+**Lógica de permisos:**
+
+- El middleware (`middleware.ts`) **no se modificó** — solo bloquea `/dashboard` y `/performance` para no-admins. `/reparto` y `/transito` son accesibles para cualquier usuario autenticado.
+- No hay guards en las páginas de `/reparto` ni `/transito` (nunca los hubo). El control de acceso es exclusivamente via sidebar y middleware.
+- `novelty_agent` puede ver `/reparto` pero **no** tiene acceso a las rutas admin-only (`/dashboard`, `/performance`, `/confirmados`, `/confirmacion`, `/settings`).
+
+**Lógica de alertas +24h/+48h:**
+
+En `/reparto`:
+- El cálculo de criticidad usa `repartoSinceMs(order)` → `status_since ?? last_tracking_update ?? updated_at`
+- Normal: < 24h · Riesgo: 24–48h · Crítico: +48h
+- Info header: "Guías en reparto con más de 24h → escalar con Effi / transportadora. +48h Crítico → escalar con prioridad alta."
+
+En `/transito`:
+- El cálculo usa `transitSinceMs(order)` de `transit-helpers.ts` → `last_tracking_update ?? created_at`
+- Normal: < 24h · Riesgo: 24–48h · Crítico: +48h
+- Banner +24h (amarillo) aparece si `riesgo.length > 0` con mensaje de seguimiento con Effi
+- Banner +48h (rojo) aparece si `criticos.length > 0` con mensaje de escalamiento urgente
+- "Generada" normaliza a `in_transit` → aparece en /transito; `raw_status` muestra "Generada" como texto
+
+**Visibilidad de `raw_status`:**
+- En `/reparto` (desktop): sub-línea gris bajo el badge de criticidad (`max-w-[120px]` truncado con `title` para hover)
+- En `/reparto` (mobile, `RepartoCard`): línea "EFI: [estado]" entre ubicación/tiempo y botones de acción
+- En `/transito` (desktop): sub-línea gris bajo el badge de criticidad + label contextual ("↑ Escalar con Effi" en críticos, "Seguimiento Effi" en riesgo)
+
+**Cómo probar:**
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `novelty_agent`
+3. Verificar sidebar: Novedades · En Reparto · Tránsito (Mi rendimiento en primero)
+4. Ir a `/reparto` → debe cargar sin error
+5. Verificar info header: texto sobre +24h/+48h y Effi visible
+6. En tabla desktop: columna Estado muestra badge + `raw_status` EFI debajo
+7. En móvil (DevTools → iPhone 14): card muestra "EFI: [estado]"
+8. Ir a `/transito` → verificar banners separados para riesgo (+24h) y crítico (+48h)
+9. Tabla transito: columna "Estado EFI" con badge + raw_status + label de escalamiento
+10. Verificar que `admin` sigue viendo todo sin cambios
+11. Verificar que `confirmation_agent` NO ve `/reparto` en su sidebar
+12. Verificar que `delivery_agent` sigue viendo `/reparto` y `/transito` sin cambios
+
+---
+
+### /confirmacion — UX simplificada: 4 tabs + KPI "Nuevos hoy" (2026-05-09)
 
 **Qué se hizo:** Simplificación UX post-refactor. Se eliminó el tab "Nuevos" (redundante con la vista "Pedidos" ya existente). La tarjeta "Nuevos" se convirtió en un KPI visual puro "Nuevos hoy" sin navegación. Se mejoró `getLogisticsBadge` para mostrar `in_transit` explícitamente.
 
@@ -756,7 +813,7 @@ order_id: FK a orders
 | `admin` | Dashboard, En Reparto, Novedades, Tránsito, Confirmación, **Confirmados**, Pedidos, Importar, Rendimiento, Configuración |
 | `ia_supervisor` | Dashboard, Mis tareas, Tránsito, Pedidos |
 | `confirmation_agent` | Mi rendimiento, Confirmaciones |
-| `novelty_agent` | Mi rendimiento, Novedades, Tránsito |
+| `novelty_agent` | Mi rendimiento, Novedades, En Reparto, Tránsito |
 | `delivery_agent` | Mi rendimiento, En Reparto, Tránsito |
 | `agent` | Mis tareas, Pedidos |
 | `viewer` | Pedidos (solo lectura) |

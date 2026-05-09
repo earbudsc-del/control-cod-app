@@ -172,18 +172,31 @@ export default function TransitoPage() {
         ))}
       </div>
 
-      {/* ── Alerta críticos ── */}
-      {!loading && criticos.length > 0 && (
-        <div className="bg-red-50 border-2 border-red-200 rounded-xl px-4 py-3 flex items-start gap-3">
-          <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-bold text-red-800">
-              {criticos.length} pedido{criticos.length !== 1 ? 's' : ''} con más de 48h sin movimiento
-            </p>
-            <p className="text-xs text-red-700 font-medium mt-0.5">
-              Verificar con la transportadora — pueden estar bloqueados o con novedad pendiente de registrar
-            </p>
-          </div>
+      {/* ── Escalamiento operativo ── */}
+      {!loading && (criticos.length > 0 || riesgo.length > 0) && (
+        <div className="space-y-2">
+          {riesgo.length > 0 && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-2.5 flex items-start gap-3">
+              <AlertTriangle className="w-4 h-4 text-yellow-600 shrink-0 mt-0.5" />
+              <p className="text-xs text-yellow-800 font-medium leading-relaxed">
+                <span className="font-bold">{riesgo.length} guía{riesgo.length !== 1 ? 's' : ''} +24h</span>
+                {' '}— Requieren seguimiento con Effi / transportadora antes de convertirse en novedad.
+              </p>
+            </div>
+          )}
+          {criticos.length > 0 && (
+            <div className="bg-red-50 border-2 border-red-200 rounded-xl px-4 py-3 flex items-start gap-3">
+              <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-bold text-red-800">
+                  {criticos.length} pedido{criticos.length !== 1 ? 's' : ''} crítico{criticos.length !== 1 ? 's' : ''} +48h sin movimiento
+                </p>
+                <p className="text-xs text-red-700 font-medium mt-0.5">
+                  Escalar con prioridad alta a Effi / transportadora — pueden estar bloqueados o con novedad sin registrar.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -220,7 +233,7 @@ export default function TransitoPage() {
             <table className="w-full text-sm">
               <thead className="bg-blue-50/60 border-b border-blue-100">
                 <tr>
-                  {['Guía', 'Cliente', 'Ciudad', 'Sin movimiento', 'Estado', ''].map(h => (
+                  {['Guía', 'Cliente', 'Ciudad', 'Sin movimiento', 'Estado EFI', ''].map(h => (
                     <th key={h}
                         className="px-3 py-3 text-left text-xs font-semibold text-blue-800 whitespace-nowrap">
                       {h}
@@ -289,16 +302,27 @@ export default function TransitoPage() {
                         </p>
                       </td>
 
-                      {/* Estado badge */}
+                      {/* Estado badge + raw_status */}
                       <td className="px-3 py-2.5">
                         <span className={`inline-flex items-center gap-1 text-[10px] font-semibold
                                           px-1.5 py-0.5 rounded-full whitespace-nowrap ${style.badge}`}>
                           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${style.dot}`} />
                           {style.label}
                         </span>
+                        {order.raw_status && (
+                          <p className="text-[10px] text-gray-600 font-medium mt-0.5 truncate max-w-[120px]"
+                             title={order.raw_status}>
+                            {order.raw_status}
+                          </p>
+                        )}
                         {crit === 'critico' && (
-                          <p className="text-[10px] text-red-600 font-medium mt-0.5 leading-tight">
-                            Verificar con transportadora
+                          <p className="text-[10px] text-red-600 font-bold mt-0.5 leading-tight">
+                            ↑ Escalar con Effi
+                          </p>
+                        )}
+                        {crit === 'riesgo' && (
+                          <p className="text-[10px] text-yellow-700 font-medium mt-0.5 leading-tight">
+                            Seguimiento Effi
                           </p>
                         )}
                       </td>
@@ -365,12 +389,25 @@ export default function TransitoPage() {
         </div>
       )}
 
-      {/* ── Nota ── */}
-      <div className="bg-gray-50 border border-gray-100 rounded-xl px-5 py-4">
-        <p className="text-xs text-gray-500 leading-relaxed">
-          <strong className="text-gray-700">¿Cuándo escalar?</strong>{' '}
-          Si un pedido lleva más de 48h sin actualización de la transportadora, contactar directamente al courier.
-          Si supera 72h, considerar apertura de reclamo formal.
+      {/* ── Notas operativas ── */}
+      <div className="bg-gray-50 border border-gray-100 rounded-xl px-5 py-4 space-y-2">
+        <p className="text-xs text-gray-700 font-semibold">Guía operativa para escalamiento:</p>
+        <ul className="text-xs text-gray-500 leading-relaxed space-y-1 list-disc list-inside">
+          <li>
+            <strong className="text-gray-700">Generada / En tránsito +24h</strong>
+            {' '}— Requiere seguimiento con Effi / transportadora para confirmar recogida o avance.
+          </li>
+          <li>
+            <strong className="text-gray-700">+48h Crítico</strong>
+            {' '}— Escalar con prioridad alta. Puede estar bloqueado o con novedad sin registrar.
+          </li>
+          <li>
+            <strong className="text-gray-700">+72h</strong>
+            {' '}— Considerar apertura de reclamo formal con la transportadora.
+          </li>
+        </ul>
+        <p className="text-xs text-gray-400 mt-1">
+          El estado EFI mostrado es el último raw_status recibido del courier. "Generada" indica guía creada pero paquete aún no recogido.
         </p>
       </div>
 
