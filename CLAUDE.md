@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Refactor /confirmacion: nueva arquitectura UX estilo Shopify. Vista "Pedidos" server-paginated (todos los pedidos Shopify), 5 vistas (Pedidos/Nuevos/Reintentar/Confirmados sin guía/Despachados), badges de Estado confirmación + Estado logística, delay badge +24h/+48h, filtro fecha 30 días, API nueva /api/confirmacion/pedidos. `source` field añadido a Order type.** | 2026-05-09 | `confirmacion/page.tsx`, `api/confirmacion/pedidos/route.ts` (nuevo), `types/index.ts` |
 | **Mejoras /confirmacion: redefinición tabs Nuevos/Atrasados, filtro de fecha Hoy/Ayer/7días/Rango, dropdown mobile para tabs, UX compacto desktop. Mejoras /reparto: guías viejas visibles (limit 500, sortBy=status_since_asc), fallback last_tracking_update, banner críticos. API: sortBy=status_since_asc en orders/route.ts** | 2026-05-09 | `api/confirmacion/stats/route.ts`, `api/orders/route.ts`, `confirmacion/page.tsx`, `reparto/page.tsx` |
 | **Fix conteos /confirmacion: base canónica normalized_status='pending', card SD usa count local para coincidir con tab** | 2026-05-09 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx` |
 | **Santo Domingo / Transporte local: helper isSantoDomingoOrder, badge purple, tab en /confirmacion, filtro en /confirmados, contadores en stats API** | 2026-05-09 | `alert-helpers.ts`, `alert-badges.tsx`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `confirmados/page.tsx` |
@@ -298,6 +299,110 @@ AppLayout (Server Component — layout.tsx)
 8. Quitar Device Toolbar → sidebar fija desktop, sin topbar, layout idéntico al anterior
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
+
+### /confirmacion — Arquitectura UX estilo Shopify (2026-05-09) ← ÚLTIMO CAMBIO
+
+**Qué se hizo:** Refactor completo de la UX de `/confirmacion` para que funcione como Shopify Orders. La vista pasó de ser una cola de trabajo exclusiva (solo pedidos pending) a ser el centro de gestión de todos los pedidos Shopify, con vistas especializadas por estado.
+
+#### Nueva arquitectura: 5 vistas (ViewMode)
+
+| Vista | Datos | Fuente API | Paginación | Acciones |
+|---|---|---|---|---|
+| **Pedidos** (default) | TODOS los `source='shopify_webhook'` ordenados por fecha DESC | `GET /api/confirmacion/pedidos` (NUEVO) | Server-side, 50/pág | Solo para `pending + tracking IS NULL` |
+| **Nuevos** | Hoy en RD + `confirmation_attempts=0` + `pending` + `tracking IS NULL` | `/api/confirmacion` (existente) | Client-side 50/pág | ✅ Todas (Confirmó/No contesta/Sin cobertura/Canceló) |
+| **Reintentar** | `confirmation_attempts 1–2` + `pending` + `tracking IS NULL` | `/api/confirmacion` (existente) | Client-side 50/pág | ✅ Todas |
+| **Confirmados sin guía** | `confirmation_status='confirmed' + tracking IS NULL` | `/api/confirmados` (existente) | Sin paginación (≤200) | Read-only — visible para confirmation_agent |
+| **Despachados** | `tracking IS NOT NULL` activos | `/api/despachados` (existente) | Sin paginación (≤200) | Read-only |
+
+#### Nuevos badges de columna
+
+**Estado confirmación** (`getConfirmBadge(order, terminalOverride?)`):
+- `confirmed` → "Confirmado" verde
+- `pending` + `attempts=0` → "Pendiente" gris
+- `pending` + `attempts≥1` → "Reintentar" ámbar
+- `cancelled` → "Cancelado" gris
+- `no_coverage` → "Sin cobertura" naranja
+- `unreachable` / `wrong_number` → "Inalcanzable" rojo
+
+**Estado logística** (`getLogisticsBadge(order)`):
+- `tracking IS NULL` → "Sin guía" gris
+- `tracking IS NOT NULL + raw_status ilike 'generada'` → "Generada" azul claro
+- `in_transit` → "En tránsito" azul
+- `en_reparto` → "En reparto" naranja
+- `novedad` → "Novedad" rojo
+- `delivered` → "Entregada" verde
+- `returned` → "Devuelta" gris oscuro
+
+**Delay badge** (`getDelayBadge(order)`):
+- `≥48h` → "+48h" rojo pulsante (`animate-pulse`)
+- `≥24h` → "+24h" ámbar
+- Aplica en todas las vistas con pedidos pendientes
+
+#### Filtros de fecha (nueva opción)
+- Hoy · Ayer · 7 días · **30 días** (nuevo) · Rango personalizado
+- En vista "Pedidos": filtrado **server-side** vía params `?from=ISO&to=ISO` en la API
+- En vistas "Nuevos"/"Reintentar": filtrado **client-side** (mismo patrón anterior)
+- La vista "Nuevos" ignora el filtro de fecha (tiene constraint propio: solo hoy)
+
+#### API nueva: `GET /api/confirmacion/pedidos`
+
+- **Archivo:** `src/app/api/confirmacion/pedidos/route.ts`
+- **Query:** `orders WHERE source='shopify_webhook' ORDER BY shopify_created_at DESC, created_at DESC`
+- **Params:** `?page=N&limit=50&search=X&from=ISO&to=ISO`
+- **Respuesta:** `{ data: Order[], total, page, pages }`
+- **Search:** ilike en `customer_name`, `customer_phone`, `order_number`, `tracking_number`
+- **Paginación:** server-side real (RANGE Supabase), estable con miles de órdenes
+
+#### Estrategia de fetch
+
+- **Mount:** pre-carga stats + perf + pedidos (pág 1) + cola (queue). Los tabs "Confirmados sin guía" y "Despachados" se cargan **lazy** al primer click.
+- **Auto-refresh 3 min:** re-fetcha stats + datos del view activo
+- **Cambio de vista:** re-fetcha datos si ya cargados; lazy-load si es primera vez
+- **Cambio de búsqueda/fecha en "Pedidos":** re-fetcha inmediatamente, resetea a pág 1
+- **Cambio de página en "Pedidos":** re-fetcha la página seleccionada
+
+#### Type update
+
+- `src/types/index.ts`: añadido `source?: string | null` al interface `Order`
+
+#### Lo que NO cambió
+
+- `/api/confirmacion/route.ts` — fuente de cola operativa, intacta
+- `/api/confirmacion/stats/route.ts` — todos los contadores, intactos
+- `/api/confirmacion/performance/route.ts` — perf del agente, intacto
+- `/api/orders/[id]/confirmation/route.ts` — acciones, intactas
+- `/api/tracking/auto/route.ts` — cron EFI, intacto
+- `/api/admin/recover-shopify-orders/route.ts` — recovery, intacto
+- `lib/alert-helpers.ts` + `alert-badges.tsx` — SD badge púrpura, intactos
+- `/confirmados/page.tsx` + `/despachados/page.tsx` — rutas independientes, intactas
+- `reparto/page.tsx`, `novedad/page.tsx`, `transito/page.tsx` — sin cambios
+
+#### Comportamiento de roles
+
+- `confirmation_agent`: ve las 5 vistas. "Confirmados sin guía" y "Despachados" en modo read-only (sin acciones de despacho).
+- `admin`: igual, con acceso completo a todas las rutas.
+- Las acciones (Confirmó/No contesta/Sin cobertura/Canceló) solo aparecen cuando `confirmation_status='pending' AND tracking_number IS NULL`.
+
+#### Cómo probarlo
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como admin → ir a `/confirmacion`
+3. Default: vista "Pedidos" — tabla Shopify con TODOS los pedidos, ordenados más recientes arriba
+4. Verificar columnas: Fecha/Orden, Cliente, Ciudad/Producto, Monto, Estado confirm., Estado log., Acción, Ver
+5. Usar buscador → filtra server-side (no recarga la página, solo reemplaza resultados)
+6. Usar filtros fecha → Hoy/Ayer/7días/30días/Rango — filtra server-side, paginación se resetea
+7. Navegar páginas con Anterior/Siguiente — carga 50 pedidos del servidor
+8. Click en card "Nuevos" → cambia a vista de cola operativa con acciones
+9. Click en card "Reintentar" → muestra pedidos con 1–2 intentos; badge "+24h"/"+48h" en los atrasados
+10. Click en card "Confirmados sin guía" → read-only, sin botones de acción
+11. Click en card "Despachados" → read-only con guía + último movimiento
+12. En móvil (DevTools → iPhone 14 Pro): select dropdown muestra las 5 vistas, cards responsivas
+13. Ejecutar acción "Confirmó" en vista Nuevos/Reintentar → toast verde, row actualiza
+14. Ejecutar "Canceló" → row desaparece después de 1.5s
+15. Verificar que badges SD (purple), duplicados (ámbar), cobertura siguen apareciendo
+16. Verificar que las rutas `/confirmados` y `/despachados` siguen funcionando independientemente
+
+---
 
 ### /confirmacion — Tabs redefinidos + Filtro de fecha + UX móvil (2026-05-09)
 

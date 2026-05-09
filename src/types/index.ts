@@ -130,6 +130,7 @@ export interface Order {
   sla_breached: boolean
   shopify_order_id:    string | null
   shopify_created_at?: string | null
+  source?: string | null
   created_at: string
   updated_at: string
   // Campos de vistas enriquecidas
