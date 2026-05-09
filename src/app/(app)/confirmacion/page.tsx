@@ -183,7 +183,7 @@ function ConfirmacionCard({
 
   const confStatusKey = terminal
     ? (terminal === 'wrong_number' ? 'unreachable' : terminal)
-    : ((order.confirmation_status === 'wrong_number' ? 'unreachable' : order.confirmation_status) ?? 'pending')
+    : (((order.confirmation_status as string) === 'wrong_number' ? 'unreachable' : order.confirmation_status) ?? 'pending')
   const statusBadge    = CONF_STATUS[confStatusKey]
   const confidenceBadge = confidence ? CONFIDENCE[confidence] : null
 
