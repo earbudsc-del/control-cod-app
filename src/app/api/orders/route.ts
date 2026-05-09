@@ -20,11 +20,22 @@ export async function GET(request: Request) {
     const from       = (page - 1) * limit
     const to         = from + limit - 1
 
+    const sortBy = searchParams.get('sortBy')
+
     let query = supabase
       .from('orders_with_sla')
       .select('*', { count: 'exact' })
-      .order('updated_at', { ascending: false })
-      .range(from, to)
+
+    // sortBy=status_since_asc: ordena los más viejos en el estado primero (útil en /reparto)
+    if (sortBy === 'status_since_asc') {
+      query = query
+        .order('status_since', { ascending: true, nullsFirst: false })
+        .order('updated_at', { ascending: true })
+    } else {
+      query = query.order('updated_at', { ascending: false })
+    }
+
+    query = query.range(from, to)
 
     if (status === 'failed_attempt') {
       // "Intento fallido" no es un normalized_status — son pedidos con al menos un intento de entrega no completado

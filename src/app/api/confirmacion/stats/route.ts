@@ -8,16 +8,27 @@ const ACTIVE_PENDING = {
   confirmation_status: 'pending',
 } as const
 
+/**
+ * Calcula el inicio del día actual en timezone America/Santo_Domingo (UTC-4, sin DST).
+ * Medianoche RD = 04:00 UTC.
+ */
+function rdTodayStartISO(): string {
+  const now    = new Date()
+  const rdStr  = now.toLocaleDateString('en-CA', { timeZone: 'America/Santo_Domingo' })
+  const [y, m, d] = rdStr.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d, 4, 0, 0, 0)).toISOString()
+}
+
 export async function GET() {
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
 
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
-    const todayIso  = todayStart.toISOString()
-    const cutoff48h = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
+    // Límites de tiempo: hoy RD y corte de 48h
+    const todayStartRD = rdTodayStartISO()
+    const todayIso     = new Date().setHours(0, 0, 0, 0), todayIsoStr = new Date(todayIso).toISOString()
+    const cutoff48h    = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
 
     // Base idéntica a /api/confirmacion/route.ts: pending + sin tracking + normalized pending
     const pendingBase = () =>
@@ -57,14 +68,16 @@ export async function GET() {
       { count: santoDomingoConfirmadosSinGuia },
     ] = await Promise.all([
 
-      // Nunca contactados
-      pendingBase().or('confirmation_attempts.is.null,confirmation_attempts.eq.0'),
+      // Nuevos: pedidos de HOY (en RD) con 0 intentos de contacto — sin contacto previo
+      pendingBase()
+        .or('confirmation_attempts.is.null,confirmation_attempts.eq.0')
+        .gte('shopify_created_at', todayStartRD),
 
-      // 1–2 intentos sin éxito
+      // 1–2 intentos sin éxito (sin importar fecha)
       pendingBase().gte('confirmation_attempts', 1).lte('confirmation_attempts', 2),
 
-      // Pendientes con más de 48h de antigüedad
-      pendingBase().lt('created_at', cutoff48h),
+      // Atrasados: más de 48h desde shopify_created_at (o created_at), sin tracking, aún pending
+      pendingBase().lt('shopify_created_at', cutoff48h),
 
       // Confirmados hoy (métrica histórica, solo pedidos Shopify)
       supabase
@@ -72,14 +85,14 @@ export async function GET() {
         .select('*', { count: 'exact', head: true })
         .eq('source', 'shopify_webhook')
         .eq('confirmation_status', 'confirmed')
-        .gte('customer_confirmed_at', todayIso),
+        .gte('customer_confirmed_at', todayIsoStr),
 
       // Contactados hoy (cualquier intento hoy, solo pedidos Shopify)
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('source', 'shopify_webhook')
-        .gte('last_confirmation_attempt', todayIso),
+        .gte('last_confirmation_attempt', todayIsoStr),
 
       // Inalcanzables activos
       supabase

@@ -46,7 +46,8 @@ const MS_24H = 24 * 60 * 60 * 1000
 const MS_48H = 48 * 60 * 60 * 1000
 
 function repartoSinceMs(order: Order): number {
-  return new Date(order.status_since ?? order.updated_at).getTime()
+  // Prioridad: status_since → last_tracking_update → updated_at
+  return new Date(order.status_since ?? order.last_tracking_update ?? order.updated_at).getTime()
 }
 
 function horasEnReparto(order: Order): number {
@@ -368,7 +369,8 @@ export default function RepartoPage() {
     try {
       const [ordersRes, inTransitRes, perfRes, entregadosRes]: [OrdersResponse, OrdersResponse, RepartoPerfData, DeliveredEntry[]] =
         await Promise.all([
-          fetch('/api/orders?status=en_reparto&limit=200&page=1').then(r => r.json()),
+          // sortBy=status_since_asc → más viejos (críticos) primero; limit=500 para no cortar histórico
+          fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc').then(r => r.json()),
           fetch('/api/orders?status=in_transit&limit=200&page=1').then(r => r.json()),
           fetch('/api/reparto/performance').then(r => r.json()),
           fetch('/api/reparto/entregados').then(r => r.json()),
@@ -768,6 +770,19 @@ export default function RepartoPage() {
             </div>
           )}
 
+          {/* Banner: guías críticas viejas detectadas */}
+          {!loading && activeTab === 'critico' && criticos.length > 0 && (
+            <div className="mx-4 my-2 flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
+              <ShieldAlert className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+              <div className="text-xs text-red-700 leading-relaxed">
+                <span className="font-bold">Guías estancadas detectadas.</span>{' '}
+                Si alguna ya fue entregada o tiene tracking nuevo en EFI,
+                ejecuta <span className="font-mono font-semibold">Recuperar pedidos</span> desde Configuración
+                para sincronizar su estado.
+              </div>
+            </div>
+          )}
+
           {/* Vista vacía de tab/búsqueda */}
           {!loading && displayedOrders.length === 0 && allOrders.length > 0 && (
             <div className="px-5 py-10 text-center">
@@ -1075,10 +1090,10 @@ export default function RepartoPage() {
             </div>
           )}
 
-          {!loading && allOrders.length > 200 && (
+          {!loading && allOrders.length > 500 && (
             <div className="px-5 py-3 bg-amber-50 border-t border-amber-100 text-center">
               <p className="text-xs text-amber-700">
-                Mostrando 200 de más pedidos en reparto.{' '}
+                Mostrando 500 de más pedidos en reparto.{' '}
                 <Link href="/orders?status=en_reparto" className="font-semibold underline">
                   Ver todos en Pedidos
                 </Link>

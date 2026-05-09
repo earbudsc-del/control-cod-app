@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Mejoras /confirmacion: redefinición tabs Nuevos/Atrasados, filtro de fecha Hoy/Ayer/7días/Rango, dropdown mobile para tabs, UX compacto desktop. Mejoras /reparto: guías viejas visibles (limit 500, sortBy=status_since_asc), fallback last_tracking_update, banner críticos. API: sortBy=status_since_asc en orders/route.ts** | 2026-05-09 | `api/confirmacion/stats/route.ts`, `api/orders/route.ts`, `confirmacion/page.tsx`, `reparto/page.tsx` |
 | **Fix conteos /confirmacion: base canónica normalized_status='pending', card SD usa count local para coincidir con tab** | 2026-05-09 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx` |
 | **Santo Domingo / Transporte local: helper isSantoDomingoOrder, badge purple, tab en /confirmacion, filtro en /confirmados, contadores en stats API** | 2026-05-09 | `alert-helpers.ts`, `alert-badges.tsx`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `confirmados/page.tsx` |
 | **Responsive/mobile-first en /reparto: RepartoCard component, md:hidden cards + hidden md:table desktop** | 2026-05-06 | `reparto/page.tsx` |
@@ -297,6 +298,117 @@ AppLayout (Server Component — layout.tsx)
 8. Quitar Device Toolbar → sidebar fija desktop, sin topbar, layout idéntico al anterior
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
+
+### /confirmacion — Tabs redefinidos + Filtro de fecha + UX móvil (2026-05-09)
+
+**Cambios al módulo /confirmacion:**
+
+#### Definiciones canónicas de tabs (actualizadas)
+
+| Tab | Definición |
+|---|---|
+| **Todos** | Todos los pedidos base (pending + sin tracking + normalized_status=pending). Orden inteligente: atrasados → reintentar → nuevos. |
+| **Nuevos** | Solo pedidos de HOY en `America/Santo_Domingo`, `confirmation_attempts = 0` (sin contacto previo). |
+| **Reintentar** | `confirmation_attempts` entre 1 y 2, sin importar fecha. |
+| **Atrasados +48h** | Pending sin tracking, `shopify_created_at < ahora - 48h`. |
+| **Santo Domingo** | Detectados por `isSantoDomingoOrder` (client-side). |
+| **Duplicados / Cobertura / Zona desc.** | Filtros de alerta, sin cambio. |
+
+**Cambio clave en "Nuevos":** Antes = `confirmation_attempts = 0` (cualquier fecha). Ahora = `confirmation_attempts = 0` **AND** `shopify_created_at` dentro del día actual en RD. Los pedidos sin contactar de ayer o de días anteriores ya NO aparecen en "Nuevos" — aparecen en "Todos" y potencialmente en "Atrasados".
+
+**Cambio en "Atrasados":** La query del stats API usa `shopify_created_at < cutoff48h` (antes usaba `created_at`). Esto es más preciso para pedidos Shopify.
+
+#### Filtro de fecha
+
+- Botones: **Hoy · Ayer · 7 días · Rango** (aparecen encima de los tabs, en el bloque de la tabla)
+- El filtro aplica sobre `shopify_created_at ?? created_at`
+- El tab **"Nuevos"** ignora el filtro de fecha (tiene su propio constraint = hoy)
+- **Rango personalizado:** inputs `date` desde/hasta, botón "Aplicar" activa el filtro
+- **Limpiar:** borra filtro y fechas; resetea a página 1
+- Todos los filtros de fecha recalculan usando `rdMidnightUTC(offsetDays)` — medianoche RD = 04:00 UTC
+
+#### UX de tabs
+
+- **Móvil:** `<select>` dropdown reemplaza la barra horizontal de tabs (evita scroll horizontal con 8 opciones)
+- **Desktop:** tabs horizontales compactos (`min-h-[40px] px-3 py-2`) vs antes (`min-h-[44px] px-4 py-2.5`)
+- Los contadores en el select muestran el count junto al nombre: "Nuevos (3)"
+
+#### Nuevas funciones en `confirmacion/page.tsx`
+
+- `rdMidnightUTC(offsetDays)` — calcula ms UTC de medianoche RD. offsetDays=0=hoy, -1=ayer, 1=mañana
+- `effectiveDateRange` memo — convierte `dateFilter` en `{ from: number, to: number }` en ms UTC
+- `dateFilter` state — `'hoy' | 'ayer' | '7dias' | 'personalizado' | null`
+- `dateFrom`, `dateTo`, `dateApplied` states — para el rango personalizado
+- `filteredOrders` actualizado — aplica `effectiveDateRange` antes del filtro de búsqueda (excepto en tab 'nuevos')
+
+#### `api/confirmacion/stats/route.ts` — cambios
+
+- Nueva función `rdTodayStartISO()` — calcula ISO string de medianoche RD hoy
+- `nuevos` query: agregado `.gte('shopify_created_at', todayStartRD)` — solo cuenta pedidos de hoy
+- `atrasados` query: cambiado de `.lt('created_at', cutoff48h)` a `.lt('shopify_created_at', cutoff48h)` — usa shopify_created_at
+
+**Cómo probarlo:**
+1. `npm run dev` → ir a `/confirmacion`
+2. Verificar que "Nuevos" solo muestra pedidos de hoy con 0 intentos (no pedidos de ayer)
+3. Activar filtro "Ayer" → en tab "Todos" aparecen pedidos de ayer; en tab "Nuevos" no cambia
+4. Activar filtro "Rango" → ingresar fechas → click "Aplicar" → se filtran pedidos por esa fecha
+5. En móvil (DevTools → iPhone 14): la barra de tabs se reemplaza por un `<select>` dropdown
+6. Cambiar tab desde el select → la vista cambia correctamente
+
+---
+
+### /reparto — Guías estancadas visibles + fallback status_since (2026-05-09)
+
+**Problema resuelto:** Guías del mes pasado con `normalized_status='en_reparto'` no siempre aparecían en `/reparto` porque el query ordenaba por `updated_at DESC` y limitaba a 200 registros, dejando afuera los más viejos.
+
+**Cambios en `reparto/page.tsx`:**
+
+1. **`repartoSinceMs(order)`** — fallback actualizado:
+   - Antes: `status_since ?? updated_at`
+   - Ahora: `status_since ?? last_tracking_update ?? updated_at`
+   - Razón: `last_tracking_update` es más representativo del último evento real en EFI que `updated_at`
+
+2. **Fetch de órdenes en reparto:**
+   - Antes: `GET /api/orders?status=en_reparto&limit=200&page=1`
+   - Ahora: `GET /api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc`
+   - `sortBy=status_since_asc`: ordena por `status_since ASC NULLS LAST, updated_at ASC` → los más viejos (críticos) aparecen primero
+   - `limit=500`: cubre escenarios con muchas guías históricas
+
+3. **Banner en tab "Crítico":** Aparece cuando hay guías críticas activas — indica cómo sincronizar si ya fueron entregadas en EFI.
+
+**Cambio en `api/orders/route.ts`:**
+- Nuevo parámetro `?sortBy=status_since_asc`
+- Query resultante: `.order('status_since', { ascending: true, nullsFirst: false }).order('updated_at', { ascending: true })`
+- Sin `sortBy`: comportamiento anterior (`updated_at DESC`)
+
+**Resultado en /reparto:**
+- Guías de hace 30+ días en `en_reparto` → aparecen en tab "Crítico" con badge rojo pulsante "+48h"
+- Badge label: "+48h · Crítico" con punto rojo animado
+- Clasificación correcta: Normal (0-24h), Riesgo (24-48h), Crítico (+48h)
+
+**Cómo probarlo:**
+1. `npm run dev` → ir a `/reparto`
+2. Tab "Crítico" debe mostrar guías de hace +48h, incluyendo las del mes pasado
+3. Badge rojo con punto pulsante en cada guía crítica
+4. "En reparto desde" muestra la fecha real (ej. "Hace 32d 4h")
+5. El banner de info aparece en el tab Crítico cuando hay guías
+
+---
+
+### /api/admin/recover-shopify-orders — Nota sobre sync tracking (2026-05-09)
+
+Si pedidos +48h aparecen en "Atrasados" pero ya fueron despachados en Shopify (confirmed + fulfilled), correr desde Postman o desde `/settings`:
+
+```
+POST /api/admin/recover-shopify-orders
+Body: { "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }
+```
+
+Este endpoint ya incluye `fulfillments` en los fields de Shopify API y sincroniza `tracking_number` si estaba null en DB. Una vez sincronizado, el pedido desaparece de `/confirmacion` en el próximo refresh y aparece en `/despachados`.
+
+**No se hicieron cambios destructivos.** El proceso es idempotente — solo actualiza `tracking_number` cuando estaba NULL.
+
+---
 
 ### Santo Domingo / Transporte local (2026-05-09)
 

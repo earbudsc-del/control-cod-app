@@ -11,6 +11,7 @@ import {
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, RotateCcw, Clock, Inbox, TrendingUp,
   AlertTriangle, MapPinOff, ChevronLeft, ChevronRight, Search, Truck,
+  CalendarDays,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
@@ -20,6 +21,18 @@ const MS_48H       = 48 * 60 * 60 * 1000
 
 type Tab           = 'all' | 'nuevos' | 'reintentar' | 'atrasados' | 'duplicados' | 'cobertura' | 'zona_desconocida' | 'santo_domingo'
 type ContactMethod = 'call' | 'whatsapp' | 'other'
+type DateFilter    = 'hoy' | 'ayer' | '7dias' | 'personalizado'
+
+/**
+ * Devuelve ms UTC del inicio del día en America/Santo_Domingo (UTC-4, sin DST).
+ * offsetDays=0 → hoy, offsetDays=-1 → ayer, offsetDays=1 → mañana.
+ */
+function rdMidnightUTC(offsetDays = 0): number {
+  const rd    = new Date(Date.now() + offsetDays * 86_400_000)
+  const rdStr = rd.toLocaleDateString('en-CA', { timeZone: 'America/Santo_Domingo' })
+  const [y, m, d] = rdStr.split('-').map(Number)
+  return Date.UTC(y, m - 1, d, 4, 0, 0, 0)
+}
 
 interface ConfirmStats {
   nuevos:             number
@@ -385,6 +398,12 @@ export default function ConfirmacionPage() {
   const [currentPage, setCurrentPage] = useState(1)
   const [searchQuery, setSearchQuery] = useState('')
 
+  // ── Filtro de fecha ───────────────────────────────────────────────────────
+  const [dateFilter, setDateFilter]   = useState<DateFilter | null>(null)
+  const [dateFrom, setDateFrom]       = useState('')
+  const [dateTo, setDateTo]           = useState('')
+  const [dateApplied, setDateApplied] = useState(false)
+
   const [terminalMap, setTerminalMap]     = useState<Record<string, string>>({})
   const [attemptsMap, setAttemptsMap]     = useState<Record<string, number>>({})
   const [loadingRow, setLoadingRow]       = useState<Record<string, boolean>>({})
@@ -444,13 +463,45 @@ export default function ConfirmacionPage() {
     santoDomingo:  orders.filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address)).length,
   }), [orders])
 
+  // Rango de fechas efectivo basado en el filtro activo
+  const effectiveDateRange = useMemo((): { from: number; to: number } | null => {
+    if (!dateFilter) return null
+    const todayMs    = rdMidnightUTC(0)
+    const tomorrowMs = rdMidnightUTC(1)
+    const yesterdayMs = rdMidnightUTC(-1)
+    const sevenDaysMs = rdMidnightUTC(-7)
+    switch (dateFilter) {
+      case 'hoy':   return { from: todayMs,     to: tomorrowMs  }
+      case 'ayer':  return { from: yesterdayMs,  to: todayMs     }
+      case '7dias': return { from: sevenDaysMs,  to: tomorrowMs  }
+      case 'personalizado': {
+        if (!dateApplied || !dateFrom || !dateTo) return null
+        const [fy, fm, fd] = dateFrom.split('-').map(Number)
+        const [ty, tm, td] = dateTo.split('-').map(Number)
+        return {
+          from: Date.UTC(fy, fm - 1, fd,     4, 0, 0, 0),
+          to:   Date.UTC(ty, tm - 1, td + 1, 4, 0, 0, 0),
+        }
+      }
+      default: return null
+    }
+  }, [dateFilter, dateFrom, dateTo, dateApplied])
+
   const displayedOrders = useMemo(() => {
     const cutoff = Date.now() - MS_48H
     switch (activeTab) {
-      case 'nuevos':
+      case 'nuevos': {
+        // "Nuevos" = pedidos de HOY en RD, sin contacto previo (0 intentos)
+        const todayMs    = rdMidnightUTC(0)
+        const tomorrowMs = rdMidnightUTC(1)
         return [...orders]
-          .filter(o => (o.confirmation_attempts ?? 0) === 0)
+          .filter(o => {
+            if ((o.confirmation_attempts ?? 0) !== 0) return false
+            const ts = new Date(o.shopify_created_at ?? o.created_at).getTime()
+            return ts >= todayMs && ts < tomorrowMs
+          })
           .sort((a, b) => effectiveMs(b) - effectiveMs(a))
+      }
       case 'reintentar':
         return [...orders]
           .filter(o => { const a = o.confirmation_attempts ?? 0; return a >= 1 && a <= 2 })
@@ -479,14 +530,24 @@ export default function ConfirmacionPage() {
   const PAGE_SIZE = 50
 
   const filteredOrders = useMemo(() => {
+    // Filtro de fecha: aplica a todos los tabs EXCEPTO 'nuevos' (tiene su propio constraint de hoy)
+    let result = displayedOrders
+    if (effectiveDateRange && activeTab !== 'nuevos') {
+      const { from, to } = effectiveDateRange
+      result = result.filter(o => {
+        const ts = new Date(o.shopify_created_at ?? o.created_at).getTime()
+        return ts >= from && ts < to
+      })
+    }
+    // Búsqueda por texto
     const q = searchQuery.trim().toLowerCase()
-    if (!q) return displayedOrders
-    return displayedOrders.filter(o =>
+    if (!q) return result
+    return result.filter(o =>
       (o.customer_name  ?? '').toLowerCase().includes(q) ||
       (o.customer_phone ?? '').toLowerCase().includes(q) ||
       (o.order_number   ?? '').toLowerCase().includes(q),
     )
-  }, [displayedOrders, searchQuery])
+  }, [displayedOrders, effectiveDateRange, activeTab, searchQuery])
 
   const pagedOrders = useMemo(
     () => filteredOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
@@ -494,7 +555,7 @@ export default function ConfirmacionPage() {
   )
   const totalPages = Math.ceil(filteredOrders.length / PAGE_SIZE)
 
-  useEffect(() => { setCurrentPage(1) }, [activeTab, searchQuery])
+  useEffect(() => { setCurrentPage(1) }, [activeTab, searchQuery, dateFilter, dateApplied])
 
   function showToast(msg: string, type: 'success' | 'error') {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
@@ -857,43 +918,136 @@ export default function ConfirmacionPage() {
             </div>
           </div>
 
-          {/* Tabs de filtro rápido */}
+          {/* ── Filtro de fecha ── */}
           {!loading && (
-            <div className="overflow-x-auto border-b border-indigo-100">
-              <div className="flex min-w-max">
-                {TAB_META.map(({ tab, label }) => {
-                  const count = tab === 'all'              ? total
-                              : tab === 'nuevos'           ? (stats?.nuevos      ?? 0)
-                              : tab === 'reintentar'       ? (stats?.reintentar  ?? 0)
-                              : tab === 'atrasados'        ? (stats?.atrasados   ?? 0)
-                              : tab === 'duplicados'       ? alertCounts.duplicados
-                              : tab === 'cobertura'        ? alertCounts.cobertura
-                              : tab === 'zona_desconocida' ? alertCounts.unknown
-                              :                             alertCounts.santoDomingo
-                  return (
-                    <button
-                      key={tab}
-                      onClick={() => { setActiveTab(tab); setCurrentPage(1) }}
-                      className={`flex items-center gap-1.5 min-h-[44px] px-4 py-2.5 text-xs font-semibold
-                                  border-b-2 transition-colors whitespace-nowrap
-                        ${activeTab === tab
-                          ? 'border-indigo-500 text-indigo-700 bg-indigo-50/60'
-                          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                        }`}
-                    >
-                      {label}
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full
-                        ${activeTab === tab
-                          ? 'bg-indigo-500 text-white'
-                          : 'bg-gray-100 text-gray-500'
-                        }`}>
-                        {count}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
+            <div className="px-3 py-2 border-b border-indigo-100 flex items-center gap-1.5 flex-wrap bg-gray-50/60">
+              <CalendarDays className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+              {(['hoy', 'ayer', '7dias'] as DateFilter[]).map(f => (
+                <button
+                  key={f}
+                  onClick={() => { setDateFilter(prev => prev === f ? null : f); setCurrentPage(1) }}
+                  className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors shrink-0
+                    ${dateFilter === f
+                      ? 'bg-indigo-500 text-white border-indigo-500'
+                      : 'text-gray-600 border-gray-200 hover:border-indigo-300 hover:text-indigo-600 bg-white'
+                    }`}
+                >
+                  {f === 'hoy' ? 'Hoy' : f === 'ayer' ? 'Ayer' : '7 días'}
+                </button>
+              ))}
+              <button
+                onClick={() => { setDateFilter(prev => prev === 'personalizado' ? null : 'personalizado'); setCurrentPage(1) }}
+                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors shrink-0
+                  ${dateFilter === 'personalizado'
+                    ? 'bg-indigo-500 text-white border-indigo-500'
+                    : 'text-gray-600 border-gray-200 hover:border-indigo-300 hover:text-indigo-600 bg-white'
+                  }`}
+              >
+                Rango
+              </button>
+              {dateFilter === 'personalizado' && (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <input
+                    type="date"
+                    value={dateFrom}
+                    onChange={e => setDateFrom(e.target.value)}
+                    className="text-[11px] border border-gray-200 rounded px-2 py-1
+                               focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
+                  />
+                  <span className="text-[10px] text-gray-400">—</span>
+                  <input
+                    type="date"
+                    value={dateTo}
+                    onChange={e => setDateTo(e.target.value)}
+                    className="text-[11px] border border-gray-200 rounded px-2 py-1
+                               focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
+                  />
+                  <button
+                    onClick={() => { setDateApplied(true); setCurrentPage(1) }}
+                    className="text-[11px] bg-indigo-600 text-white px-2.5 py-1 rounded-full hover:bg-indigo-700 shrink-0"
+                  >
+                    Aplicar
+                  </button>
+                </div>
+              )}
+              {dateFilter && (
+                <button
+                  onClick={() => {
+                    setDateFilter(null); setDateFrom(''); setDateTo('')
+                    setDateApplied(false); setCurrentPage(1)
+                  }}
+                  className="text-[11px] text-gray-400 hover:text-red-500 ml-auto shrink-0"
+                >
+                  ✕ Limpiar
+                </button>
+              )}
             </div>
+          )}
+
+          {/* ── Tabs de filtro rápido ── */}
+          {!loading && (
+            <>
+              {/* Mobile: select dropdown */}
+              <div className="md:hidden px-3 py-2 border-b border-indigo-100">
+                <select
+                  value={activeTab}
+                  onChange={e => { setActiveTab(e.target.value as Tab); setCurrentPage(1) }}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg
+                             focus:outline-none focus:ring-2 focus:ring-indigo-300 bg-white"
+                >
+                  {TAB_META.map(({ tab, label }) => {
+                    const count = tab === 'all'              ? total
+                                : tab === 'nuevos'           ? (stats?.nuevos      ?? 0)
+                                : tab === 'reintentar'       ? (stats?.reintentar  ?? 0)
+                                : tab === 'atrasados'        ? (stats?.atrasados   ?? 0)
+                                : tab === 'duplicados'       ? alertCounts.duplicados
+                                : tab === 'cobertura'        ? alertCounts.cobertura
+                                : tab === 'zona_desconocida' ? alertCounts.unknown
+                                :                             alertCounts.santoDomingo
+                    return (
+                      <option key={tab} value={tab}>{label} ({count})</option>
+                    )
+                  })}
+                </select>
+              </div>
+
+              {/* Desktop: tabs horizontales compactos */}
+              <div className="hidden md:flex overflow-x-auto border-b border-indigo-100">
+                <div className="flex min-w-max">
+                  {TAB_META.map(({ tab, label }) => {
+                    const count = tab === 'all'              ? total
+                                : tab === 'nuevos'           ? (stats?.nuevos      ?? 0)
+                                : tab === 'reintentar'       ? (stats?.reintentar  ?? 0)
+                                : tab === 'atrasados'        ? (stats?.atrasados   ?? 0)
+                                : tab === 'duplicados'       ? alertCounts.duplicados
+                                : tab === 'cobertura'        ? alertCounts.cobertura
+                                : tab === 'zona_desconocida' ? alertCounts.unknown
+                                :                             alertCounts.santoDomingo
+                    return (
+                      <button
+                        key={tab}
+                        onClick={() => { setActiveTab(tab); setCurrentPage(1) }}
+                        className={`flex items-center gap-1.5 min-h-[40px] px-3 py-2 text-xs font-semibold
+                                    border-b-2 transition-colors whitespace-nowrap
+                          ${activeTab === tab
+                            ? 'border-indigo-500 text-indigo-700 bg-indigo-50/60'
+                            : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                          }`}
+                      >
+                        {label}
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full
+                          ${activeTab === tab
+                            ? 'bg-indigo-500 text-white'
+                            : 'bg-gray-100 text-gray-500'
+                          }`}>
+                          {count}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </>
           )}
 
           {loading ? (
