@@ -13,7 +13,7 @@
 | Webhook Shopify `orders/create` | `/api/webhooks/shopify` | Activo — requiere ngrok en dev |
 | Cron de tracking EFI | `vercel.json` → `GET /api/tracking/auto` (Vercel Cron) | Cada 5 min en producción, sin dependencia de PC local |
 | Dashboard admin | `/dashboard` | KPIs + cola de trabajo + alertas SLA + tarjetas confirmados hoy/ayer |
-| Confirmación | `/confirmacion` | Solo pedidos `pending + tracking IS NULL`. Stats, tabs, orden inteligente. **Mobile-first cards + tabla desktop** |
+| Confirmación | `/confirmacion` | Base canónica: `confirmation_status='pending' AND normalized_status='pending' AND tracking_number IS NULL`. Todos los tabs heredan esta base. **Mobile-first cards + tabla desktop** |
 | Confirmados | `/confirmados` | Pedidos `confirmed + tracking IS NULL`. Filtros fecha, botón "Listo para despacho" |
 | Despachados | `/despachados` | Pedidos `tracking IS NOT NULL + no finalizados`. Vista monitoreo, refresh 5 min, mini KPI por estado |
 | Novedades | `/novedad` | Tabla acciones, métricas agente, filtros por intentos, mini KPI pipeline, tab Recuperadas. **Mobile-first cards + tabla desktop** |
@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Fix conteos /confirmacion: base canónica normalized_status='pending', card SD usa count local para coincidir con tab** | 2026-05-09 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx` |
 | **Santo Domingo / Transporte local: helper isSantoDomingoOrder, badge purple, tab en /confirmacion, filtro en /confirmados, contadores en stats API** | 2026-05-09 | `alert-helpers.ts`, `alert-badges.tsx`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx`, `confirmados/page.tsx` |
 | **Responsive/mobile-first en /reparto: RepartoCard component, md:hidden cards + hidden md:table desktop** | 2026-05-06 | `reparto/page.tsx` |
 | **Responsive/mobile-first en /confirmacion: ConfirmacionCard component, md:hidden cards + hidden md:block desktop table** | 2026-05-06 | `confirmacion/page.tsx` |
@@ -164,7 +165,23 @@
 
 ## 2. REGLAS DE NEGOCIO (CRÍTICO)
 
-### Confirmación
+### Confirmación — base canónica (regla permanente)
+
+**Todos los tabs y contadores de `/confirmacion` heredan la misma base:**
+
+```sql
+source              = 'shopify_webhook'
+confirmation_status = 'pending'
+normalized_status   = 'pending'     -- excluye cualquier estado no-pending aunque tracking sea NULL
+tracking_number     IS NULL         -- si ya tiene guía → /despachados
+```
+
+- **`normalized_status = 'pending'` es intencional**: Si un pedido tiene `tracking_number IS NULL` pero su `normalized_status` cambió a `in_transit` / `en_reparto` / etc., es una anomalía de datos. Debe excluirse de la cola de confirmación.
+- **Un pedido sale de /confirmacion automáticamente** cuando recibe `tracking_number` (vía webhook de fulfillment, recover o asignación manual). El siguiente refresh lo excluye.
+- **Todos los tabs** (Todos, Nuevos, Reintentar, Atrasados, Duplicados, Cobertura, Zona desc., Santo Domingo) filtran sobre el mismo array local `orders` que ya cumple esta base. Ningún tab necesita sus propios filtros de base.
+- **Los contadores de las cards de acción** (Nuevos, Reintentar, Atrasados) usan `stats.*` del API (conteo DB completo). La card **Santo Domingo** usa `alertCounts.santoDomingo` (conteo local del array) porque debe coincidir con el tab que filtra ese mismo array.
+
+### Confirmación — flujo original
 - **Solo aplica a pedidos con `source = 'shopify_webhook'`**
 - Pedido nuevo → task de tipo `confirmation` con `status = 'open'` creada automáticamente via `createTaskIfNotExists`
 - Orden inteligente en `/confirmacion → Todos`:

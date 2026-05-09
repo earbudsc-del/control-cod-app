@@ -14,9 +14,8 @@ export async function GET() {
       .select('*', { count: 'exact' })
       .eq('source', 'shopify_webhook')
       .eq('confirmation_status', 'pending')
+      .eq('normalized_status', 'pending')
       .is('tracking_number', null)
-      .neq('normalized_status', 'delivered')
-      .neq('normalized_status', 'returned')
       .order('created_at', { ascending: false })
       .limit(200)
 

@@ -761,7 +761,7 @@ export default function ConfirmacionPage() {
               },
               {
                 tab:   'santo_domingo' as Tab,
-                count: stats.santoDomingoPendientes ?? alertCounts.santoDomingo,
+                count: alertCounts.santoDomingo,
                 label: 'Santo Domingo',
                 sub:   'Usar transporte local',
                 Icon:  MapPin,

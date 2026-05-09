@@ -19,16 +19,15 @@ export async function GET() {
     const todayIso  = todayStart.toISOString()
     const cutoff48h = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
 
-    // Base para cola pendiente: sin tracking, sin estados finales
+    // Base idéntica a /api/confirmacion/route.ts: pending + sin tracking + normalized pending
     const pendingBase = () =>
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('source',              ACTIVE_PENDING.source)
         .eq('confirmation_status', ACTIVE_PENDING.confirmation_status)
+        .eq('normalized_status',   'pending')
         .is('tracking_number', null)
-        .neq('normalized_status', 'delivered')
-        .neq('normalized_status', 'returned')
 
     // Filtro OR para pedidos de Santo Domingo / Distrito Nacional
     const sdFilter = [
