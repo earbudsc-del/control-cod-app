@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Simplificación UX /confirmacion: tab "Nuevos" removido, tarjeta "Nuevos hoy" como KPI visual puro (sin navegación), `getLogisticsBadge` con `in_transit` explícito, 4 tabs operativos: Pedidos/Reintentar/Confirmados/Despachados** | 2026-05-09 | `confirmacion/page.tsx` |
 | **Refactor /confirmacion: nueva arquitectura UX estilo Shopify. Vista "Pedidos" server-paginated (todos los pedidos Shopify), 5 vistas (Pedidos/Nuevos/Reintentar/Confirmados sin guía/Despachados), badges de Estado confirmación + Estado logística, delay badge +24h/+48h, filtro fecha 30 días, API nueva /api/confirmacion/pedidos. `source` field añadido a Order type.** | 2026-05-09 | `confirmacion/page.tsx`, `api/confirmacion/pedidos/route.ts` (nuevo), `types/index.ts` |
 | **Mejoras /confirmacion: redefinición tabs Nuevos/Atrasados, filtro de fecha Hoy/Ayer/7días/Rango, dropdown mobile para tabs, UX compacto desktop. Mejoras /reparto: guías viejas visibles (limit 500, sortBy=status_since_asc), fallback last_tracking_update, banner críticos. API: sortBy=status_since_asc en orders/route.ts** | 2026-05-09 | `api/confirmacion/stats/route.ts`, `api/orders/route.ts`, `confirmacion/page.tsx`, `reparto/page.tsx` |
 | **Fix conteos /confirmacion: base canónica normalized_status='pending', card SD usa count local para coincidir con tab** | 2026-05-09 | `api/confirmacion/route.ts`, `api/confirmacion/stats/route.ts`, `confirmacion/page.tsx` |
@@ -300,16 +301,25 @@ AppLayout (Server Component — layout.tsx)
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
 
-### /confirmacion — Arquitectura UX estilo Shopify (2026-05-09) ← ÚLTIMO CAMBIO
+### /confirmacion — UX simplificada: 4 tabs + KPI "Nuevos hoy" (2026-05-09) ← ÚLTIMO CAMBIO
 
-**Qué se hizo:** Refactor completo de la UX de `/confirmacion` para que funcione como Shopify Orders. La vista pasó de ser una cola de trabajo exclusiva (solo pedidos pending) a ser el centro de gestión de todos los pedidos Shopify, con vistas especializadas por estado.
+**Qué se hizo:** Simplificación UX post-refactor. Se eliminó el tab "Nuevos" (redundante con la vista "Pedidos" ya existente). La tarjeta "Nuevos" se convirtió en un KPI visual puro "Nuevos hoy" sin navegación. Se mejoró `getLogisticsBadge` para mostrar `in_transit` explícitamente.
 
-#### Nueva arquitectura: 5 vistas (ViewMode)
+**Archivo modificado:** `confirmacion/page.tsx`
+
+#### Cambios específicos
+
+1. **Tab "Nuevos" removido** — `ViewMode` pasa de 5 vistas a 4: `'pedidos' | 'reintentar' | 'confirmados_sin_guia' | 'despachados'`
+2. **Tarjeta "Nuevos hoy"** — La 1ra card del grid es ahora un `<div>` (sin onClick), muestra `stats.nuevos` (pedidos de hoy, pending, sin guía, 0 intentos). Texto: "Nuevos hoy / Pending · sin guía · 0 intentos"
+3. **`getLogisticsBadge`** — Añadido `normalized_status='in_transit'` explícito antes del catch-all. El fallback final cubre estados desconocidos.
+4. **Limpieza completa** de referencias a `'nuevos'` en: `refreshAll`, `isLoading`, `currentData`, `displayedOrders`, `filteredOrders`, efectos de viewMode, empty state, render sections, paginación
+5. **`VIEW_META`** — Ahora tiene 4 entradas (removida la de 'nuevos'); select móvil y tabs desktop muestran: Pedidos / Reintentar / Confirmados / Despachados
+
+#### Nueva arquitectura: 4 vistas (ViewMode)
 
 | Vista | Datos | Fuente API | Paginación | Acciones |
 |---|---|---|---|---|
 | **Pedidos** (default) | TODOS los `source='shopify_webhook'` ordenados por fecha DESC | `GET /api/confirmacion/pedidos` (NUEVO) | Server-side, 50/pág | Solo para `pending + tracking IS NULL` |
-| **Nuevos** | Hoy en RD + `confirmation_attempts=0` + `pending` + `tracking IS NULL` | `/api/confirmacion` (existente) | Client-side 50/pág | ✅ Todas (Confirmó/No contesta/Sin cobertura/Canceló) |
 | **Reintentar** | `confirmation_attempts 1–2` + `pending` + `tracking IS NULL` | `/api/confirmacion` (existente) | Client-side 50/pág | ✅ Todas |
 | **Confirmados sin guía** | `confirmation_status='confirmed' + tracking IS NULL` | `/api/confirmados` (existente) | Sin paginación (≤200) | Read-only — visible para confirmation_agent |
 | **Despachados** | `tracking IS NOT NULL` activos | `/api/despachados` (existente) | Sin paginación (≤200) | Read-only |
@@ -326,12 +336,13 @@ AppLayout (Server Component — layout.tsx)
 
 **Estado logística** (`getLogisticsBadge(order)`):
 - `tracking IS NULL` → "Sin guía" gris
-- `tracking IS NOT NULL + raw_status ilike 'generada'` → "Generada" azul claro
-- `in_transit` → "En tránsito" azul
-- `en_reparto` → "En reparto" naranja
-- `novedad` → "Novedad" rojo
 - `delivered` → "Entregada" verde
 - `returned` → "Devuelta" gris oscuro
+- `novedad` → "Novedad" rojo
+- `en_reparto` → "En reparto" naranja
+- `in_transit` → "En tránsito" azul (explícito, no fallback)
+- `raw_status ilike 'generada'` o `pending + tracking` → "Generada" azul claro
+- Resto → "En tránsito" azul (fallback)
 
 **Delay badge** (`getDelayBadge(order)`):
 - `≥48h` → "+48h" rojo pulsante (`animate-pulse`)
@@ -341,8 +352,7 @@ AppLayout (Server Component — layout.tsx)
 #### Filtros de fecha (nueva opción)
 - Hoy · Ayer · 7 días · **30 días** (nuevo) · Rango personalizado
 - En vista "Pedidos": filtrado **server-side** vía params `?from=ISO&to=ISO` en la API
-- En vistas "Nuevos"/"Reintentar": filtrado **client-side** (mismo patrón anterior)
-- La vista "Nuevos" ignora el filtro de fecha (tiene constraint propio: solo hoy)
+- En vista "Reintentar": filtrado **client-side** sobre el array de la cola
 
 #### API nueva: `GET /api/confirmacion/pedidos`
 
@@ -379,7 +389,7 @@ AppLayout (Server Component — layout.tsx)
 
 #### Comportamiento de roles
 
-- `confirmation_agent`: ve las 5 vistas. "Confirmados sin guía" y "Despachados" en modo read-only (sin acciones de despacho).
+- `confirmation_agent`: ve las 4 vistas. "Confirmados sin guía" y "Despachados" en modo read-only (sin acciones de despacho).
 - `admin`: igual, con acceso completo a todas las rutas.
 - Las acciones (Confirmó/No contesta/Sin cobertura/Canceló) solo aparecen cuando `confirmation_status='pending' AND tracking_number IS NULL`.
 
@@ -389,18 +399,19 @@ AppLayout (Server Component — layout.tsx)
 2. Login como admin → ir a `/confirmacion`
 3. Default: vista "Pedidos" — tabla Shopify con TODOS los pedidos, ordenados más recientes arriba
 4. Verificar columnas: Fecha/Orden, Cliente, Ciudad/Producto, Monto, Estado confirm., Estado log., Acción, Ver
-5. Usar buscador → filtra server-side (no recarga la página, solo reemplaza resultados)
-6. Usar filtros fecha → Hoy/Ayer/7días/30días/Rango — filtra server-side, paginación se resetea
-7. Navegar páginas con Anterior/Siguiente — carga 50 pedidos del servidor
-8. Click en card "Nuevos" → cambia a vista de cola operativa con acciones
+5. Verificar tarjeta "Nuevos hoy" (indigo, sin click navigation) — muestra count de pedidos hoy con 0 intentos
+6. Usar buscador → filtra server-side
+7. Usar filtros fecha → Hoy/Ayer/7días/30días/Rango — filtra server-side, paginación se resetea
+8. Navegar páginas con Anterior/Siguiente — carga 50 pedidos del servidor
 9. Click en card "Reintentar" → muestra pedidos con 1–2 intentos; badge "+24h"/"+48h" en los atrasados
 10. Click en card "Confirmados sin guía" → read-only, sin botones de acción
 11. Click en card "Despachados" → read-only con guía + último movimiento
-12. En móvil (DevTools → iPhone 14 Pro): select dropdown muestra las 5 vistas, cards responsivas
-13. Ejecutar acción "Confirmó" en vista Nuevos/Reintentar → toast verde, row actualiza
+12. En móvil (DevTools → iPhone 14 Pro): select dropdown muestra las 4 vistas, cards responsivas
+13. Ejecutar acción "Confirmó" en vista Reintentar → toast verde, row actualiza
 14. Ejecutar "Canceló" → row desaparece después de 1.5s
 15. Verificar que badges SD (purple), duplicados (ámbar), cobertura siguen apareciendo
 16. Verificar que las rutas `/confirmados` y `/despachados` siguen funcionando independientemente
+17. Verificar estado logística: pedidos con `in_transit` muestran "En tránsito" (badge azul explícito)
 
 ---
 

@@ -25,7 +25,7 @@ const MS_24H       = 24 * 60 * 60 * 1000
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type ViewMode      = 'pedidos' | 'nuevos' | 'reintentar' | 'confirmados_sin_guia' | 'despachados'
+type ViewMode      = 'pedidos' | 'reintentar' | 'confirmados_sin_guia' | 'despachados'
 type ContactMethod = 'call' | 'whatsapp' | 'other'
 type DateFilter    = 'hoy' | 'ayer' | '7dias' | '30dias' | 'personalizado'
 
@@ -103,10 +103,11 @@ function getLogisticsBadge(order: Order): { label: string; cls: string } {
   if (ns === 'delivered') return { label: 'Entregada',   cls: 'bg-green-100  text-green-700'  }
   if (ns === 'returned')  return { label: 'Devuelta',    cls: 'bg-gray-200   text-gray-700'   }
   if (ns === 'novedad')   return { label: 'Novedad',     cls: 'bg-red-100    text-red-700'    }
-  if (ns === 'en_reparto')return { label: 'En reparto',  cls: 'bg-orange-100 text-orange-700' }
+  if (ns === 'en_reparto') return { label: 'En reparto',  cls: 'bg-orange-100 text-orange-700' }
+  if (ns === 'in_transit') return { label: 'En tránsito', cls: 'bg-blue-100   text-blue-700'   }
   if (raw.includes('generada') || (ns === 'pending' && !!order.tracking_number))
-                          return { label: 'Generada',    cls: 'bg-blue-50    text-blue-600'   }
-  return                         { label: 'En tránsito', cls: 'bg-blue-100   text-blue-700'   }
+                           return { label: 'Generada',    cls: 'bg-blue-50    text-blue-600'   }
+  return                          { label: 'En tránsito', cls: 'bg-blue-100   text-blue-700'   }
 }
 
 function getDelayBadge(order: Order): { label: string; cls: string } | null {
@@ -628,7 +629,7 @@ export default function ConfirmacionPage() {
     fetchStats()
     if (viewMode === 'pedidos')
       fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
-    if (viewMode === 'nuevos' || viewMode === 'reintentar') fetchQueue()
+    if (viewMode === 'reintentar') fetchQueue()
     if (viewMode === 'confirmados_sin_guia') fetchConfirmados()
     if (viewMode === 'despachados')          fetchDespachados()
   }, [viewMode, pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied,
@@ -653,7 +654,7 @@ export default function ConfirmacionPage() {
     setCurrentPage(1)
     if (viewMode === 'pedidos')
       fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
-    if (viewMode === 'nuevos' || viewMode === 'reintentar') fetchQueue()
+    if (viewMode === 'reintentar') fetchQueue()
     if (viewMode === 'confirmados_sin_guia' && !confirmadosLoaded) fetchConfirmados()
     if (viewMode === 'despachados'          && !despachadosLoaded) fetchDespachados()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -679,7 +680,6 @@ export default function ConfirmacionPage() {
     if (!trackingParam || orders.length === 0) return
     const match = orders.find(o => o.tracking_number === trackingParam)
     if (match) {
-      setViewMode('nuevos')
       setTimeout(() => {
         rowRefs.current.get(match.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
       }, 100)
@@ -688,17 +688,6 @@ export default function ConfirmacionPage() {
 
   // ── displayedOrders (cola: Nuevos / Reintentar) ─────────────────────────────
   const displayedOrders = useMemo(() => {
-    if (viewMode === 'nuevos') {
-      const todayMs    = rdMidnightUTC(0)
-      const tomorrowMs = rdMidnightUTC(1)
-      return orders
-        .filter(o => {
-          if ((o.confirmation_attempts ?? 0) !== 0) return false
-          const ts = effectiveMs(o)
-          return ts >= todayMs && ts < tomorrowMs
-        })
-        .sort((a, b) => effectiveMs(b) - effectiveMs(a))
-    }
     if (viewMode === 'reintentar') {
       return orders
         .filter(o => { const a = o.confirmation_attempts ?? 0; return a >= 1 && a <= 2 })
@@ -733,7 +722,7 @@ export default function ConfirmacionPage() {
 
   const filteredOrders = useMemo(() => {
     let result = displayedOrders
-    if (effectiveDateRange && viewMode !== 'nuevos') {
+    if (effectiveDateRange) {
       const { from, to } = effectiveDateRange
       result = result.filter(o => { const ts = effectiveMs(o); return ts >= from && ts < to })
     }
@@ -744,7 +733,7 @@ export default function ConfirmacionPage() {
       (o.customer_phone ?? '').toLowerCase().includes(q) ||
       (o.order_number   ?? '').toLowerCase().includes(q),
     )
-  }, [displayedOrders, effectiveDateRange, viewMode, searchQuery])
+  }, [displayedOrders, effectiveDateRange, searchQuery])
 
   const pagedOrders  = useMemo(
     () => filteredOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
@@ -803,33 +792,31 @@ export default function ConfirmacionPage() {
   // ── Counts para los tabs ────────────────────────────────────────────────────
   const viewCounts: Record<ViewMode, number> = useMemo(() => ({
     pedidos:              pedidosTotal,
-    nuevos:               stats?.nuevos             ?? 0,
-    reintentar:           stats?.reintentar          ?? 0,
-    confirmados_sin_guia: stats?.confirmadosSinGuia  ?? 0,
-    despachados:          stats?.despachados          ?? 0,
+    reintentar:           stats?.reintentar         ?? 0,
+    confirmados_sin_guia: stats?.confirmadosSinGuia ?? 0,
+    despachados:          stats?.despachados         ?? 0,
   }), [pedidosTotal, stats])
 
   // ── Loading del view actual ─────────────────────────────────────────────────
   const isLoading =
-    (viewMode === 'pedidos'               && pedidosLoading)    ||
-    ((viewMode === 'nuevos' || viewMode === 'reintentar') && queueLoading) ||
-    (viewMode === 'confirmados_sin_guia'  && confirmadosLoading) ||
-    (viewMode === 'despachados'           && despachadosLoading)
+    (viewMode === 'pedidos'              && pedidosLoading)     ||
+    (viewMode === 'reintentar'           && queueLoading)       ||
+    (viewMode === 'confirmados_sin_guia' && confirmadosLoading) ||
+    (viewMode === 'despachados'          && despachadosLoading)
 
   // ── Datos del view actual ───────────────────────────────────────────────────
   const currentData: Order[] =
-    viewMode === 'pedidos'              ? pedidosData :
-    (viewMode === 'nuevos' || viewMode === 'reintentar') ? pagedOrders :
-    viewMode === 'confirmados_sin_guia' ? confirmadosData :
+    viewMode === 'pedidos'              ? pedidosData    :
+    viewMode === 'reintentar'           ? pagedOrders    :
+    viewMode === 'confirmados_sin_guia' ? confirmadosData:
     despachadosData
 
   // ── Metadatos de vistas ─────────────────────────────────────────────────────
   const VIEW_META: { mode: ViewMode; label: string; Icon: React.ElementType; color: string }[] = [
-    { mode: 'pedidos',              label: 'Pedidos',           Icon: ShoppingBag,  color: 'indigo' },
-    { mode: 'nuevos',               label: 'Nuevos',            Icon: Inbox,        color: 'indigo' },
-    { mode: 'reintentar',           label: 'Reintentar',        Icon: RotateCcw,    color: 'amber'  },
-    { mode: 'confirmados_sin_guia', label: 'Confirmados',       Icon: CheckCircle2, color: 'green'  },
-    { mode: 'despachados',          label: 'Despachados',       Icon: Truck,        color: 'blue'   },
+    { mode: 'pedidos',              label: 'Pedidos',     Icon: ShoppingBag,  color: 'indigo' },
+    { mode: 'reintentar',           label: 'Reintentar',  Icon: RotateCcw,    color: 'amber'  },
+    { mode: 'confirmados_sin_guia', label: 'Confirmados', Icon: CheckCircle2, color: 'green'  },
+    { mode: 'despachados',          label: 'Despachados', Icon: Truck,        color: 'blue'   },
   ]
 
   // ── Helpers de render ───────────────────────────────────────────────────────
@@ -915,13 +902,11 @@ export default function ConfirmacionPage() {
               <p className="hidden md:block text-indigo-100 text-xs mt-0.5">
                 {viewMode === 'pedidos'
                   ? 'Vista completa · Navegación estilo Shopify'
-                  : viewMode === 'nuevos'
-                    ? 'Sin contacto previo · Pedidos de hoy'
-                    : viewMode === 'reintentar'
-                      ? '1–2 intentos sin respuesta'
-                      : viewMode === 'confirmados_sin_guia'
-                        ? 'Confirmados · Pendiente de despacho'
-                        : 'Con guía asignada · En logística'}
+                  : viewMode === 'reintentar'
+                    ? '1–2 intentos sin respuesta'
+                    : viewMode === 'confirmados_sin_guia'
+                      ? 'Confirmados · Pendiente de despacho'
+                      : 'Con guía asignada · En logística'}
               </p>
             </div>
           </div>
@@ -1033,11 +1018,21 @@ export default function ConfirmacionPage() {
       {stats && (
         <div className="space-y-2">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
+            {/* KPI visual — no navega a ningún tab */}
+            <div className="flex items-center gap-2 md:gap-3 p-3 md:p-4 rounded-xl border-2
+                            border-indigo-200 bg-indigo-50 text-indigo-700">
+              <div className="flex-1 min-w-0">
+                <p className="text-2xl md:text-3xl font-black tabular-nums leading-none">{stats.nuevos}</p>
+                <p className="text-xs md:text-sm font-bold mt-1">Nuevos hoy</p>
+                <p className="hidden md:block text-xs opacity-60 mt-0.5 truncate">Pending · sin guía · 0 intentos</p>
+              </div>
+              <Inbox className="w-6 md:w-7 h-6 md:h-7 opacity-25 shrink-0" />
+            </div>
+            {/* Tabs operativos — navegan a su vista */}
             {([
-              { mode: 'nuevos'               as ViewMode, count: stats.nuevos,            label: 'Nuevos',             sub: 'Sin contacto previo',    Icon: Inbox,        base: 'border-indigo-200 bg-indigo-50 text-indigo-700', active: 'border-indigo-400 bg-indigo-100 text-indigo-800 ring-2 ring-indigo-300/50' },
-              { mode: 'reintentar'           as ViewMode, count: stats.reintentar,        label: 'Reintentar',         sub: '1–2 intentos sin resp.',  Icon: RotateCcw,    base: 'border-amber-200  bg-amber-50  text-amber-700',  active: 'border-amber-400  bg-amber-100  text-amber-800  ring-2 ring-amber-300/50'  },
-              { mode: 'confirmados_sin_guia' as ViewMode, count: stats.confirmadosSinGuia,label: 'Confirmados sin guía',sub: 'Listos para despacho',   Icon: CheckCircle2, base: 'border-green-200  bg-green-50  text-green-700',  active: 'border-green-400  bg-green-100  text-green-800  ring-2 ring-green-300/50'  },
-              { mode: 'despachados'          as ViewMode, count: stats.despachados,       label: 'Despachados',        sub: 'Con guía en logística',   Icon: Truck,        base: 'border-blue-200   bg-blue-50   text-blue-700',   active: 'border-blue-400   bg-blue-100   text-blue-800   ring-2 ring-blue-300/50'   },
+              { mode: 'reintentar'           as ViewMode, count: stats.reintentar,         label: 'Reintentar',          sub: '1–2 intentos sin resp.', Icon: RotateCcw,    base: 'border-amber-200 bg-amber-50 text-amber-700',  active: 'border-amber-400  bg-amber-100  text-amber-800  ring-2 ring-amber-300/50'  },
+              { mode: 'confirmados_sin_guia' as ViewMode, count: stats.confirmadosSinGuia, label: 'Confirmados sin guía', sub: 'Listos para despacho',   Icon: CheckCircle2, base: 'border-green-200 bg-green-50 text-green-700',  active: 'border-green-400  bg-green-100  text-green-800  ring-2 ring-green-300/50'  },
+              { mode: 'despachados'          as ViewMode, count: stats.despachados,        label: 'Despachados',          sub: 'Con guía en logística',  Icon: Truck,        base: 'border-blue-200  bg-blue-50  text-blue-700',   active: 'border-blue-400   bg-blue-100   text-blue-800   ring-2 ring-blue-300/50'   },
             ]).map(({ mode, count, label, sub, Icon, base, active }) => (
               <button key={mode}
                 onClick={() => setViewMode(prev => prev === mode ? 'pedidos' : mode)}
@@ -1080,13 +1075,11 @@ export default function ConfirmacionPage() {
           <p className="text-xs md:text-sm font-semibold text-indigo-800">
             {viewMode === 'pedidos'
               ? 'Todos los pedidos Shopify · Orden cronológico'
-              : viewMode === 'nuevos'
-                ? `Nuevos hoy · Máx. ${MAX_ATTEMPTS} intentos`
-                : viewMode === 'reintentar'
-                  ? 'Reintentar · 1–2 intentos sin respuesta'
-                  : viewMode === 'confirmados_sin_guia'
-                    ? 'Confirmados sin guía · Pendiente de despacho (solo lectura)'
-                    : 'Despachados · Con guía en logística (solo lectura)'}
+              : viewMode === 'reintentar'
+                ? 'Reintentar · 1–2 intentos sin respuesta'
+                : viewMode === 'confirmados_sin_guia'
+                  ? 'Confirmados sin guía · Pendiente de despacho (solo lectura)'
+                  : 'Despachados · Con guía en logística (solo lectura)'}
           </p>
         </div>
 
@@ -1188,7 +1181,7 @@ export default function ConfirmacionPage() {
         ) : currentData.length === 0 ? (
           <div className="px-5 py-10 text-center">
             <p className="text-gray-500 font-medium">No hay pedidos en esta vista</p>
-            {(viewMode === 'nuevos' || viewMode === 'reintentar') && (
+            {viewMode === 'reintentar' && (
               <button onClick={() => setViewMode('pedidos')}
                 className="text-indigo-500 text-sm mt-2 hover:underline">
                 Ver todos los pedidos
@@ -1364,9 +1357,9 @@ export default function ConfirmacionPage() {
             )}
 
             {/* ──────────────────────────────────────────────────────────────── */}
-            {/* VISTAS: NUEVOS / REINTENTAR (cola operativa con acciones) */}
+            {/* VISTA: REINTENTAR (cola operativa con acciones) */}
             {/* ──────────────────────────────────────────────────────────────── */}
-            {(viewMode === 'nuevos' || viewMode === 'reintentar') && (
+            {viewMode === 'reintentar' && (
               <>
                 {/* Mobile cards */}
                 <div className="md:hidden divide-y divide-indigo-50">
@@ -1649,7 +1642,7 @@ export default function ConfirmacionPage() {
           </div>
         )}
 
-        {(viewMode === 'nuevos' || viewMode === 'reintentar') && !queueLoading && totalPages > 1 && (
+        {viewMode === 'reintentar' && !queueLoading && totalPages > 1 && (
           <div className="flex items-center justify-between px-4 md:px-5 py-3 border-t border-indigo-100 bg-indigo-50/40">
             <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}
               className="flex items-center gap-1.5 min-h-[40px] px-3 py-1.5 text-xs font-semibold rounded-lg
