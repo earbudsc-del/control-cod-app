@@ -20,7 +20,8 @@ export async function GET(request: Request) {
     const from       = (page - 1) * limit
     const to         = from + limit - 1
 
-    const sortBy = searchParams.get('sortBy')
+    const sortBy    = searchParams.get('sortBy')
+    const rawStatus = searchParams.get('rawStatus')   // filtro por raw_status ilike %value%
 
     let query = supabase
       .from('orders_with_sla')
@@ -53,6 +54,10 @@ export async function GET(request: Request) {
       query = query.or(
         `tracking_number.ilike.%${search}%,customer_name.ilike.%${search}%,customer_phone.ilike.%${search}%,order_number.ilike.%${search}%`,
       )
+    }
+
+    if (rawStatus) {
+      query = query.ilike('raw_status', `%${rawStatus}%`)
     }
 
     const { data, error, count } = await query

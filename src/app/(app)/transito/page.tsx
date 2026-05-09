@@ -8,7 +8,7 @@ import type { Order } from '@/types'
 import {
   Package, RefreshCw, ShieldAlert, AlertTriangle,
   Clock, ExternalLink, MapPin, ChevronLeft, ChevronRight,
-  Search, X,
+  Search, X, Ban,
 } from 'lucide-react'
 import {
   transitSinceMs, horasEnTransito, transitCriticality,
@@ -22,17 +22,30 @@ interface OrdersResponse {
   pagination: { total: number }
 }
 
+type FilterCategory = 'all' | 'critico' | 'riesgo' | 'normal' | 'anulada'
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function cityDisplay(order: Order): string {
-  if (order.city && order.city.trim())     return order.city.trim()
-  if (order.province && order.province.trim()) return order.province.trim()
-  if (order.customer_address && order.customer_address.trim()) {
-    // Intenta extraer una ubicación del address (último segmento separado por coma)
+  if (order.city?.trim())     return order.city.trim()
+  if (order.province?.trim()) return order.province.trim()
+  if (order.customer_address?.trim()) {
     const parts = order.customer_address.split(',').map(s => s.trim()).filter(Boolean)
-    if (parts.length > 0) return parts[parts.length - 1]
+    if (parts.length > 0) return parts[parts.length - 1]!
   }
   return 'Ubicación no registrada'
+}
+
+function matchesSearch(o: Order, q: string): boolean {
+  return (
+    (o.tracking_number  ?? '').toLowerCase().includes(q) ||
+    (o.order_number     ?? '').toLowerCase().includes(q) ||
+    (o.customer_name    ?? '').toLowerCase().includes(q) ||
+    (o.customer_phone   ?? '').toLowerCase().includes(q) ||
+    (o.city             ?? '').toLowerCase().includes(q) ||
+    (o.province         ?? '').toLowerCase().includes(q) ||
+    (o.raw_status       ?? '').toLowerCase().includes(q)
+  )
 }
 
 // ── Orden: más tiempo sin movimiento primero ──────────────────────────────────
@@ -53,43 +66,53 @@ function sortedByStale(orders: Order[]): Order[] {
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function TransitoPage() {
-  const [orders, setOrders]           = useState<Order[]>([])
+  const [orders, setOrders]           = useState<Order[]>([])     // in_transit activos
+  const [anuladas, setAnuladas]       = useState<Order[]>([])     // anuladas en EFI
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const [currentPage, setCurrentPage] = useState(1)
   const [search, setSearch]           = useState('')
+  const [filter, setFilter]           = useState<FilterCategory>('all')
 
   const PAGE_SIZE = 50
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const res: OrdersResponse = await fetch(
-        '/api/orders?status=in_transit&limit=200&page=1'
-      ).then(r => r.json())
-      const loaded = res.data ?? []
-      setOrders(loaded)
+      const [activeRes, anuladasRes] = await Promise.all([
+        fetch('/api/orders?status=in_transit&limit=200&page=1').then(r => r.json()) as Promise<OrdersResponse>,
+        fetch('/api/orders?rawStatus=anulada&limit=100&page=1').then(r => r.json()) as Promise<OrdersResponse>,
+      ])
+      const active    = activeRes.data   ?? []
+      const cancelled = anuladasRes.data ?? []
+      setOrders(active)
+      setAnuladas(cancelled)
       setLastRefresh(new Date())
 
-      // ── Debug: muestra campos clave para diagnóstico de stuckSince ──
-      if (process.env.NODE_ENV !== 'production' || true) {
-        for (const o of loaded) {
-          const horas = horasEnTransito(o)
-          const crit  = transitCriticality(o)
-          console.log('[transito-debug]', {
-            tracking_number:      o.tracking_number,
-            raw_status:           o.raw_status,
-            normalized_status:    o.normalized_status,
-            status_since:         o.status_since,
-            shipment_created_at:  o.shipment_created_at,
-            last_tracking_update: o.last_tracking_update,
-            shopify_created_at:   o.shopify_created_at,
-            created_at:           o.created_at,
-            stuckSince_used:      o.status_since ?? o.shipment_created_at ?? o.shopify_created_at ?? o.created_at,
-            horas_calculadas:     Math.round(horas * 10) / 10,
-            categoria:            crit,
-          })
-        }
+      // ── Debug: validar stuckSince para cada guía en tránsito ──
+      for (const o of active) {
+        const horas = horasEnTransito(o)
+        const crit  = transitCriticality(o)
+        console.log('[transito-debug]', {
+          tracking_number:      o.tracking_number,
+          raw_status:           o.raw_status,
+          normalized_status:    o.normalized_status,
+          status_since:         o.status_since,
+          shipment_created_at:  o.shipment_created_at,
+          last_tracking_update: o.last_tracking_update,
+          shopify_created_at:   o.shopify_created_at,
+          created_at:           o.created_at,
+          stuckSince_used:      o.status_since ?? o.shipment_created_at ?? o.shopify_created_at ?? o.created_at,
+          horas_calculadas:     Math.round(horas * 10) / 10,
+          categoria:            crit,
+        })
+      }
+      if (cancelled.length > 0) {
+        console.log('[transito-debug] anuladas:', cancelled.map(o => ({
+          tracking: o.tracking_number,
+          raw_status: o.raw_status,
+          normalized_status: o.normalized_status,
+        })))
       }
     } catch (err) {
       console.error('[transito/fetchData]', err)
@@ -104,31 +127,41 @@ export default function TransitoPage() {
     return () => clearInterval(interval)
   }, [fetchData])
 
-  // ── Búsqueda client-side ───────────────────────────────────────────────────
+  // ── Búsqueda ───────────────────────────────────────────────────────────────
 
-  const filteredOrders = useMemo(() => {
+  const filteredActive   = useMemo(() => {
     if (!search.trim()) return orders
     const q = search.trim().toLowerCase()
-    return orders.filter(o =>
-      (o.tracking_number  ?? '').toLowerCase().includes(q) ||
-      (o.order_number     ?? '').toLowerCase().includes(q) ||
-      (o.customer_name    ?? '').toLowerCase().includes(q) ||
-      (o.customer_phone   ?? '').toLowerCase().includes(q) ||
-      (o.city             ?? '').toLowerCase().includes(q) ||
-      (o.province         ?? '').toLowerCase().includes(q) ||
-      (o.raw_status       ?? '').toLowerCase().includes(q)
-    )
+    return orders.filter(o => matchesSearch(o, q))
   }, [orders, search])
 
-  // Reset página al cambiar búsqueda
-  useEffect(() => { setCurrentPage(1) }, [search])
+  const filteredAnuladas = useMemo(() => {
+    if (!search.trim()) return anuladas
+    const q = search.trim().toLowerCase()
+    return anuladas.filter(o => matchesSearch(o, q))
+  }, [anuladas, search])
 
-  // ── Datos derivados ────────────────────────────────────────────────────────
+  // Reset página al cambiar búsqueda o filtro
+  useEffect(() => { setCurrentPage(1) }, [search, filter])
 
-  const criticos = useMemo(() => filteredOrders.filter(o => horasEnTransito(o) >= 48),  [filteredOrders])
-  const riesgo   = useMemo(() => filteredOrders.filter(o => horasEnTransito(o) >= 24 && horasEnTransito(o) < 48), [filteredOrders])
-  const normales = useMemo(() => filteredOrders.filter(o => horasEnTransito(o) < 24),   [filteredOrders])
-  const sorted   = useMemo(() => sortedByStale(filteredOrders), [filteredOrders])
+  // ── Counts para las tarjetas (sobre datos sin filtro de búsqueda) ──────────
+  const criticos = useMemo(() => orders.filter(o => horasEnTransito(o) >= 48),  [orders])
+  const riesgo   = useMemo(() => orders.filter(o => horasEnTransito(o) >= 24 && horasEnTransito(o) < 48), [orders])
+  const normales = useMemo(() => orders.filter(o => horasEnTransito(o) < 24),   [orders])
+
+  // ── Datos mostrados según filtro activo ───────────────────────────────────
+  const visibleOrders: Order[] = useMemo(() => {
+    if (filter === 'anulada')  return filteredAnuladas
+    if (filter === 'critico')  return filteredActive.filter(o => horasEnTransito(o) >= 48)
+    if (filter === 'riesgo')   return filteredActive.filter(o => horasEnTransito(o) >= 24 && horasEnTransito(o) < 48)
+    if (filter === 'normal')   return filteredActive.filter(o => horasEnTransito(o) < 24)
+    return filteredActive  // 'all'
+  }, [filter, filteredActive, filteredAnuladas])
+
+  const sorted = useMemo(
+    () => filter === 'anulada' ? visibleOrders : sortedByStale(visibleOrders),
+    [filter, visibleOrders],
+  )
 
   const pagedSorted = useMemo(
     () => sorted.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
@@ -136,10 +169,20 @@ export default function TransitoPage() {
   )
   const totalPages = Math.ceil(sorted.length / PAGE_SIZE)
 
-  // Reset paginación cuando cambia el conjunto de órdenes
-  useEffect(() => { setCurrentPage(1) }, [sorted.length])
+  // ── Handler tarjeta clickeable ─────────────────────────────────────────────
+  function toggleFilter(cat: FilterCategory) {
+    setFilter(prev => prev === cat ? 'all' : cat)
+  }
 
   // ── Render ─────────────────────────────────────────────────────────────────
+
+  const filterLabel: Record<FilterCategory, string> = {
+    all:     'Todos los activos',
+    critico: 'Críticos +48h',
+    riesgo:  'Riesgo +24h',
+    normal:  'Normales <24h',
+    anulada: 'Anuladas en EFI',
+  }
 
   return (
     <div className="space-y-4">
@@ -158,7 +201,7 @@ export default function TransitoPage() {
               <Package className="w-6 h-6 text-white" />
             </div>
             <div>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <h1 className="text-2xl font-black text-white tabular-nums">
                   {loading ? '…' : orders.length.toLocaleString()}
                 </h1>
@@ -169,10 +212,17 @@ export default function TransitoPage() {
                     {criticos.length} CRÍTICO{criticos.length !== 1 ? 'S' : ''}
                   </span>
                 )}
+                {!loading && anuladas.length > 0 && (
+                  <span className="flex items-center gap-1.5 bg-gray-500/60 text-white
+                                   text-xs font-semibold px-2.5 py-1 rounded-full">
+                    <Ban className="w-3 h-3" />
+                    {anuladas.length} anulada{anuladas.length !== 1 ? 's' : ''}
+                  </span>
+                )}
               </div>
-              <p className="text-white font-semibold">Pedidos en tránsito</p>
+              <p className="text-white font-semibold">Pedidos en tránsito activo</p>
               <p className="text-blue-100 text-xs mt-0.5">
-                Monitoreo de retrasos — detecta problemas antes de que lleguen a novedad
+                Monitoreo de retrasos · Anuladas excluidas del conteo activo
               </p>
             </div>
           </div>
@@ -194,46 +244,97 @@ export default function TransitoPage() {
         </div>
       </div>
 
-      {/* ── Tarjetas de clasificación ── */}
-      <div className="grid grid-cols-3 gap-3">
-        {([
-          {
-            count: criticos.length,
-            label: 'Críticos (+48h)',
-            sub:   '+2 días sin movimiento',
-            cls:   'border-red-200 bg-red-50 text-red-700',
-            Icon:  ShieldAlert,
-          },
-          {
-            count: riesgo.length,
-            label: 'En riesgo (1–2 días)',
-            sub:   'Requieren vigilancia',
-            cls:   'border-yellow-200 bg-yellow-50 text-yellow-700',
-            Icon:  AlertTriangle,
-          },
-          {
-            count: normales.length,
-            label: 'Normales (0–1 día)',
-            sub:   'En movimiento reciente',
-            cls:   'border-green-200 bg-green-50 text-green-700',
-            Icon:  Clock,
-          },
-        ] as const).map(({ count, label, sub, cls, Icon }) => (
-          <div key={label} className={`flex items-center gap-3 p-4 rounded-xl border-2 ${cls}`}>
-            <div className="flex-1 min-w-0">
-              <p className="text-3xl font-black tabular-nums leading-none">{count}</p>
-              <p className="text-sm font-bold mt-1">{label}</p>
-              <p className="text-xs opacity-60 mt-0.5 truncate">{sub}</p>
-            </div>
-            <Icon className="w-7 h-7 opacity-25 shrink-0" />
+      {/* ── Tarjetas clickeables ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {/* Críticos */}
+        <button
+          onClick={() => toggleFilter('critico')}
+          className={`flex items-center gap-3 p-4 rounded-xl border-2 text-left transition-all
+            ${filter === 'critico'
+              ? 'border-red-400 bg-red-100 ring-2 ring-red-300 ring-offset-1 shadow-md'
+              : 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100 hover:border-red-300'
+            }`}
+        >
+          <div className="flex-1 min-w-0">
+            <p className={`text-3xl font-black tabular-nums leading-none ${filter === 'critico' ? 'text-red-700' : 'text-red-700'}`}>
+              {criticos.length}
+            </p>
+            <p className="text-sm font-bold mt-1 text-red-700">Críticos (+48h)</p>
+            <p className="text-xs text-red-500 opacity-70 mt-0.5 truncate">
+              {filter === 'critico' ? '← Filtro activo' : '+2 días sin movimiento'}
+            </p>
           </div>
-        ))}
+          <ShieldAlert className="w-7 h-7 text-red-400 opacity-40 shrink-0" />
+        </button>
+
+        {/* Riesgo */}
+        <button
+          onClick={() => toggleFilter('riesgo')}
+          className={`flex items-center gap-3 p-4 rounded-xl border-2 text-left transition-all
+            ${filter === 'riesgo'
+              ? 'border-yellow-400 bg-yellow-100 ring-2 ring-yellow-300 ring-offset-1 shadow-md'
+              : 'border-yellow-200 bg-yellow-50 text-yellow-700 hover:bg-yellow-100 hover:border-yellow-300'
+            }`}
+        >
+          <div className="flex-1 min-w-0">
+            <p className="text-3xl font-black tabular-nums leading-none text-yellow-700">
+              {riesgo.length}
+            </p>
+            <p className="text-sm font-bold mt-1 text-yellow-700">En riesgo (1–2 días)</p>
+            <p className="text-xs text-yellow-600 opacity-70 mt-0.5 truncate">
+              {filter === 'riesgo' ? '← Filtro activo' : 'Requieren vigilancia'}
+            </p>
+          </div>
+          <AlertTriangle className="w-7 h-7 text-yellow-400 opacity-40 shrink-0" />
+        </button>
+
+        {/* Normal */}
+        <button
+          onClick={() => toggleFilter('normal')}
+          className={`flex items-center gap-3 p-4 rounded-xl border-2 text-left transition-all
+            ${filter === 'normal'
+              ? 'border-green-400 bg-green-100 ring-2 ring-green-300 ring-offset-1 shadow-md'
+              : 'border-green-200 bg-green-50 text-green-700 hover:bg-green-100 hover:border-green-300'
+            }`}
+        >
+          <div className="flex-1 min-w-0">
+            <p className="text-3xl font-black tabular-nums leading-none text-green-700">
+              {normales.length}
+            </p>
+            <p className="text-sm font-bold mt-1 text-green-700">Normales (0–1 día)</p>
+            <p className="text-xs text-green-600 opacity-70 mt-0.5 truncate">
+              {filter === 'normal' ? '← Filtro activo' : 'En movimiento reciente'}
+            </p>
+          </div>
+          <Clock className="w-7 h-7 text-green-400 opacity-40 shrink-0" />
+        </button>
+
+        {/* Anuladas */}
+        <button
+          onClick={() => toggleFilter('anulada')}
+          className={`flex items-center gap-3 p-4 rounded-xl border-2 text-left transition-all
+            ${filter === 'anulada'
+              ? 'border-gray-400 bg-gray-200 ring-2 ring-gray-300 ring-offset-1 shadow-md'
+              : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100 hover:border-gray-300'
+            }`}
+        >
+          <div className="flex-1 min-w-0">
+            <p className="text-3xl font-black tabular-nums leading-none text-gray-600">
+              {anuladas.length}
+            </p>
+            <p className="text-sm font-bold mt-1 text-gray-600">Anuladas (EFI)</p>
+            <p className="text-xs text-gray-400 mt-0.5 truncate">
+              {filter === 'anulada' ? '← Filtro activo' : 'Canceladas en Effi'}
+            </p>
+          </div>
+          <Ban className="w-7 h-7 text-gray-400 opacity-40 shrink-0" />
+        </button>
       </div>
 
-      {/* ── Escalamiento operativo ── */}
-      {!loading && (criticos.length > 0 || riesgo.length > 0) && (
+      {/* ── Escalamiento operativo (solo cuando no hay filtro o filtro activos) ── */}
+      {!loading && filter !== 'anulada' && (criticos.length > 0 || riesgo.length > 0) && (
         <div className="space-y-2">
-          {riesgo.length > 0 && (
+          {riesgo.length > 0 && filter !== 'critico' && filter !== 'normal' && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-2.5 flex items-start gap-3">
               <AlertTriangle className="w-4 h-4 text-yellow-600 shrink-0 mt-0.5" />
               <p className="text-xs text-yellow-800 font-medium leading-relaxed">
@@ -242,7 +343,7 @@ export default function TransitoPage() {
               </p>
             </div>
           )}
-          {criticos.length > 0 && (
+          {criticos.length > 0 && filter !== 'riesgo' && filter !== 'normal' && (
             <div className="bg-red-50 border-2 border-red-200 rounded-xl px-4 py-3 flex items-start gap-3">
               <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
               <div>
@@ -255,6 +356,21 @@ export default function TransitoPage() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Banner anuladas activo ── */}
+      {!loading && filter === 'anulada' && (
+        <div className="bg-gray-100 border border-gray-300 rounded-xl px-4 py-3 flex items-start gap-3">
+          <Ban className="w-5 h-5 text-gray-500 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold text-gray-700">
+              Mostrando {anuladas.length} guía{anuladas.length !== 1 ? 's' : ''} anulada{anuladas.length !== 1 ? 's' : ''} en EFI
+            </p>
+            <p className="text-xs text-gray-500 font-medium mt-0.5">
+              Estas guías están canceladas / anuladas en Effi. No escalar como tránsito activo. No cuentan en los totales de Crítico / Riesgo / Normal.
+            </p>
+          </div>
         </div>
       )}
 
@@ -279,16 +395,31 @@ export default function TransitoPage() {
           </button>
         )}
       </div>
-      {search && (
-        <p className="text-xs text-gray-500 -mt-2">
-          {sorted.length === 0
-            ? 'Sin resultados para esa búsqueda'
-            : `${sorted.length} resultado${sorted.length !== 1 ? 's' : ''} para "${search}"`}
-        </p>
+
+      {/* Indicador filtro + búsqueda activos */}
+      {(filter !== 'all' || search) && (
+        <div className="flex items-center gap-2 flex-wrap -mt-2">
+          {filter !== 'all' && (
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold
+                             bg-blue-50 text-blue-700 border border-blue-200 px-2.5 py-1 rounded-full">
+              Filtro: {filterLabel[filter]}
+              <button onClick={() => setFilter('all')} className="text-blue-400 hover:text-blue-700">
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          )}
+          {search && (
+            <span className="text-xs text-gray-500">
+              {sorted.length === 0
+                ? 'Sin resultados'
+                : `${sorted.length} resultado${sorted.length !== 1 ? 's' : ''} para "${search}"`}
+            </span>
+          )}
+        </div>
       )}
 
       {/* ── Sin pedidos en tránsito ── */}
-      {!loading && orders.length === 0 && (
+      {!loading && orders.length === 0 && anuladas.length === 0 && (
         <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-6 text-center">
           <p className="text-green-700 font-medium">No hay pedidos en tránsito en este momento</p>
           <p className="text-green-600 text-sm mt-1">
@@ -297,12 +428,17 @@ export default function TransitoPage() {
         </div>
       )}
 
-      {/* ── Sin resultados de búsqueda ── */}
-      {!loading && orders.length > 0 && sorted.length === 0 && search && (
+      {/* ── Sin resultados búsqueda ── */}
+      {!loading && sorted.length === 0 && (search || filter !== 'all') && (orders.length > 0 || anuladas.length > 0) && (
         <div className="bg-gray-50 border border-gray-200 rounded-xl px-5 py-6 text-center">
-          <p className="text-gray-600 font-medium">Sin resultados para &quot;{search}&quot;</p>
-          <button onClick={() => setSearch('')} className="text-blue-600 text-sm mt-1 underline">
-            Limpiar búsqueda
+          <p className="text-gray-600 font-medium">
+            Sin resultados {search ? `para "${search}"` : ''} {filter !== 'all' ? `en "${filterLabel[filter]}"` : ''}
+          </p>
+          <button
+            onClick={() => { setSearch(''); setFilter('all') }}
+            className="text-blue-600 text-sm mt-1 underline"
+          >
+            Limpiar filtros
           </button>
         </div>
       )}
@@ -311,12 +447,17 @@ export default function TransitoPage() {
       {(loading || sorted.length > 0) && (
         <div className="bg-white rounded-xl border-2 border-blue-100 overflow-hidden shadow-sm">
 
-          <div className="px-5 py-3 bg-blue-50 border-b border-blue-100 flex items-center gap-2">
+          <div className="px-5 py-3 bg-blue-50 border-b border-blue-100 flex items-center gap-2 flex-wrap">
             <Package className="w-4 h-4 text-blue-600 shrink-0" />
             <p className="text-sm font-semibold text-blue-800">
-              Detalle · Ordenado por mayor tiempo sin movimiento
+              {filter === 'anulada'
+                ? `Anuladas en EFI · ${sorted.length} guía${sorted.length !== 1 ? 's' : ''}`
+                : filter !== 'all'
+                  ? `${filterLabel[filter]} · Ordenado por mayor tiempo`
+                  : 'Detalle · Ordenado por mayor tiempo sin movimiento'
+              }
             </p>
-            {search && (
+            {(search || filter !== 'all') && sorted.length > 0 && (
               <span className="ml-auto text-xs text-blue-600 font-medium">
                 {sorted.length} resultado{sorted.length !== 1 ? 's' : ''}
               </span>
@@ -345,13 +486,16 @@ export default function TransitoPage() {
               </thead>
               <tbody className="divide-y divide-blue-50">
                 {pagedSorted.map(order => {
-                  const crit         = transitCriticality(order)
-                  const style        = TRANSIT_STYLES[crit]
-                  // Usa la misma fuente que transitSinceMs para mostrar la fecha base
+                  const isAnulada    = filter === 'anulada' ||
+                    (order.raw_status?.toLowerCase().includes('anulad') ?? false)
+                  const crit         = isAnulada ? 'normal' as const : transitCriticality(order)
+                  const style        = isAnulada ? TRANSIT_STYLES.normal : TRANSIT_STYLES[crit]
                   const stuckSinceTs = order.status_since ?? order.shipment_created_at ?? order.shopify_created_at ?? order.created_at
                   const loc          = cityDisplay(order)
+
                   return (
-                    <tr key={order.id} className={`transition-colors group ${style.row}`}>
+                    <tr key={order.id}
+                        className={`transition-colors group ${isAnulada ? 'bg-gray-50/50 hover:bg-gray-100/40 opacity-75' : style.row}`}>
 
                       {/* Guía */}
                       <td className="px-3 py-2.5">
@@ -382,7 +526,8 @@ export default function TransitoPage() {
                       <td className="px-3 py-2.5">
                         <div className="flex items-start gap-1 text-gray-600">
                           <MapPin className="w-3 h-3 text-gray-400 shrink-0 mt-0.5" />
-                          <span className={`text-xs truncate max-w-[100px] ${loc === 'Ubicación no registrada' ? 'text-gray-400 italic' : ''}`}>
+                          <span className={`text-xs truncate max-w-[100px]
+                            ${loc === 'Ubicación no registrada' ? 'text-gray-400 italic' : ''}`}>
                             {loc}
                           </span>
                         </div>
@@ -396,8 +541,9 @@ export default function TransitoPage() {
                       {/* Sin movimiento desde */}
                       <td className="px-3 py-2.5">
                         <p className={`text-xs font-semibold whitespace-nowrap
-                          ${crit === 'critico' ? 'text-red-600'
-                            : crit === 'riesgo' ? 'text-yellow-700'
+                          ${isAnulada ? 'text-gray-400 line-through'
+                            : crit === 'critico' ? 'text-red-600'
+                            : crit === 'riesgo'  ? 'text-yellow-700'
                             : 'text-gray-600'}`}>
                           {sinMovimientoLabel(order)}
                         </p>
@@ -408,26 +554,48 @@ export default function TransitoPage() {
 
                       {/* Estado badge + raw_status */}
                       <td className="px-3 py-2.5">
-                        <span className={`inline-flex items-center gap-1 text-[10px] font-semibold
-                                          px-1.5 py-0.5 rounded-full whitespace-nowrap ${style.badge}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${style.dot}`} />
-                          {style.label}
-                        </span>
-                        {order.raw_status && (
-                          <p className="text-[10px] text-gray-600 font-medium mt-0.5 truncate max-w-[120px]"
-                             title={order.raw_status}>
-                            {order.raw_status}
-                          </p>
-                        )}
-                        {crit === 'critico' && (
-                          <p className="text-[10px] text-red-600 font-bold mt-0.5 leading-tight">
-                            ↑ Escalar con Effi
-                          </p>
-                        )}
-                        {crit === 'riesgo' && (
-                          <p className="text-[10px] text-yellow-700 font-medium mt-0.5 leading-tight">
-                            Seguimiento Effi
-                          </p>
+                        {isAnulada ? (
+                          <>
+                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold
+                                            px-1.5 py-0.5 rounded-full whitespace-nowrap
+                                            bg-gray-100 text-gray-500 border border-gray-300">
+                              <Ban className="w-2.5 h-2.5 shrink-0" />
+                              Anulada
+                            </span>
+                            {order.raw_status && order.raw_status.toLowerCase() !== 'anulada' && (
+                              <p className="text-[10px] text-gray-400 mt-0.5 truncate max-w-[120px]"
+                                 title={order.raw_status}>
+                                {order.raw_status}
+                              </p>
+                            )}
+                            <p className="text-[10px] text-gray-400 font-medium mt-0.5 leading-tight">
+                              No escalar
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <span className={`inline-flex items-center gap-1 text-[10px] font-semibold
+                                              px-1.5 py-0.5 rounded-full whitespace-nowrap ${style.badge}`}>
+                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${style.dot}`} />
+                              {style.label}
+                            </span>
+                            {order.raw_status && (
+                              <p className="text-[10px] text-gray-600 font-medium mt-0.5 truncate max-w-[120px]"
+                                 title={order.raw_status}>
+                                {order.raw_status}
+                              </p>
+                            )}
+                            {crit === 'critico' && (
+                              <p className="text-[10px] text-red-600 font-bold mt-0.5 leading-tight">
+                                ↑ Escalar con Effi
+                              </p>
+                            )}
+                            {crit === 'riesgo' && (
+                              <p className="text-[10px] text-yellow-700 font-medium mt-0.5 leading-tight">
+                                Seguimiento Effi
+                              </p>
+                            )}
+                          </>
                         )}
                       </td>
 
@@ -480,10 +648,10 @@ export default function TransitoPage() {
             </div>
           )}
 
-          {!loading && orders.length > 200 && (
+          {!loading && orders.length >= 200 && filter !== 'anulada' && (
             <div className="px-5 py-3 bg-blue-50 border-t border-blue-100 text-center">
               <p className="text-xs text-blue-700">
-                Mostrando 200 pedidos.{' '}
+                Mostrando hasta 200 pedidos activos.{' '}
                 <Link href="/orders?status=in_transit" className="font-semibold underline">
                   Ver todos en Pedidos
                 </Link>
@@ -509,11 +677,15 @@ export default function TransitoPage() {
             <strong className="text-gray-700">+72h</strong>
             {' '}— Considerar apertura de reclamo formal con la transportadora.
           </li>
+          <li>
+            <strong className="text-gray-700">Anuladas</strong>
+            {' '}— Guías canceladas / anuladas en EFI. No escalar. El cron dejará de sincronizarlas automáticamente.
+          </li>
         </ul>
         <p className="text-xs text-gray-400 mt-1">
-          El tiempo estancado se calcula desde <strong className="text-gray-500">status_since</strong> (fecha real del estado EFI),
-          con fallback a shipment_created_at → shopify_created_at → created_at.
-          El campo &quot;Último sync EFI&quot; (last_tracking_update) <em>no</em> se usa para este cálculo.
+          Tiempo estancado calculado desde <strong className="text-gray-500">status_since</strong> (fecha real EFI),
+          fallback: shipment_created_at → shopify_created_at → created_at.
+          <strong className="text-gray-500"> last_tracking_update</strong> no se usa para este cálculo.
         </p>
       </div>
 

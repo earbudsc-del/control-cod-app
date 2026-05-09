@@ -16,6 +16,7 @@ export interface TrackingResult {
   guia:                       string
   encontrado:                 boolean
   estado_actual:              string | null
+  estado_global:              string | null  // Estado global EFI (ej. "Anulada") — puede diferir del estado de movimiento
   normalized_status:          string
   valor_recaudo:              string | null
   transportadora:             string | null
@@ -55,7 +56,8 @@ export function mapNormalizedStatus(estado: string): string {
     s.includes('retorno')   ||
     s.includes('regresado') ||
     s.includes('a origen')  ||  // "entregada a origen", "dev. entregada a origen"
-    s.includes('cancelada')     // "cancelada por transportadora"
+    s.includes('cancelada') ||  // "cancelada por transportadora"
+    s.includes('anulad')        // "anulada" — guía anulada globalmente en EFI
   ) return 'returned'
 
   if (
@@ -286,6 +288,7 @@ export function parseEFITracking(html: string, guia: string): TrackingResult {
     guia,
     encontrado:                 false,
     estado_actual:              null,
+    estado_global:              null,
     normalized_status:          'unknown',
     valor_recaudo:              null,
     transportadora:             null,
@@ -433,6 +436,21 @@ export function parseEFITracking(html: string, guia: string): TrackingResult {
   if (result.historial_novedades.length > 0) {
     result.last_attempt_reason =
       result.historial_novedades[result.historial_novedades.length - 1]!.mensaje
+  }
+
+  // ── 7. Estado global (override de cancelación) ───────────────────────────
+  // EFI distingue "Estado global" (p.ej. "Anulada") del "Estado actual" de movimiento
+  // ("Generada"). Si el estado global indica cancelación, prevalece sobre todo lo anterior.
+  const estadoGlobal = findLabelInHTML($, 'Estado global', 'Estado Global', 'Estado de la guia', 'Estado de la Guia')
+  if (estadoGlobal) {
+    result.estado_global = estadoGlobal
+    const normGlobal = stripAccents(estadoGlobal.toLowerCase())
+    if (normGlobal.includes('anulad') || normGlobal.includes('inactiv')) {
+      // La guía fue anulada en EFI; el estado de movimiento interno ("Generada") es
+      // irrelevante para la clasificación operativa.
+      result.estado_actual     = estadoGlobal   // raw_status = "Anulada"
+      result.normalized_status = 'returned'
+    }
   }
 
   result._debug.tables_found    = $('table').length

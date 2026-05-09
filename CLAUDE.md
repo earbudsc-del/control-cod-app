@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Fix /transito anuladas: parser detecta "Estado global: Anulada" y mapea a `returned`. Tarjetas Crítico/Riesgo/Normal/Anuladas son clickeables (filtran tabla). Anuladas excluidas del conteo activo. Fetch paralelo in_transit + rawStatus=anulada. Badge "Anulada" en tabla.** | 2026-05-09 | `efi-parser.ts`, `api/orders/route.ts`, `transito/page.tsx` |
 | **Fix crítico /transito stuckSince: `transitSinceMs` corregido para NO usar `last_tracking_update` (lo actualiza el cron cada 5 min). Nueva prioridad: status_since → shipment_created_at → shopify_created_at → created_at. Buscador funcional en /transito. Fallback ciudad "Ubicación no registrada". Logs debug server-side.** | 2026-05-09 | `transit-helpers.ts`, `transito/page.tsx` |
 | **novelty_agent: acceso a /reparto añadido (sidebar). raw_status visible en tabla desktop + mobile card de /reparto y /transito. Copy operativo de escalamiento con Effi/transportadora en info header y notas de ambas páginas. Alertas +24h y +48h en /transito.** | 2026-05-09 | `sidebar.tsx`, `reparto/page.tsx`, `transito/page.tsx` |
 | **Simplificación UX /confirmacion: tab "Nuevos" removido, tarjeta "Nuevos hoy" como KPI visual puro (sin navegación), `getLogisticsBadge` con `in_transit` explícito, 4 tabs operativos: Pedidos/Reintentar/Confirmados/Despachados** | 2026-05-09 | `confirmacion/page.tsx` |
@@ -217,6 +218,8 @@ tracking_number     IS NULL         -- si ya tiene guía → /despachados
 - **Buscador (2026-05-09):** Filtra client-side por tracking_number, order_number, customer_name, customer_phone, city, province, raw_status. Muestra count de resultados al buscar.
 - **stuckSince corregido (2026-05-09):** `transitSinceMs` usa `status_since ?? shipment_created_at ?? shopify_created_at ?? created_at` — NO usa `last_tracking_update` (ver sección "Fix crítico /transito stuckSince" más abajo)
 - **Fallback ciudad (2026-05-09):** `cityDisplay(order)` → city → province → último segmento de customer_address → "Ubicación no registrada". Ya no muestra "—" para pedidos sin ciudad.
+- **Anuladas (2026-05-09):** fetch secundario `?rawStatus=anulada` + tarjeta "Anuladas (EFI)" separada. Anuladas excluidas de conteos Crítico/Riesgo/Normal. Badge gris "Anulada" + "No escalar". Parser detecta "Estado global: Anulada" → override normalized_status='returned' + raw_status='Anulada'.
+- **Tarjetas clickeables (2026-05-09):** Crítico/Riesgo/Normal/Anuladas filtran la tabla al hacer click. Segundo click desactiva el filtro. Chip de filtro activo con botón X encima del buscador.
 
 ### Novedad
 - `delivery_attempts >= 2` → prioridad de contacto (tab "2+ intentos")
@@ -308,7 +311,90 @@ AppLayout (Server Component — layout.tsx)
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
 
-### Fix crítico /transito stuckSince — "Hace menos de 1h" incorrecto (2026-05-09) ← ÚLTIMO CAMBIO
+### /transito — Anuladas + Tarjetas clickeables (2026-05-09) ← ÚLTIMO CAMBIO
+
+**Problema:** Después de corregir `stuckSince`, aparecían 36 "Críticos +48h". Pero muchas guías en EFI tenían "Estado global: Anulada" aunque su movimiento interno dijera "Generada". Esas guías fueron duplicadas o mal subidas y ya están canceladas en EFI. Mezcladas con las activas, confundían al agente de novedades.
+
+**Causa del "Estado global: Anulada" vs "Estado actual: Generada":**
+
+EFI tiene dos conceptos distintos en su HTML:
+- **Estado actual** (`findLabelInHTML($, 'Estado actual')`) → estado de movimiento del paquete (p. ej. "Generada", "En tránsito")
+- **Estado global** (`findLabelInHTML($, 'Estado global')`) → estado general de la guía (p. ej. "Anulada", "Activa")
+
+El parser solo extraía "Estado actual". El "Estado global: Anulada" era ignorado → la guía quedaba como `in_transit`, aparecía como Crítico +48h en /transito.
+
+**Fix 1 — `efi-parser.ts`:**
+1. Nuevo campo `estado_global: string | null` en `TrackingResult`
+2. `mapNormalizedStatus`: añadido `s.includes('anulad')` → `'returned'` (junto a "cancelada")
+3. Al final de `parseEFITracking`, busca "Estado global" / "Estado Global":
+   - Si contiene "anulad" o "inactiv" → override: `estado_actual = estadoGlobal`, `normalized_status = 'returned'`
+   - `raw_status` se guardará como "Anulada" en el próximo ciclo del cron
+   - El cron detecta 'returned' como FINAL_STATUS → deja de re-sincronizar esa guía
+
+**Fix 2 — `api/orders/route.ts`:**
+- Nuevo param `?rawStatus=valor` → filtra `raw_status ilike %valor%`
+- Usado por /transito para fetch secundario: `/api/orders?rawStatus=anulada&limit=100`
+
+**Fix 3 — `transito/page.tsx`:**
+
+_Fetch paralelo:_
+- `orders` (activos): `/api/orders?status=in_transit&limit=200`
+- `anuladas`: `/api/orders?rawStatus=anulada&limit=100`
+- Las anuladas se detectan por `raw_status ilike '%anulada%'` independientemente de normalized_status
+  (captura anuladas ya procesadas por el cron con `normalized_status='returned'` Y las pendientes de re-sync que aún tienen `in_transit` + raw_status anterior)
+
+_Tarjetas clickeables (FilterCategory):_
+- `'all'` (default) · `'critico'` · `'riesgo'` · `'normal'` · `'anulada'`
+- Clic en una tarjeta activa el filtro y filtra la tabla. Segundo clic desactiva → vuelve a 'all'.
+- Visual: tarjeta activa tiene `ring-2 ring-offset-1 shadow-md` en su color. Subtexto "← Filtro activo".
+- Chip de filtro activo encima del buscador con botón X.
+- Las 4 tarjetas muestran counts del conjunto COMPLETO (no filtrado por búsqueda).
+
+_Conteos:_
+- **Crítico/Riesgo/Normal**: calculados solo sobre `orders` (in_transit activos, excluyendo anuladas)
+- **Anuladas**: `anuladas.length`
+- Banner principal muestra `orders.length` como "tránsito activo" + chip secundario "N anuladas"
+
+_Tabla anuladas:_
+- Filas con `opacity-75` y fondo gris suave
+- Badge gris "Anulada" (ícono Ban) en columna Estado EFI
+- Tiempo "sin movimiento" tachado (irrelevante para anuladas)
+- Texto "No escalar" debajo del badge
+
+**Normalización de estados — actualización:**
+
+| Estado EFI | normalized_status | Notas |
+|---|---|---|
+| `Estado global: Anulada` | `returned` | Override; raw_status guardado como "Anulada" |
+| `anulada` en estado_actual | `returned` | Vía `mapNormalizedStatus` (s.includes('anulad')) |
+| `cancelada` | `returned` | Sin cambios (ya existía) |
+
+**Cómo probar:**
+1. `npm run dev` → `/transito`
+2. Verificar 4 tarjetas: Crítico / Riesgo / Normal / Anuladas — todas con conteos correctos
+3. Click en "Anuladas" → tabla muestra solo anuladas con badge gris "Anulada"
+4. Buscar "9000539795" con filtro "Anuladas" activo → aparece la guía con badge "Anulada"
+5. Verificar que 9000539795 NO cuenta en Crítico/Riesgo/Normal
+6. Click en "Crítico" → tabla muestra solo +48h activos, sin anuladas
+7. Segundo click en "Crítico" → filtro desactiva, vuelve a "Todos"
+8. Buscar guía activa real → aparece con su categoría correcta
+9. Verificar que el total del banner refleja solo activos (excluye anuladas)
+10. Guía 9000546686 (si no está anulada): debe aparecer como Crítico +48h en filtro "Crítico"
+
+**Nota importante sobre propagación:**
+Las anuladas existentes en DB que aún tienen `normalized_status='in_transit'` + `raw_status='Generada'` (antes del cron re-sync) NO aparecerán en el fetch secundario de anuladas (porque `raw_status` no contiene "anulada" todavía). Después del próximo ciclo del cron, el parser detecta "Estado global: Anulada" → actualiza `raw_status='Anulada'` + `normalized_status='returned'` → desaparecen del fetch `in_transit` y aparecen en el fetch `rawStatus=anulada`. En producción, la propagación ocurre en el próximo ciclo de 5 min.
+
+**Archivos modificados:**
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/tracking/efi-parser.ts` | Nuevo campo `estado_global`. "anulad" → 'returned' en `mapNormalizedStatus`. Extracción "Estado global" + override al final del parser. |
+| `src/app/api/orders/route.ts` | Nuevo param `?rawStatus=valor` → ilike filter. |
+| `src/app/(app)/transito/page.tsx` | Fetch paralelo (in_transit + anuladas). Tarjetas clickeables. Banner separado anuladas. Buscador por categoría. |
+
+---
+
+### Fix crítico /transito stuckSince — "Hace menos de 1h" incorrecto (2026-05-09)
 
 **Problema confirmado:**
 - Guía 9000546686, cliente Manuel Manuel, generada el 30/04 02:51 p.m.
