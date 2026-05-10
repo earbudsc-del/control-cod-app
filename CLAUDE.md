@@ -41,7 +41,7 @@
 | `GET /api/confirmados` | Pedidos `confirmation_status='confirmed'`, filtros: `?filter=hoy\|ayer`, `?from=&to=` |
 | `GET /api/flujo-stats` | Conteos pipeline corregidos: `generadas` (activas, sin anuladas), `in_transit` (sin generadas ni anuladas), `en_reparto` (sin anuladas), `anuladas` (count separado) |
 | `GET /api/abandoned-carts` | Lista carritos abandonados con filtros (status, fecha, búsqueda). Devuelve `{ data, total, stats }`. Stats: pending/today/contactedToday/recovered. Roles: admin/ia_supervisor/confirmation_agent. |
-| `POST /api/abandoned-carts/sync` | Llama Shopify `checkouts.json?status=open` (últimos 30 días, >10 min). Upsert idempotente por `shopify_checkout_id`. Fuente: `shopify_abandoned_checkout`. Devuelve `{ synced, new, updated, errors, note? }`. Devuelve 0 si el flujo es COD form (esperado). |
+| `POST /api/abandoned-carts/sync` | Sync paralelo: (1) `draft_orders.json?status=open+invoice_sent` (90 días) → fuente `shopify_draft_order` — **fuente principal en flujo COD**; (2) `checkouts.json?status=open` (30 días) → fuente `shopify_abandoned_checkout`. Upsert idempotente por su ID respectivo. Devuelve `{ drafts:{synced,new,updated,recovered}, checkouts:{synced,new,updated}, errors, draftScopeError? }`. Si falta scope `read_draft_orders` → `draftScopeError` con instrucción. |
 | `POST /api/abandoned-carts/cod-form` | **Endpoint público** — llamado desde el tema Shopify cuando el cliente inicia el formulario COD pero no completa. Protegido por `x-cod-form-secret` header. Deduplicación por session_id (a) o phone+24h (b). Fuente: `cod_form_lead`. Requiere `customer_phone` o `customer_email`. |
 | `PATCH /api/abandoned-carts/[id]/status` | Actualiza recovery_status + recovery_attempts + last_contacted_at. Body: `{ status, note? }`. Agrega nota de cambio si se provee. |
 | `POST /api/abandoned-carts/[id]/note` | Agrega nota con timestamp + agente al campo notes (prepend). Preserva historial de notas. |
@@ -56,6 +56,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Carritos abandonados — Draft Orders como fuente principal COD: migración 023 agrega campos draft order (shopify_draft_order_id, name, draft_status, completed_at). Sync reescrito para traer draft_orders.json?status=open+invoice_sent en paralelo con checkouts. Auto-recover de drafts completados durante sync. Badge "Shopify Draft" (violeta) + nombre #D2256 en UI. Toast desglosado por fuente. Aviso si falta scope read_draft_orders.** | 2026-05-10 | `023_abandoned_carts_draft_orders.sql` (nuevo), `api/abandoned-carts/sync/route.ts` (rewrite), `types/index.ts`, `(app)/carritos-abandonados/page.tsx` |
 | **Carritos abandonados — soporte COD form: migración 022 extiende tabla (shopify_checkout_id nullable, nuevos campos COD). Endpoint público `POST /api/abandoned-carts/cod-form` para leads parciales de formularios COD. Auto-recover por phone match en webhook orders/create. Badge de fuente (COD Form / Shopify / Manual) en UI. Info box en página explicando flujo COD. sync/route.ts ahora usa source='shopify_abandoned_checkout'. 0 checkouts en sync es esperado en flujo COD.** | 2026-05-10 | `022_abandoned_carts_cod_form.sql` (nuevo), `api/abandoned-carts/cod-form/route.ts` (nuevo), `api/webhooks/shopify/orders/route.ts`, `api/abandoned-carts/sync/route.ts`, `(app)/carritos-abandonados/page.tsx`, `types/index.ts` |
 | **Módulo Carritos Abandonados: nuevo módulo /carritos-abandonados para recuperación ventas COD. Tabla abandoned_carts (migración 021). Sync desde Shopify `checkouts.json`. Badges cobertura y SD reutilizados. Mensaje WA pre-llenado con variantes por zona. Estados: pending/contacted/no_answer/recovered/discarded. Roles: admin + confirmation_agent. Mobile-first cards + tabla desktop.** | 2026-05-10 | `021_abandoned_carts.sql` (nuevo), `types/index.ts`, `api/abandoned-carts/route.ts` (nuevo), `api/abandoned-carts/sync/route.ts` (nuevo), `api/abandoned-carts/[id]/status/route.ts` (nuevo), `api/abandoned-carts/[id]/note/route.ts` (nuevo), `(app)/carritos-abandonados/page.tsx` (nuevo), `sidebar.tsx` |
 | **Fix pipeline logístico /novedad y /reparto: queries corregidas en /api/flujo-stats para excluir anuladas/canceladas de Generadas e In_transit. Helper compartido `order-status-helpers.ts` con `isCancelledGuide`/`isGeneratedActive`/`isTransitActive`. FlujoKpis muestra chip "N anuladas". /transito usa `isCancelledGuide` del helper compartido.** | 2026-05-10 | `api/flujo-stats/route.ts`, `components/shared/flujo-kpis.tsx`, `lib/order-status-helpers.ts` (nuevo), `transito/page.tsx` |
@@ -1695,29 +1696,70 @@ Usado en: `/transito/page.tsx` (via alias `isAnuladaRaw = isCancelledGuide`), di
 
 ---
 
-#### Flujo COD form vs Shopify checkout
+#### Fuente principal: Shopify Draft Orders (flujo COD/EasySell)
 
-| Aspecto | COD Form (modelo EasySell) | Shopify Checkout nativo |
-|---|---|---|
-| Qué es | Formulario custom en el tema (sin pasar por checkout Shopify) | Checkout normal de Shopify |
-| Cómo llegan los leads | Frontend del tema llama `POST /api/abandoned-carts/cod-form` | Sync manual → `POST /api/abandoned-carts/sync` descarga `checkouts.json?status=open` |
-| source en DB | `cod_form_lead` | `shopify_abandoned_checkout` |
-| ¿Sync devuelve 0? | Sí — esperado porque no hay checkouts nativos Shopify | Solo si no hay checkouts abiertos |
-| shopify_checkout_id | NULL | ID real del checkout |
-| Deduplicación | session_id (a) → phone + 24h (b) | shopify_checkout_id (único por store) |
+El flujo COD tipo EasySell **NO usa checkout nativo Shopify**. En su lugar, crea **Draft Orders** visibles en:
+`Shopify Admin → Orders → Drafts` (ej. #D2256, #D2255, #D2254...)
 
-**Si el sync devuelve 0 carritos: esto es CORRECTO cuando el flujo es COD form.** Los leads llegan vía el nuevo endpoint, no vía sync.
+Por eso `checkouts.json?status=open` devuelve 0 — esto es correcto y esperado.
+El sync ahora descarga `draft_orders.json?status=open` + `status=invoice_sent` como fuente principal.
+
+**Scope requerido en la Shopify App:** `read_draft_orders`
+Si falta → la UI muestra un aviso amarillo con instrucciones.
 
 ---
 
-#### Fuentes soportadas
+#### Flujo de cada fuente
 
-| source | Descripción | Cómo llegan |
+| Fuente | source en DB | Cómo llegan | Deduplicación |
+|---|---|---|---|
+| **Shopify Draft Orders** | `shopify_draft_order` | "Sync" → `draft_orders.json?status=open+invoice_sent` | `shopify_draft_order_id` (único condicional) |
+| Shopify Checkout nativo | `shopify_abandoned_checkout` | "Sync" → `checkouts.json?status=open` | `shopify_checkout_id` (único condicional) |
+| COD Form (endpoint) | `cod_form_lead` | Tema llama `POST /api/abandoned-carts/cod-form` | session_id (a) → phone+24h (b) |
+| Manual | `manual_import` | INSERT directo (futuro) | — |
+| Legacy | `shopify` | migración 021 | misma semántica que shopify_abandoned_checkout |
+
+---
+
+#### Sync Shopify — comportamiento
+
+`POST /api/abandoned-carts/sync` ejecuta dos fetches en paralelo:
+
+**Draft Orders (principal):**
+- `GET draft_orders.json?status=open&limit=250&updated_at_min={90días}`
+- `GET draft_orders.json?status=invoice_sent&limit=250&updated_at_min={90días}`
+- Mapeo: `id` → `shopify_draft_order_id`, `name` → `shopify_draft_order_name` (#D2256), `invoice_url` → `checkout_url`
+- Datos cliente: prioridad note_attributes → shipping_address → billing_address → customer
+- Si draft tiene `completed_at` → marca el carrito existente como `recovered` automáticamente
+
+**Checkouts (secundario):**
+- `GET checkouts.json?status=open&limit=250&created_at_min={30días}`
+- Igual que antes
+
+**Respuesta:**
+```json
+{
+  "drafts":    { "synced": 12, "new": 5, "updated": 7, "recovered": 0 },
+  "checkouts": { "synced": 0,  "new": 0, "updated": 0 },
+  "errors": 0,
+  "draftScopeError": "Falta el scope read_draft_orders..."  // solo si aplica
+}
+```
+
+**UI toast:** muestra desglose: "5 drafts nuevos · 7 actualizados · Sin cambios nuevos"
+**Aviso amarillo** si `draftScopeError` está presente.
+
+---
+
+#### Fuentes soportadas (resumen tabla)
+
+| source | Descripción | Badge UI |
 |---|---|---|
-| `cod_form_lead` | Lead parcial de formulario COD | `POST /api/abandoned-carts/cod-form` desde el tema |
-| `shopify_abandoned_checkout` | Checkout nativo Shopify abandonado | `POST /api/abandoned-carts/sync` (manual) |
-| `manual_import` | Carga manual | INSERT directo (futuro) |
-| `shopify` | Legacy (migración 021, misma semántica que shopify_abandoned_checkout) | — |
+| `shopify_draft_order` | Draft Order de Shopify (flujo COD principal) | "Shopify Draft" violeta |
+| `shopify_abandoned_checkout` | Checkout nativo Shopify abandonado | "Shopify" gris |
+| `cod_form_lead` | Lead parcial de formulario COD | "COD Form" azul |
+| `manual_import` | Carga manual | "Manual" gris |
+| `shopify` | Legacy | "Shopify" gris |
 
 ---
 

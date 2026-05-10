@@ -169,6 +169,11 @@ export interface AbandonedCart {
   id:                   string
   store_id:             string
   shopify_checkout_id:  string | null
+  // Draft Order (migración 023)
+  shopify_draft_order_id:   string | null
+  shopify_draft_order_name: string | null  // e.g. "#D2256"
+  draft_status:             string | null  // open | invoice_sent | completed
+  completed_at:             string | null
   customer_name:        string | null
   customer_phone:       string | null
   customer_email:       string | null
@@ -194,7 +199,7 @@ export interface AbandonedCart {
   recovered_order_id:   string | null
   notes:                string | null
   abandoned_at:         string | null
-  // 'shopify_abandoned_checkout' | 'cod_form_lead' | 'manual_import' | 'shopify' (legacy)
+  // 'shopify_draft_order' | 'shopify_abandoned_checkout' | 'cod_form_lead' | 'manual_import' | 'shopify' (legacy)
   source:               string | null
   created_at:           string
   updated_at:           string

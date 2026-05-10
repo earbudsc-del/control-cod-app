@@ -91,10 +91,16 @@ function buildWAMessage(cart: AbandonedCart): string {
 
 function SourceBadge({ source }: { source: string | null }) {
   if (!source) return null
+  const isDraft   = source === 'shopify_draft_order'
   const isShopify = source === 'shopify_abandoned_checkout' || source === 'shopify'
   const isCod     = source === 'cod_form_lead'
   const isManual  = source === 'manual_import'
 
+  if (isDraft) return (
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-100 text-violet-700 border border-violet-200">
+      Shopify Draft
+    </span>
+  )
   if (isShopify) return (
     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-600 border border-slate-200">
       Shopify
@@ -164,9 +170,10 @@ export default function CarritosAbandonadosPage() {
   const [carts,       setCarts]       = useState<AbandonedCart[]>([])
   const [stats,       setStats]       = useState<CartStats | null>(null)
   const [total,       setTotal]       = useState(0)
-  const [loading,     setLoading]     = useState(true)
-  const [syncing,     setSyncing]     = useState(false)
-  const [lastSynced,  setLastSynced]  = useState<string | null>(null)
+  const [loading,         setLoading]         = useState(true)
+  const [syncing,         setSyncing]         = useState(false)
+  const [lastSynced,      setLastSynced]      = useState<string | null>(null)
+  const [draftScopeError, setDraftScopeError] = useState<string | null>(null)
 
   const [search,      setSearch]      = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
@@ -228,11 +235,24 @@ export default function CarritosAbandonadosPage() {
 
   async function handleSync() {
     setSyncing(true)
+    setDraftScopeError(null)
     try {
       const res  = await fetch('/api/abandoned-carts/sync', { method: 'POST' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error)
-      showToast(`Sync completado — ${json.new} nuevos · ${json.updated} actualizados`)
+
+      // Guardar scope error si aplica (no bloquea el resultado)
+      if (json.draftScopeError) setDraftScopeError(json.draftScopeError)
+
+      // Toast con desglose por fuente
+      const parts: string[] = []
+      if (json.drafts?.new    > 0) parts.push(`${json.drafts.new} draft${json.drafts.new !== 1 ? 's' : ''} nuevos`)
+      if (json.drafts?.updated > 0) parts.push(`${json.drafts.updated} actualizados`)
+      if (json.drafts?.recovered > 0) parts.push(`${json.drafts.recovered} recuperados`)
+      if (json.checkouts?.new  > 0) parts.push(`${json.checkouts.new} checkouts nuevos`)
+      if (parts.length === 0) parts.push('Sin cambios nuevos')
+
+      showToast(`Sync — ${parts.join(' · ')}`)
       setLastSynced(new Date().toLocaleTimeString('es-DO', { timeZone: 'America/Santo_Domingo' }))
       fetchData(1); setPage(1)
     } catch (e) {
@@ -335,14 +355,26 @@ export default function CarritosAbandonadosPage() {
         </button>
       </div>
 
-      {/* Info COD form */}
+      {/* Info fuentes */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-sm text-blue-800 space-y-1">
         <p className="font-semibold">Fuentes de leads soportadas</p>
         <ul className="text-xs text-blue-700 space-y-0.5 list-disc list-inside">
-          <li><span className="font-medium">COD Form</span> — llegan automáticamente cuando el formulario envía el lead parcial al endpoint <code className="bg-blue-100 px-1 rounded">/api/abandoned-carts/cod-form</code></li>
-          <li><span className="font-medium">Shopify Checkouts</span> — "Sync Shopify Checkouts" descarga <code className="bg-blue-100 px-1 rounded">checkouts.json?status=open</code>. Devuelve 0 si usas solo COD form.</li>
+          <li><span className="font-medium">Shopify Draft Orders</span> — fuente principal en flujo COD. "Sync" descarga <code className="bg-blue-100 px-1 rounded">draft_orders.json?status=open</code>. Requiere scope <code className="bg-blue-100 px-1 rounded">read_draft_orders</code>.</li>
+          <li><span className="font-medium">COD Form</span> — llegan automáticamente via <code className="bg-blue-100 px-1 rounded">/api/abandoned-carts/cod-form</code> desde el tema.</li>
+          <li><span className="font-medium">Shopify Checkouts</span> — descarga <code className="bg-blue-100 px-1 rounded">checkouts.json?status=open</code>. Devuelve 0 si no hay checkout nativo.</li>
         </ul>
       </div>
+
+      {/* Aviso de scope faltante */}
+      {draftScopeError && (
+        <div className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 text-sm text-amber-800 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+          <div>
+            <p className="font-semibold">Falta permiso en Shopify App</p>
+            <p className="text-xs mt-0.5">{draftScopeError}</p>
+          </div>
+        </div>
+      )}
 
       {/* Métricas */}
       {stats && (
@@ -442,6 +474,9 @@ export default function CarritosAbandonadosPage() {
                       )}
                       {cart.customer_email && (
                         <p className="text-[11px] text-gray-400 truncate max-w-[160px]">{cart.customer_email}</p>
+                      )}
+                      {cart.shopify_draft_order_name && (
+                        <p className="text-[10px] font-mono text-violet-600 mt-0.5">{cart.shopify_draft_order_name}</p>
                       )}
                     </td>
 
@@ -575,6 +610,9 @@ export default function CarritosAbandonadosPage() {
                     )}
                     {cart.customer_email && (
                       <p className="text-xs text-gray-400 truncate">{cart.customer_email}</p>
+                    )}
+                    {cart.shopify_draft_order_name && (
+                      <p className="text-[10px] font-mono text-violet-600">{cart.shopify_draft_order_name}</p>
                     )}
                   </div>
                   <div className="shrink-0 flex flex-col items-end gap-1">
