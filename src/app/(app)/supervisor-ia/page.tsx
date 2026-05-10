@@ -6,7 +6,7 @@ import {
   Brain, RefreshCw, AlertTriangle, CheckCircle2, Package,
   Bike, AlertCircle, Box, ShoppingCart, MapPinOff, ExternalLink,
   ChevronDown, ChevronUp, TrendingUp, Clock, Truck,
-  ClipboardList, FileWarning, CircleDollarSign,
+  ClipboardList, FileWarning, CircleDollarSign, ArrowRight,
 } from 'lucide-react'
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────
@@ -145,8 +145,8 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Reparto',
       cantidad: m.operacion.reparto48h,
       mensaje: `Hay ${m.operacion.reparto48h} ${pl(m.operacion.reparto48h, 'guía', 'guías')} en reparto +48h. Escalar con transportadora.`,
-      accion: 'Escalar con transportadora urgente',
-      link: '/reparto',
+      accion: 'Ver reparto crítico',
+      link: '/reparto?filter=critical',
     })
   }
 
@@ -157,8 +157,8 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Tránsito · Generadas',
       cantidad: m.operacion.generadas48h,
       mensaje: `Hay ${m.operacion.generadas48h} ${pl(m.operacion.generadas48h, 'guía generada', 'guías generadas')} +48h. Verificar recogida/despacho.`,
-      accion: 'Verificar recogida con Effi',
-      link: '/transito',
+      accion: 'Ver generadas críticas',
+      link: '/transito?tab=generadas',
     })
   }
 
@@ -169,8 +169,8 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Tránsito',
       cantidad: m.operacion.transito48h,
       mensaje: `Hay ${m.operacion.transito48h} ${pl(m.operacion.transito48h, 'guía', 'guías')} en tránsito +48h. Posible novedad sin registrar.`,
-      accion: 'Escalar ruta con transportadora',
-      link: '/transito',
+      accion: 'Ver tránsito crítico',
+      link: '/transito?tab=transito',
     })
   }
 
@@ -181,7 +181,7 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Novedad',
       cantidad: m.alertas.novedad14dias,
       mensaje: `Hay ${m.alertas.novedad14dias} ${pl(m.alertas.novedad14dias, 'novedad', 'novedades')} con +14 días. Evaluar cierre o reclamar indemnización.`,
-      accion: 'Preparar reclamo de indemnización',
+      accion: 'Ver novedades +14 días',
       link: '/novedad',
     })
   }
@@ -193,8 +193,8 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Novedad',
       cantidad: m.alertas.novedad2Intentos,
       mensaje: `Hay ${m.alertas.novedad2Intentos} ${pl(m.alertas.novedad2Intentos, 'novedad', 'novedades')} con 2 intentos. No reprogramar sin confirmar cliente.`,
-      accion: 'Verificar con cliente antes de reprogramar',
-      link: '/novedad',
+      accion: 'Ver 2 intentos',
+      link: '/novedad?filter=2-intentos',
     })
   }
 
@@ -205,7 +205,7 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Confirmación',
       cantidad: m.alertas.sinConfirmar24h,
       mensaje: `Hay ${m.alertas.sinConfirmar24h} ${pl(m.alertas.sinConfirmar24h, 'pedido', 'pedidos')} sin confirmar +24h. Asignar agente de confirmación.`,
-      accion: 'Asignar a agente de confirmación',
+      accion: 'Ir a confirmación',
       link: '/confirmacion',
     })
   }
@@ -217,7 +217,7 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Novedad',
       cantidad: m.alertas.novedad7dias,
       mensaje: `Hay ${m.alertas.novedad7dias} ${pl(m.alertas.novedad7dias, 'novedad', 'novedades')} con +7 días sin resolver.`,
-      accion: 'Seguimiento urgente con transportadora',
+      accion: 'Ver novedades',
       link: '/novedad',
     })
   }
@@ -229,8 +229,8 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Carritos abandonados',
       cantidad: m.alertas.carritosPendientes,
       mensaje: `Hay ${m.alertas.carritosPendientes} ${pl(m.alertas.carritosPendientes, 'carrito', 'carritos')} abandonado${m.alertas.carritosPendientes === 1 ? '' : 's'} pendiente${m.alertas.carritosPendientes === 1 ? '' : 's'}. Asignar agente de confirmación.`,
-      accion: 'Asignar agente de recuperación',
-      link: '/carritos-abandonados',
+      accion: 'Ver carritos pendientes',
+      link: '/carritos-abandonados?status=pending',
     })
   }
 
@@ -241,7 +241,7 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
       modulo: 'Confirmación',
       cantidad: m.operacion.fueraCobertura,
       mensaje: `Hay ${m.operacion.fueraCobertura} ${pl(m.operacion.fueraCobertura, 'pedido', 'pedidos')} fuera de cobertura. Revisar antes de confirmar.`,
-      accion: 'Revisar pedidos fuera de cobertura',
+      accion: 'Ver sin cobertura',
       link: '/confirmacion',
     })
   }
@@ -250,7 +250,7 @@ function generarRecomendaciones(m: MetricsData): Recomendacion[] {
   return recom.sort((a, b) => PRIO[a.prioridad] - PRIO[b.prioridad])
 }
 
-function generarReporte(m: MetricsData): string {
+function generarReporte(m: MetricsData): { resumen: string; prioridades: string[] } {
   const activas: string[] = []
   const alertas: string[] = []
   const prioridades: string[] = []
@@ -268,24 +268,24 @@ function generarReporte(m: MetricsData): string {
   if (m.alertas.sinConfirmar24h > 0)            alertas.push(`${m.alertas.sinConfirmar24h} pedidos sin confirmar +24h`)
   if (m.operacion.novedadesActivas > 0)         alertas.push(`${m.operacion.novedadesActivas} novedades activas`)
 
-  if (m.operacion.reparto48h > 0 || m.operacion.transito48h > 0)
-    prioridades.push('escalar tránsito/reparto con transportadora')
+  // Prioridades ordenadas por urgencia
+  if (m.operacion.reparto48h > 0 || m.operacion.generadas48h > 0)
+    prioridades.push(`Crítico: resolver ${m.operacion.reparto48h + m.operacion.generadas48h} guías +48h (reparto/generadas)`)
+  if (m.operacion.transito48h > 0)
+    prioridades.push(`Crítico: escalar ${m.operacion.transito48h} tránsitos +48h con transportadora`)
   if (m.alertas.novedad2Intentos > 0)
-    prioridades.push('verificar novedades con 2 intentos antes de reprogramar')
+    prioridades.push(`Acción: verificar ${m.alertas.novedad2Intentos} novedades con 2 intentos antes de reprogramar`)
   if (m.alertas.sinConfirmar24h > 0)
-    prioridades.push('confirmar pedidos pendientes')
+    prioridades.push(`Acción: confirmar ${m.alertas.sinConfirmar24h} pedidos pendientes +24h`)
   if (m.alertas.carritosPendientes > 0)
-    prioridades.push('recuperar carritos abandonados')
+    prioridades.push(`Recovery: asignar recuperación de ${m.alertas.carritosPendientes} carritos abandonados`)
 
-  if (activas.length === 0 && alertas.length === 0) {
-    return 'Sin alertas críticas. Operación del día bajo control.'
-  }
+  let resumen = ''
+  if (activas.length > 0) resumen += `Hoy: ${activas.join(', ')}. `
+  if (alertas.length > 0) resumen += `Alertas: ${alertas.join(', ')}.`
+  if (!resumen) resumen = 'Sin alertas críticas. Operación del día bajo control.'
 
-  let reporte = ''
-  if (activas.length > 0) reporte += `Hoy: ${activas.join(', ')}. `
-  if (alertas.length > 0) reporte += `Alertas: ${alertas.join(', ')}. `
-  if (prioridades.length > 0) reporte += `Priorizar: ${prioridades.join(' · ')}.`
-  return reporte.trim()
+  return { resumen: resumen.trim(), prioridades }
 }
 
 function getIndemnRecomendacion(order: IndemnizableItem): string {
@@ -295,6 +295,13 @@ function getIndemnRecomendacion(order: IndemnizableItem): string {
   if (reason.includes('rechaz')) return 'Verificar — posible rechazo sin contacto previo al cliente'
   if (reason.includes('direcci') || reason.includes('domicil')) return 'Verificar dirección y reclamar si fue correcta'
   return 'Revisar historial y evaluar reclamo de indemnización'
+}
+
+function getIndemnPriority(order: IndemnizableItem): { label: string; color: string } {
+  if (order.delivery_attempts >= 3) return { label: 'Alta', color: 'bg-red-100 text-red-700' }
+  const reason = (order.last_attempt_reason ?? '').toLowerCase()
+  if (reason.includes('cobertura') || reason.includes('zona')) return { label: 'Alta', color: 'bg-red-100 text-red-700' }
+  return { label: 'Media', color: 'bg-orange-100 text-orange-700' }
 }
 
 // ─── Helpers de color ────────────────────────────────────────────────────────
@@ -313,24 +320,33 @@ const PRIO_BADGE: Record<RecomPriority, string> = {
   'baja':    'bg-gray-100 text-gray-600',
 }
 
+const PRIO_BTN: Record<RecomPriority, string> = {
+  'crítica': 'bg-red-700 hover:bg-red-800 text-white',
+  'alta':    'bg-orange-600 hover:bg-orange-700 text-white',
+  'media':   'bg-amber-600 hover:bg-amber-700 text-white',
+  'baja':    'bg-gray-600 hover:bg-gray-700 text-white',
+}
+
 // ─── Componentes helper ──────────────────────────────────────────────────────
 
-function KpiCard({
-  label, value, sub, color = 'gray', critical = false,
+function ClickableKpiCard({
+  label, value, sub, color = 'gray', critical = false, href,
 }: {
   label: string
   value: number
   sub?: string
-  color?: 'gray' | 'green' | 'red' | 'amber' | 'blue' | 'orange'
+  color?: 'gray' | 'green' | 'red' | 'amber' | 'blue' | 'orange' | 'teal'
   critical?: boolean
+  href: string
 }) {
   const colorMap: Record<string, string> = {
-    gray:   'bg-white border-gray-200',
-    green:  'bg-green-50 border-green-200',
-    red:    'bg-red-50 border-red-200',
-    amber:  'bg-amber-50 border-amber-200',
-    blue:   'bg-blue-50 border-blue-200',
-    orange: 'bg-orange-50 border-orange-200',
+    gray:   'bg-white border-gray-200 hover:border-gray-300',
+    green:  'bg-green-50 border-green-200 hover:border-green-300',
+    red:    'bg-red-50 border-red-200 hover:border-red-300',
+    amber:  'bg-amber-50 border-amber-200 hover:border-amber-300',
+    blue:   'bg-blue-50 border-blue-200 hover:border-blue-300',
+    orange: 'bg-orange-50 border-orange-200 hover:border-orange-300',
+    teal:   'bg-teal-50 border-teal-200 hover:border-teal-300',
   }
   const numColorMap: Record<string, string> = {
     gray:   'text-gray-800',
@@ -339,31 +355,44 @@ function KpiCard({
     amber:  'text-amber-700',
     blue:   'text-blue-700',
     orange: 'text-orange-700',
+    teal:   'text-teal-700',
   }
   return (
-    <div className={`rounded-lg border p-3 ${colorMap[color]} ${critical && value > 0 ? 'ring-2 ring-red-300' : ''}`}>
+    <Link
+      href={href}
+      className={`block rounded-lg border p-3 transition-all ${colorMap[color]} ${critical && value > 0 ? 'ring-2 ring-red-300' : ''}`}
+    >
       <p className="text-xs text-gray-500 font-medium leading-tight mb-1">{label}</p>
       <p className={`text-2xl font-bold ${numColorMap[color]}`}>{value}</p>
       {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
-    </div>
+      <p className="text-[10px] text-gray-400 mt-1 flex items-center gap-0.5">
+        Ver módulo <ArrowRight className="w-2.5 h-2.5" />
+      </p>
+    </Link>
   )
 }
 
-function AlertaRow({ label, count, link, prioridad }: {
+function AlertaRow({ label, count, link, prioridad, actionLabel }: {
   label: string
   count: number
   link: string
   prioridad: RecomPriority
+  actionLabel?: string
 }) {
   if (count === 0) return null
   return (
-    <Link
-      href={link}
-      className={`flex items-center justify-between px-4 py-2.5 rounded-lg border text-sm transition-opacity hover:opacity-90 ${PRIO_STYLE[prioridad]}`}
-    >
-      <span className="font-medium">{label}</span>
-      <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${PRIO_BADGE[prioridad]}`}>{count}</span>
-    </Link>
+    <div className={`flex items-center justify-between px-4 py-2.5 rounded-lg border text-sm ${PRIO_STYLE[prioridad]}`}>
+      <span className="font-medium flex-1 mr-3">{label}</span>
+      <div className="flex items-center gap-2 shrink-0">
+        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${PRIO_BADGE[prioridad]}`}>{count}</span>
+        <Link
+          href={link}
+          className={`text-xs font-semibold px-2.5 py-1 rounded-md transition-colors ${PRIO_BTN[prioridad]}`}
+        >
+          {actionLabel ?? 'Ir al módulo'}
+        </Link>
+      </div>
+    </div>
   )
 }
 
@@ -381,8 +410,8 @@ function ModuleCard({
       <div className={`px-4 py-3 flex items-center gap-2 ${color}`}>
         <Icon className="w-4 h-4" />
         <span className="font-semibold text-sm">{title}</span>
-        <Link href={link} className="ml-auto">
-          <ExternalLink className="w-3.5 h-3.5 opacity-70 hover:opacity-100" />
+        <Link href={link} className="ml-auto flex items-center gap-1 text-xs opacity-70 hover:opacity-100 font-medium">
+          Ir al módulo <ExternalLink className="w-3 h-3" />
         </Link>
       </div>
       <div className="divide-y divide-gray-100">
@@ -463,7 +492,7 @@ export default function SupervisorIAPage() {
   if (!data) return null
 
   const recomendaciones = generarRecomendaciones(data)
-  const reporte         = generarReporte(data)
+  const { resumen, prioridades } = generarReporte(data)
   const criticasCount   = recomendaciones.filter(r => r.prioridad === 'crítica').length
 
   const lastUpdated = new Intl.DateTimeFormat('es-DO', {
@@ -502,21 +531,21 @@ export default function SupervisorIAPage() {
         </div>
       </div>
 
-      {/* ── Operación del día ───────────────────────────────────── */}
+      {/* ── Operación del día (cards clickeables) ───────────────── */}
       <section>
         <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Operación del día</h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          <KpiCard label="Nuevos hoy"           value={data.operacion.nuevosHoy}              color="blue"   />
-          <KpiCard label="Confirmados hoy"       value={data.operacion.confirmadosHoy}         color="green"  />
-          <KpiCard label="Entregados hoy"        value={data.operacion.entregadosHoy}          color="green"  />
-          <KpiCard label="Carritos recuperados"  value={data.operacion.carritosRecuperadosHoy} color="green"  sub="hoy" />
-          <KpiCard label="Novedades activas"     value={data.operacion.novedadesActivas}       color={data.operacion.novedadesActivas > 0 ? 'amber' : 'gray'} />
+          <ClickableKpiCard label="Nuevos hoy"           value={data.operacion.nuevosHoy}              color="blue"   href="/confirmacion" />
+          <ClickableKpiCard label="Confirmados hoy"       value={data.operacion.confirmadosHoy}         color="green"  href="/confirmados" />
+          <ClickableKpiCard label="Entregados hoy"        value={data.operacion.entregadosHoy}          color="green"  href="/reparto" />
+          <ClickableKpiCard label="Carritos recuperados"  value={data.operacion.carritosRecuperadosHoy} color="teal"   sub="hoy" href="/carritos-abandonados?status=recovered" />
+          <ClickableKpiCard label="Novedades activas"     value={data.operacion.novedadesActivas}       color={data.operacion.novedadesActivas > 0 ? 'amber' : 'gray'} href="/novedad" />
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 mt-3">
-          <KpiCard label="Reparto crítico +48h"   value={data.operacion.reparto48h}    color={data.operacion.reparto48h > 0 ? 'red' : 'gray'}    critical />
-          <KpiCard label="Tránsito crítico +48h"  value={data.operacion.transito48h}   color={data.operacion.transito48h > 0 ? 'red' : 'gray'}   critical />
-          <KpiCard label="Generadas críticas +48h" value={data.operacion.generadas48h} color={data.operacion.generadas48h > 0 ? 'red' : 'gray'}  critical />
-          <KpiCard label="Fuera de cobertura"     value={data.operacion.fueraCobertura} color={data.operacion.fueraCobertura > 0 ? 'orange' : 'gray'} />
+          <ClickableKpiCard label="Reparto crítico +48h"    value={data.operacion.reparto48h}    color={data.operacion.reparto48h > 0 ? 'red' : 'gray'}    critical href="/reparto?filter=critical" />
+          <ClickableKpiCard label="Tránsito crítico +48h"   value={data.operacion.transito48h}   color={data.operacion.transito48h > 0 ? 'red' : 'gray'}   critical href="/transito?tab=transito" />
+          <ClickableKpiCard label="Generadas críticas +48h" value={data.operacion.generadas48h}  color={data.operacion.generadas48h > 0 ? 'red' : 'gray'}  critical href="/transito?tab=generadas" />
+          <ClickableKpiCard label="Fuera de cobertura"      value={data.operacion.fueraCobertura} color={data.operacion.fueraCobertura > 0 ? 'orange' : 'gray'} href="/confirmacion" />
         </div>
       </section>
 
@@ -524,17 +553,17 @@ export default function SupervisorIAPage() {
       <section>
         <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Alertas críticas</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <AlertaRow label="Pedidos sin confirmar +24h"    count={data.alertas.sinConfirmar24h}   link="/confirmacion"        prioridad="crítica" />
-          <AlertaRow label="Reparto +48h"                  count={data.alertas.reparto48h}        link="/reparto"             prioridad="crítica" />
-          <AlertaRow label="Tránsito +48h"                 count={data.alertas.transito48h}       link="/transito"            prioridad="crítica" />
-          <AlertaRow label="Generadas +48h"                count={data.alertas.generadas48h}      link="/transito"            prioridad="crítica" />
-          <AlertaRow label="Novedades con 2 intentos"      count={data.alertas.novedad2Intentos}  link="/novedad"             prioridad="alta"    />
-          <AlertaRow label="Novedades +14 días"            count={data.alertas.novedad14dias}     link="/novedad"             prioridad="alta"    />
-          <AlertaRow label="Novedades +7 días"             count={data.alertas.novedad7dias}      link="/novedad"             prioridad="media"   />
-          <AlertaRow label="Guías anuladas/canceladas"     count={data.alertas.guiasAnuladas}     link="/transito"            prioridad="media"   />
-          <AlertaRow label="Posibles indemnizaciones"      count={data.alertas.posiblesIndemnizables} link="#indemnizaciones" prioridad="media"   />
-          <AlertaRow label="Pedidos fuera de cobertura"    count={data.alertas.fueraCobertura}    link="/confirmacion"        prioridad="baja"    />
-          <AlertaRow label="Carritos abandonados pendientes" count={data.alertas.carritosPendientes} link="/carritos-abandonados" prioridad="media" />
+          <AlertaRow label="Pedidos sin confirmar +24h"    count={data.alertas.sinConfirmar24h}       link="/confirmacion"                    prioridad="crítica" actionLabel="Ver casos" />
+          <AlertaRow label="Reparto +48h"                  count={data.alertas.reparto48h}            link="/reparto?filter=critical"          prioridad="crítica" actionLabel="Ver casos" />
+          <AlertaRow label="Tránsito +48h"                 count={data.alertas.transito48h}           link="/transito?tab=transito"            prioridad="crítica" actionLabel="Ver casos" />
+          <AlertaRow label="Generadas +48h"                count={data.alertas.generadas48h}          link="/transito?tab=generadas"           prioridad="crítica" actionLabel="Ver casos" />
+          <AlertaRow label="Novedades con 2 intentos"      count={data.alertas.novedad2Intentos}      link="/novedad?filter=2-intentos"        prioridad="alta"    actionLabel="Resolver" />
+          <AlertaRow label="Novedades +14 días"            count={data.alertas.novedad14dias}         link="/novedad"                          prioridad="alta"    actionLabel="Ver casos" />
+          <AlertaRow label="Novedades +7 días"             count={data.alertas.novedad7dias}          link="/novedad"                          prioridad="media"   actionLabel="Ver casos" />
+          <AlertaRow label="Guías anuladas/canceladas"     count={data.alertas.guiasAnuladas}         link="/transito?tab=anuladas"            prioridad="media"   actionLabel="Ver anuladas" />
+          <AlertaRow label="Posibles indemnizaciones"      count={data.alertas.posiblesIndemnizables} link="#indemnizaciones"                  prioridad="media"   actionLabel="Ver casos" />
+          <AlertaRow label="Pedidos fuera de cobertura"    count={data.alertas.fueraCobertura}        link="/confirmacion"                     prioridad="baja"    actionLabel="Ir al módulo" />
+          <AlertaRow label="Carritos abandonados pendientes" count={data.alertas.carritosPendientes}  link="/carritos-abandonados?status=pending" prioridad="media" actionLabel="Recuperar" />
         </div>
         {Object.values(data.alertas).every(v => v === 0) && (
           <div className="flex items-center gap-2 px-4 py-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm">
@@ -547,8 +576,19 @@ export default function SupervisorIAPage() {
       {/* ── Reporte del día ─────────────────────────────────────── */}
       <section>
         <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Reporte del día</h2>
-        <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-5 py-4">
-          <p className="text-sm text-indigo-900 leading-relaxed font-medium">{reporte}</p>
+        <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-5 py-4 space-y-3">
+          <p className="text-sm text-indigo-900 leading-relaxed font-medium">{resumen}</p>
+          {prioridades.length > 0 && (
+            <div className="border-t border-indigo-200 pt-3 space-y-1.5">
+              <p className="text-xs font-semibold text-indigo-700 uppercase tracking-wide mb-2">Prioridades del día</p>
+              {prioridades.map((p, i) => (
+                <div key={i} className="flex items-start gap-2 text-sm text-indigo-900">
+                  <span className="flex-shrink-0 w-5 h-5 bg-indigo-200 text-indigo-800 rounded-full text-xs font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
+                  <span>{p}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </section>
 
@@ -560,12 +600,12 @@ export default function SupervisorIAPage() {
             {recomendaciones.map(r => (
               <div key={r.id} className={`rounded-xl border px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3 ${PRIO_STYLE[r.prioridad]}`}>
                 <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex flex-wrap items-center gap-2 mb-1">
                     <span className={`text-xs font-bold px-2 py-0.5 rounded-full uppercase tracking-wide ${PRIO_BADGE[r.prioridad]}`}>
                       {r.prioridad}
                     </span>
                     <span className="text-xs text-gray-500 font-medium">{r.modulo}</span>
-                    <span className="text-xs font-bold text-gray-700 ml-auto sm:ml-0">
+                    <span className="text-xs font-bold text-gray-700">
                       {r.cantidad} afectado{r.cantidad > 1 ? 's' : ''}
                     </span>
                   </div>
@@ -573,7 +613,7 @@ export default function SupervisorIAPage() {
                 </div>
                 <Link
                   href={r.link}
-                  className="shrink-0 text-xs font-semibold underline-offset-2 hover:underline whitespace-nowrap"
+                  className={`shrink-0 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${PRIO_BTN[r.prioridad]}`}
                 >
                   {r.accion} →
                 </Link>
@@ -698,58 +738,81 @@ export default function SupervisorIAPage() {
                     <th className="text-left px-4 py-2.5 font-medium text-gray-600">Ciudad</th>
                     <th className="text-center px-4 py-2.5 font-medium text-gray-600">Intentos</th>
                     <th className="text-left px-4 py-2.5 font-medium text-gray-600">Razón</th>
+                    <th className="text-left px-4 py-2.5 font-medium text-gray-600">Prioridad</th>
                     <th className="text-left px-4 py-2.5 font-medium text-gray-600">Recomendación</th>
                     <th className="px-4 py-2.5"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {data.indemnizables.map(order => (
-                    <tr key={order.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 font-mono text-xs text-gray-700">{order.tracking_number}</td>
-                      <td className="px-4 py-3">
-                        <p className="font-medium text-gray-800">{order.customer_name ?? '—'}</p>
-                        {order.order_number && <p className="text-xs text-gray-400">{order.order_number}</p>}
-                      </td>
-                      <td className="px-4 py-3 text-gray-600">{order.city ?? '—'}</td>
-                      <td className="px-4 py-3 text-center">
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${order.delivery_attempts >= 3 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
-                          {order.delivery_attempts}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-gray-500 max-w-[180px] truncate" title={order.last_attempt_reason ?? ''}>
-                        {order.last_attempt_reason ?? '—'}
-                      </td>
-                      <td className="px-4 py-3 text-xs text-gray-700">{getIndemnRecomendacion(order)}</td>
-                      <td className="px-4 py-3">
-                        <Link href={`/orders/${order.id}`} className="text-indigo-600 hover:underline text-xs flex items-center gap-1">
-                          Ver <ExternalLink className="w-3 h-3" />
-                        </Link>
-                      </td>
-                    </tr>
-                  ))}
+                  {data.indemnizables.map(order => {
+                    const prio = getIndemnPriority(order)
+                    return (
+                      <tr key={order.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 font-mono text-xs text-gray-700">
+                          {order.tracking_number}
+                        </td>
+                        <td className="px-4 py-3">
+                          <p className="font-medium text-gray-800">{order.customer_name ?? '—'}</p>
+                          {order.order_number && <p className="text-xs text-gray-400">{order.order_number}</p>}
+                        </td>
+                        <td className="px-4 py-3 text-gray-600">{order.city ?? '—'}</td>
+                        <td className="px-4 py-3 text-center">
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${order.delivery_attempts >= 3 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
+                            {order.delivery_attempts}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-xs text-gray-500 max-w-[160px] truncate" title={order.last_attempt_reason ?? ''}>
+                          {order.last_attempt_reason ?? '—'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${prio.color}`}>
+                            {prio.label}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-xs text-gray-700 max-w-[180px]">{getIndemnRecomendacion(order)}</td>
+                        <td className="px-4 py-3">
+                          <Link
+                            href={`/orders/${order.id}`}
+                            className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-800 border border-indigo-200 hover:border-indigo-300 px-2 py-1 rounded-md transition-colors"
+                          >
+                            Ver pedido <ExternalLink className="w-3 h-3" />
+                          </Link>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
             {/* Mobile */}
             <div className="md:hidden divide-y divide-gray-100">
-              {data.indemnizables.map(order => (
-                <div key={order.id} className="px-4 py-3 space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs text-gray-500">{order.tracking_number}</span>
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${order.delivery_attempts >= 3 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
-                      {order.delivery_attempts} intentos
-                    </span>
+              {data.indemnizables.map(order => {
+                const prio = getIndemnPriority(order)
+                return (
+                  <div key={order.id} className="px-4 py-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs text-gray-500">{order.tracking_number}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${prio.color}`}>{prio.label}</span>
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${order.delivery_attempts >= 3 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
+                          {order.delivery_attempts} intentos
+                        </span>
+                      </div>
+                    </div>
+                    <p className="font-medium text-gray-800 text-sm">{order.customer_name ?? '—'}</p>
+                    <p className="text-xs text-gray-500">{order.city ?? '—'} · {order.last_attempt_reason ?? '—'}</p>
+                    <div className="flex items-center justify-between pt-1">
+                      <p className="text-xs text-gray-600">{getIndemnRecomendacion(order)}</p>
+                      <Link
+                        href={`/orders/${order.id}`}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 border border-indigo-200 px-2 py-1 rounded-md ml-2 shrink-0"
+                      >
+                        Ver pedido <ExternalLink className="w-3 h-3" />
+                      </Link>
+                    </div>
                   </div>
-                  <p className="font-medium text-gray-800 text-sm">{order.customer_name ?? '—'}</p>
-                  <p className="text-xs text-gray-500">{order.city} · {order.last_attempt_reason ?? '—'}</p>
-                  <div className="flex items-center justify-between pt-1">
-                    <p className="text-xs text-gray-600">{getIndemnRecomendacion(order)}</p>
-                    <Link href={`/orders/${order.id}`} className="text-indigo-600 text-xs shrink-0 ml-2">
-                      Ver →
-                    </Link>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
@@ -776,7 +839,7 @@ export default function SupervisorIAPage() {
                 {data.alertas.sinConfirmar24h > 0 && <span className="text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">{data.alertas.sinConfirmar24h}</span>}
               </li>
               <li className="px-4 py-2.5 flex justify-between items-center">
-                <Link href="/carritos-abandonados" className="text-gray-700 hover:text-indigo-600">Recuperar carritos</Link>
+                <Link href="/carritos-abandonados?status=pending" className="text-gray-700 hover:text-indigo-600">Recuperar carritos</Link>
                 {data.alertas.carritosPendientes > 0 && <span className="text-xs font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">{data.alertas.carritosPendientes}</span>}
               </li>
               <li className="px-4 py-2.5 flex justify-between items-center">
@@ -798,12 +861,12 @@ export default function SupervisorIAPage() {
                 {data.modulos.novedad.activas > 0 && <span className="text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">{data.modulos.novedad.activas}</span>}
               </li>
               <li className="px-4 py-2.5 flex justify-between items-center">
-                <Link href="/transito" className="text-gray-700 hover:text-red-600">Revisar tránsito/generadas +48h</Link>
-                {(data.operacion.transito48h + data.operacion.generadas48h) > 0 && (
-                  <span className="text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
-                    {data.operacion.transito48h + data.operacion.generadas48h}
-                  </span>
-                )}
+                <Link href="/novedad?filter=2-intentos" className="text-gray-700 hover:text-red-600">Novedades con 2 intentos</Link>
+                {data.alertas.novedad2Intentos > 0 && <span className="text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">{data.alertas.novedad2Intentos}</span>}
+              </li>
+              <li className="px-4 py-2.5 flex justify-between items-center">
+                <Link href="/transito?tab=generadas" className="text-gray-700 hover:text-red-600">Revisar generadas +48h</Link>
+                {data.operacion.generadas48h > 0 && <span className="text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">{data.operacion.generadas48h}</span>}
               </li>
               <li className="px-4 py-2.5 flex justify-between items-center">
                 <Link href="#indemnizaciones" className="text-gray-700 hover:text-red-600">Preparar reclamos indemnización</Link>
@@ -827,7 +890,7 @@ export default function SupervisorIAPage() {
                 {data.modulos.reparto.enReparto > 0 && <span className="text-xs font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">{data.modulos.reparto.enReparto}</span>}
               </li>
               <li className="px-4 py-2.5 flex justify-between items-center">
-                <Link href="/reparto" className="text-gray-700 hover:text-amber-600">Priorizar reparto +48h</Link>
+                <Link href="/reparto?filter=critical" className="text-gray-700 hover:text-amber-600">Priorizar reparto +48h</Link>
                 {data.modulos.reparto.criticos48h > 0 && <span className="text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">{data.modulos.reparto.criticos48h}</span>}
               </li>
               <li className="px-4 py-2.5 flex justify-between items-center">

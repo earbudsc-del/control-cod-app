@@ -348,15 +348,23 @@ function RepartoCard({
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function RepartoPage() {
-  const trackingParam = useSearchParams().get('tracking')
-  const rowRefs       = useRef<Map<string, HTMLElement>>(new Map())
+  const searchParamsObj = useSearchParams()
+  const trackingParam   = searchParamsObj.get('tracking')
+  const rowRefs         = useRef<Map<string, HTMLElement>>(new Map())
 
   const [allOrders, setAllOrders]         = useState<Order[]>([])
   const [inTransitOrders, setInTransitOrders] = useState<Order[]>([])
   const [perf, setPerf]               = useState<RepartoPerfData | null>(null)
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
-  const [activeTab, setActiveTab]     = useState<Tab>('all')
+
+  const initRepartoTab = (): Tab => {
+    const f = searchParamsObj.get('filter')
+    if (f === 'critical') return 'critico'
+    if (f === 'risk')     return 'riesgo'
+    return 'all'
+  }
+  const [activeTab, setActiveTab]     = useState<Tab>(initRepartoTab)
   const [searchQuery, setSearchQuery] = useState('')
 
   const [actionMap, setActionMap]   = useState<Record<string, string>>({})

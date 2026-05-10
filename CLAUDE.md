@@ -4,6 +4,99 @@
 
 ---
 
+## SUPERVISOR IA — Fase 2: Acciones clickeables y query params (2026-05-10)
+
+### Qué se hizo
+
+Mejora de `/supervisor-ia` para que todas las métricas, alertas y recomendaciones sean accionables: cada card, alerta y recomendación navega directamente al módulo correspondiente con filtro aplicado.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/supervisor-ia/page.tsx` | **REESCRITO.** Cards KPI clickeables con `Link`. Alertas con botón de acción. Recomendaciones con botón estilizado por prioridad. Reporte del día con prioridades numeradas. Indemnizaciones con badge de prioridad, botón "Ver pedido" mejorado. `KpiCard` → `ClickableKpiCard`. `AlertaRow` añade botón por prioridad. `generarRecomendaciones` actualizado con links con query params. `generarReporte` ahora devuelve `{ resumen, prioridades[] }`. |
+| `src/app/(app)/transito/page.tsx` | **MODIFICADO.** Importa `useSearchParams`. `activeTab` se inicializa desde `?tab=generadas\|transito\|anuladas`. Default: `'generadas'`. |
+| `src/app/(app)/reparto/page.tsx` | **MODIFICADO.** `useSearchParams` ya existía. `activeTab` se inicializa desde `?filter=critical` → `'critico'` / `?filter=risk` → `'riesgo'`. Default: `'all'`. |
+| `src/app/(app)/novedad/page.tsx` | **MODIFICADO.** `useSearchParams` ya existía. `activeTab` se inicializa desde `?filter=2-intentos` → `'dos'`. Default: `'all'`. |
+| `src/app/(app)/carritos-abandonados/page.tsx` | **MODIFICADO.** Importa `useSearchParams`. `statusFilter` se inicializa desde `?status=pending\|recovered\|contacted\|no_answer\|discarded`. Default: `'all'`. |
+
+### Cards clickeables — mapping
+
+| Card | Href |
+|---|---|
+| Nuevos hoy | `/confirmacion` |
+| Confirmados hoy | `/confirmados` |
+| Entregados hoy | `/reparto` |
+| Carritos recuperados | `/carritos-abandonados?status=recovered` |
+| Novedades activas | `/novedad` |
+| Reparto crítico +48h | `/reparto?filter=critical` |
+| Tránsito crítico +48h | `/transito?tab=transito` |
+| Generadas críticas +48h | `/transito?tab=generadas` |
+| Fuera de cobertura | `/confirmacion` |
+
+### Alertas clickeables — mapping
+
+| Alerta | Link | Botón |
+|---|---|---|
+| Sin confirmar +24h | `/confirmacion` | "Ver casos" |
+| Reparto +48h | `/reparto?filter=critical` | "Ver casos" |
+| Tránsito +48h | `/transito?tab=transito` | "Ver casos" |
+| Generadas +48h | `/transito?tab=generadas` | "Ver casos" |
+| Novedad 2 intentos | `/novedad?filter=2-intentos` | "Resolver" |
+| Novedad +14 días | `/novedad` | "Ver casos" |
+| Novedad +7 días | `/novedad` | "Ver casos" |
+| Guías anuladas | `/transito?tab=anuladas` | "Ver anuladas" |
+| Posibles indemnizaciones | `#indemnizaciones` | "Ver casos" |
+| Fuera de cobertura | `/confirmacion` | "Ir al módulo" |
+| Carritos pendientes | `/carritos-abandonados?status=pending` | "Recuperar" |
+
+### Query params soportados
+
+| Módulo | Param | Valor → efecto |
+|---|---|---|
+| `/transito` | `?tab=` | `generadas` → tab Generadas / `transito` → tab En tránsito / `anuladas` → tab Anuladas |
+| `/reparto` | `?filter=` | `critical` → tab Críticos +48h / `risk` → tab 1-2 días |
+| `/novedad` | `?filter=` | `2-intentos` → tab 2 intentos |
+| `/carritos-abandonados` | `?status=` | `pending\|recovered\|contacted\|no_answer\|discarded` → filtro de estado |
+
+Query params inválidos o ausentes caen al estado default sin error.
+
+### Reporte del día — nuevo formato
+
+Ahora devuelve `{ resumen, prioridades[] }`. Las prioridades son una lista numerada ordenada por urgencia:
+1. Guías +48h reparto/generadas (crítico)
+2. Tránsito +48h (crítico)
+3. Novedades 2 intentos (acción)
+4. Sin confirmar +24h (acción)
+5. Carritos pendientes (recovery)
+
+### Indemnizaciones — mejoras
+
+- Badge de **prioridad** (`Alta` / `Media`) calculado por intentos + razón
+- Botón **"Ver pedido"** con icono, borde y hover (antes era solo texto)
+- Mobile: badges agrupados (prioridad + intentos) en la misma fila
+
+### Recomendaciones — mejoras
+
+- Botón de acción estilizado por prioridad (rojo/naranja/ámbar/gris)
+- Links usan query params: `?filter=critical`, `?tab=generadas`, `?filter=2-intentos`, `?status=pending`
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `admin` → ir a `/supervisor-ia`
+3. **Cards clickeables:** Click en "Reparto crítico +48h" → navega a `/reparto` con tab `+48h Crítico` activo
+4. **Alertas:** Click en "Ver casos" de "Generadas +48h" → navega a `/transito` con tab `Generadas` activo
+5. **Recomendaciones:** Click en botón rojo "Ver generadas críticas →" → `/transito?tab=generadas`
+6. **Carritos pendientes:** Click en "Recuperar" → `/carritos-abandonados` con filtro `Pendiente` activo
+7. **Novedad 2 intentos:** Click en "Resolver" → `/novedad` con tab `2 intentos` activo
+8. **Indemnizaciones:** Click "Ver N casos" → tabla expandida con badge Prioridad y botón "Ver pedido"
+9. **Reporte del día:** Si hay alertas críticas, ver lista numerada de prioridades
+10. Query params inválidos (`/transito?tab=xyz`) → carga con tab default sin error
+11. `npx tsc --noEmit` → sin errores
+
+---
+
 ## SUPERVISOR IA — Fase 1 (2026-05-10)
 
 ### Arquitectura general

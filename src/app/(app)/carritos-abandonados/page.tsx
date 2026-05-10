@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import {
   ShoppingCart, RefreshCw, Phone, MessageCircle,
   CheckCircle2, XCircle, Clock, Search, X, StickyNote,
@@ -168,6 +169,8 @@ function CartCoverageBadges({ cart }: { cart: AbandonedCart }) {
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function CarritosAbandonadosPage() {
+  const searchParamsObj = useSearchParams()
+
   const [carts,       setCarts]       = useState<AbandonedCart[]>([])
   const [stats,       setStats]       = useState<CartStats | null>(null)
   const [total,       setTotal]       = useState(0)
@@ -177,7 +180,17 @@ export default function CarritosAbandonadosPage() {
   const [draftScopeError, setDraftScopeError] = useState<string | null>(null)
 
   const [search,      setSearch]      = useState('')
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+
+  const initCartStatus = (): StatusFilter => {
+    const s = searchParamsObj.get('status')
+    if (s === 'pending')   return 'pending'
+    if (s === 'recovered') return 'recovered'
+    if (s === 'contacted') return 'contacted'
+    if (s === 'no_answer') return 'no_answer'
+    if (s === 'discarded') return 'discarded'
+    return 'all'
+  }
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(initCartStatus)
   const [dateFilter,  setDateFilter]  = useState<DateFilter>('all')
   const [page,        setPage]        = useState(1)
 

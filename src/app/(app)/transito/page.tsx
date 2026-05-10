@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import { Spinner } from '@/components/ui/spinner'
 import { formatEventDate } from '@/lib/utils'
 import type { Order } from '@/types'
@@ -75,6 +76,8 @@ function sortedByStale(orders: Order[]): Order[] {
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function TransitoPage() {
+  const searchParams = useSearchParams()
+
   // Tres arrays separados por etapa
   const [generatedOrders,  setGeneratedOrders]  = useState<Order[]>([])
   const [transitOrders,    setTransitOrders]    = useState<Order[]>([])
@@ -84,7 +87,14 @@ export default function TransitoPage() {
   const [lastRefresh,  setLastRefresh]  = useState<Date>(new Date())
   const [currentPage,  setCurrentPage]  = useState(1)
   const [search,       setSearch]       = useState('')
-  const [activeTab,    setActiveTab]    = useState<TabType>('generadas')
+
+  const initTab = (): TabType => {
+    const t = searchParams.get('tab')
+    if (t === 'transito') return 'transito'
+    if (t === 'anuladas')  return 'anuladas'
+    return 'generadas'
+  }
+  const [activeTab,    setActiveTab]    = useState<TabType>(initTab)
   const [filter,       setFilter]       = useState<FilterCategory>('all')
 
   // Estados para acciones individuales por fila

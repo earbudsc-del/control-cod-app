@@ -474,14 +474,21 @@ function EntregadaCard({ order, delivered_at }: { order: Order; delivered_at: st
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function NovedadPage() {
-  const trackingParam = useSearchParams().get('tracking')
-  const rowRefs       = useRef<Map<string, HTMLTableRowElement>>(new Map())
+  const searchParamsObj = useSearchParams()
+  const trackingParam   = searchParamsObj.get('tracking')
+  const rowRefs         = useRef<Map<string, HTMLTableRowElement>>(new Map())
 
   const [allOrders, setAllOrders]     = useState<Order[]>([])
   const [perf, setPerf]               = useState<NoveltyPerfData | null>(null)
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
-  const [activeTab, setActiveTab]     = useState<Tab>('all')
+
+  const initNovedadTab = (): Tab => {
+    const f = searchParamsObj.get('filter')
+    if (f === '2-intentos') return 'dos'
+    return 'all'
+  }
+  const [activeTab, setActiveTab]     = useState<Tab>(initNovedadTab)
   const [searchQuery, setSearchQuery] = useState('')
 
   const [actionMap, setActionMap]   = useState<Record<string, string>>({})
