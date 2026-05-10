@@ -14,6 +14,7 @@ import {
   transitSinceMs, horasEnTransito, transitCriticality,
   sinMovimientoLabel, TRANSIT_STYLES,
 } from '@/lib/transit-helpers'
+import { isCancelledGuide } from '@/lib/order-status-helpers'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
@@ -25,16 +26,14 @@ interface OrdersResponse {
 type TabType        = 'generadas' | 'transito' | 'anuladas'
 type FilterCategory = 'all' | 'critico' | 'riesgo' | 'normal'
 
-// ── Helpers de clasificación ──────────────────────────────────────────────────
+// ── Helpers de clasificación (alias locales de helpers compartidos) ────────────
 
 function isGenerada(o: Order): boolean {
   return (o.raw_status ?? '').toLowerCase().includes('generada')
 }
 
-function isAnuladaRaw(o: Order): boolean {
-  const r = (o.raw_status ?? '').toLowerCase()
-  return r.includes('anulad') || r.includes('cancelad')
-}
+// isAnuladaRaw: alias al helper compartido para consistencia entre módulos
+const isAnuladaRaw = isCancelledGuide
 
 // ── Helpers de UI ─────────────────────────────────────────────────────────────
 

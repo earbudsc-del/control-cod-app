@@ -1,12 +1,13 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { ArrowRight, Package, Truck, Bike } from 'lucide-react'
+import { ArrowRight, Package, Truck, Bike, Ban } from 'lucide-react'
 
 interface FlujoStats {
   generadas:  number
   in_transit: number
   en_reparto: number
+  anuladas:   number
 }
 
 export function FlujoKpis() {
@@ -28,11 +29,19 @@ export function FlujoKpis() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3">
-      <div className="flex items-center gap-1.5 mb-2.5">
-        <Truck className="w-3.5 h-3.5 text-gray-400" />
-        <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">
-          Pipeline logístico
-        </span>
+      <div className="flex items-center justify-between gap-1.5 mb-2.5">
+        <div className="flex items-center gap-1.5">
+          <Truck className="w-3.5 h-3.5 text-gray-400" />
+          <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">
+            Pipeline logístico
+          </span>
+        </div>
+        {stats.anuladas > 0 && (
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+            <Ban className="w-3 h-3" />
+            {stats.anuladas} anuladas
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">

@@ -26,7 +26,8 @@
 | Nav Shell | `components/layout/nav-shell.tsx` | Client Component: topbar hamburger (móvil) + overlay + estado open/close |
 | Duplicados | webhook + `/orders/[id]` | Detecta por customer_phone en ventana 7 días |
 | Parser EFI | `src/lib/tracking/efi-parser.ts` | Basado en divs `tracking-item/content`, fallback a tablas |
-| Pipeline mini KPI | `components/shared/flujo-kpis.tsx` | Generadas → Tránsito → En reparto (en /novedad y /reparto) |
+| Pipeline mini KPI | `components/shared/flujo-kpis.tsx` | Generadas activas → Tránsito activo → En reparto + chip Anuladas (en /novedad y /reparto) |
+| Helpers de estado | `src/lib/order-status-helpers.ts` | `isCancelledGuide` / `isGeneratedActive` / `isTransitActive` — lógica compartida entre /transito, /novedad, /reparto y flujo-stats |
 | Alertas críticas | `src/lib/alert-helpers.ts` + `components/shared/alert-badges.tsx` | Duplicado + Fuera de cobertura en /confirmacion y /confirmados |
 
 ### APIs internas relevantes
@@ -37,7 +38,7 @@
 | `POST /api/admin/recover-shopify-orders` | **Solo admin.** Recupera pedidos faltantes por rango de fecha RD. Body: `{ from: "YYYY-MM-DD", to: "YYYY-MM-DD", order_numbers?: ["#8522", ...] }`. Compara por `shopify_order_id`, inserta faltantes con `source='shopify_webhook'` + task de confirmación. Requiere `SHOPIFY_SHOP_DOMAIN` + `SHOPIFY_ADMIN_ACCESS_TOKEN`. |
 | `POST /api/admin/recover-orders` | **Solo admin.** Versión directa para recuperación operativa. Body opcional: `{ from: "YYYY-MM-DD", to: "YYYY-MM-DD" }` (default: 2026-05-03 completo). Llama a Shopify API 2026-04, inserta faltantes idempotentemente, crea tasks de confirmación. Devuelve `{ shopify_found, already_in_db, inserted, errors_count, errors }`. |
 | `GET /api/confirmados` | Pedidos `confirmation_status='confirmed'`, filtros: `?filter=hoy\|ayer`, `?from=&to=` |
-| `GET /api/flujo-stats` | Conteos pipeline: `generadas` (raw_status ilike 'generada'), `in_transit`, `en_reparto` |
+| `GET /api/flujo-stats` | Conteos pipeline corregidos: `generadas` (activas, sin anuladas), `in_transit` (sin generadas ni anuladas), `en_reparto` (sin anuladas), `anuladas` (count separado) |
 | `GET /api/dashboard` | Stats generales + `confirmed_hoy` + `confirmed_ayer` |
 | `GET /api/novedad/performance` | Métricas agente novedad: trabajados, reprogramados, tasaRecuperación, **recuperadasHoy/Ayer** |
 | `GET /api/reparto/performance` | Métricas agente reparto: entregados, contactados, críticos activos, **entregadosAyer** |
@@ -49,6 +50,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Fix pipeline logístico /novedad y /reparto: queries corregidas en /api/flujo-stats para excluir anuladas/canceladas de Generadas e In_transit. Helper compartido `order-status-helpers.ts` con `isCancelledGuide`/`isGeneratedActive`/`isTransitActive`. FlujoKpis muestra chip "N anuladas". /transito usa `isCancelledGuide` del helper compartido.** | 2026-05-10 | `api/flujo-stats/route.ts`, `components/shared/flujo-kpis.tsx`, `lib/order-status-helpers.ts` (nuevo), `transito/page.tsx` |
 | **Refactor /transito — nueva arquitectura 3 etapas: tabs Generadas / En tránsito / Anuladas. Separación client-side por raw_status. Alertas y mensajes de escalamiento diferenciados por etapa. Botón "Anular" manual (admin/novelty_agent). Endpoint mark-anulada. API excluye anuladas/canceladas del query in_transit.** | 2026-05-09 | `transito/page.tsx` (rewrite), `api/orders/[id]/mark-anulada/route.ts` (nuevo), `api/orders/route.ts` |
 | **Fix definitivo /transito anuladas (2ª ronda): parser fallback body-text para "Estado global", cron con 2 queries separadas (in_transit+otros), botón "Actualizar tracking" por fila en /transito, silent refetch, doble-guarda client-side, endpoint diagnóstico.** | 2026-05-09 | `efi-parser.ts`, `api/tracking/auto/route.ts`, `transito/page.tsx`, `api/debug/transit-orders/route.ts` (nuevo) |
 | **Fix /transito anuladas (1ª ronda): parser detecta "Estado global: Anulada" y mapea a `returned`. Tarjetas Crítico/Riesgo/Normal/Anuladas son clickeables (filtran tabla). Anuladas excluidas del conteo activo. Fetch paralelo in_transit + rawStatus=anulada. Badge "Anulada" en tabla.** | 2026-05-09 | `efi-parser.ts`, `api/orders/route.ts`, `transito/page.tsx` |
@@ -1618,6 +1620,61 @@ CREATE INDEX idx_profiles_last_seen ON profiles(last_seen_at);
 - Límites de día en zona horaria RD: usar `Intl.DateTimeFormat` con `timeZone: 'America/Santo_Domingo'` — Santo Domingo es UTC-4 sin DST, medianoche RD = 04:00 UTC
 - Componentes compartidos van en `src/components/shared/` — no duplicar lógica entre páginas
 - `FlujoKpis` es el patrón de referencia para nuevos componentes de stats reutilizables
+
+---
+
+### Pipeline logístico — Fix conteos /novedad y /reparto (2026-05-10)
+
+**Problema:** El pipeline en `/novedad` y `/reparto` mostraba conteos incorrectos:
+- Generadas: 19 (incluía guías viejas anuladas)
+- En tránsito: 36 (incluía guías "Generada" que no son tránsito real)
+- Realidad operativa Effi: ~1 generada activa, ~22 en tránsito real
+
+**Causa raíz — `/api/flujo-stats`:**
+```typescript
+// ANTES (incorrecto):
+.ilike('raw_status', 'generada')          // sin wildcards, sin excluir anuladas
+.eq('normalized_status', 'in_transit')    // incluía generadas + anuladas con in_transit
+```
+
+**Fix — nuevas queries en `/api/flujo-stats`:**
+
+| Métrica | Lógica nueva |
+|---|---|
+| **Generadas activas** | `tracking IS NOT NULL` + `raw_status ilike '%generada%'` + NOT anulad/cancelad + normalized_status NOT IN (returned,delivered,novedad,en_reparto) |
+| **En tránsito activo** | `tracking IS NOT NULL` + `normalized_status='in_transit'` + NOT generada + NOT anulad + NOT cancelad |
+| **En reparto** | `tracking IS NOT NULL` + `normalized_status='en_reparto'` + NOT anulad + NOT cancelad |
+| **Anuladas** (nuevo) | `tracking IS NOT NULL` + `raw_status ilike '%anulad%'` + `raw_status ilike '%cancelad%'` (sum de 2 queries) |
+
+**Helper compartido — `src/lib/order-status-helpers.ts` (NUEVO):**
+```typescript
+isCancelledGuide(o)   // raw_status contiene 'anulad' o 'cancelad'
+isGeneratedActive(o)  // tracking + raw_status 'generada' + no cancelada + no terminal
+isTransitActive(o)    // tracking + normalized='in_transit' + no generada + no cancelada
+```
+Usado en: `/transito/page.tsx` (via alias `isAnuladaRaw = isCancelledGuide`), disponible para `/novedad` y `/reparto`.
+
+**FlujoKpis — cambios:**
+- `FlujoStats` interface agrega campo `anuladas: number`
+- Chip "N anuladas" aparece en el header del pipeline si `stats.anuladas > 0`
+- Los 3 contadores principales (Generadas, En tránsito, En reparto) siguen el mismo diseño visual
+
+**Cómo probar:**
+1. `npm run dev` → login → `/novedad`
+2. Verificar Pipeline logístico: Generadas ≈ 1, En tránsito ≈ 22, no ~19/36
+3. Si hay anuladas → chip gris "N anuladas" aparece arriba a la derecha del pipeline
+4. Mismos conteos en `/reparto` (mismo componente `<FlujoKpis />`)
+5. `/transito` no se ve afectado (tiene su propia lógica de tabs client-side)
+6. Comparar En tránsito del pipeline con el tab "En tránsito" de `/transito` → deben ser similares
+
+**Archivos modificados:**
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/flujo-stats/route.ts` | Queries corregidas: 5 queries paralelas (generadas, in_transit, en_reparto, anuladas×2). Excluye anuladas/canceladas de activos. Retorna campo `anuladas`. |
+| `src/components/shared/flujo-kpis.tsx` | Interface agrega `anuladas`. Chip informativo "N anuladas" si > 0. Import `Ban` de lucide. |
+| `src/lib/order-status-helpers.ts` | **NUEVO.** 3 helpers compartidos: `isCancelledGuide`, `isGeneratedActive`, `isTransitActive`. |
+| `src/app/(app)/transito/page.tsx` | Import `isCancelledGuide`. Alias local `isAnuladaRaw = isCancelledGuide` para consistencia. |
 
 ---
 
