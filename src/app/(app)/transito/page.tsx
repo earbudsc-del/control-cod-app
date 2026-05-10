@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { Spinner } from '@/components/ui/spinner'
 import { formatEventDate } from '@/lib/utils'
@@ -66,7 +66,7 @@ function sortedByStale(orders: Order[]): Order[] {
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function TransitoPage() {
-  const [orders, setOrders]           = useState<Order[]>([])     // in_transit activos
+  const [orders, setOrders]           = useState<Order[]>([])     // in_transit activos (excluye returned)
   const [anuladas, setAnuladas]       = useState<Order[]>([])     // anuladas en EFI
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
@@ -74,56 +74,108 @@ export default function TransitoPage() {
   const [search, setSearch]           = useState('')
   const [filter, setFilter]           = useState<FilterCategory>('all')
 
+  // ── Estado para actualización individual por fila ─────────────────────────
+  const [updatingId, setUpdatingId]   = useState<string | null>(null)
+  const [updateToast, setUpdateToast] = useState<{ msg: string; type: 'ok' | 'err' } | null>(null)
+  const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const PAGE_SIZE = 50
 
-  const fetchData = useCallback(async () => {
-    setLoading(true)
+  // ── fetchData con modo silencioso (no muestra spinner) ────────────────────
+  // silent=true: refresca datos sin poner loading=true (evita parpadeo tras
+  // actualización individual de una guía).
+  const fetchData = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const [activeRes, anuladasRes] = await Promise.all([
         fetch('/api/orders?status=in_transit&limit=200&page=1').then(r => r.json()) as Promise<OrdersResponse>,
-        fetch('/api/orders?rawStatus=anulada&limit=100&page=1').then(r => r.json()) as Promise<OrdersResponse>,
+        // También traemos returned con raw_status~anulada (ya reclasificadas por el cron)
+        fetch('/api/orders?rawStatus=anulada&limit=200&page=1').then(r => r.json()) as Promise<OrdersResponse>,
       ])
-      const active    = activeRes.data   ?? []
-      const cancelled = anuladasRes.data ?? []
-      setOrders(active)
-      setAnuladas(cancelled)
+      const activeRaw  = (activeRes.data  ?? []) as Order[]
+      const cancelled  = (anuladasRes.data ?? []) as Order[]
+
+      // Doble-guarda client-side: cualquier guía en_transit con raw_status que
+      // contenga 'anulad' la movemos a anuladas (estado inconsistente transitorio).
+      const trueActive: Order[]   = []
+      const extraAnuladas: Order[] = []
+      for (const o of activeRaw) {
+        if (o.raw_status?.toLowerCase().includes('anulad')) {
+          extraAnuladas.push(o)
+        } else {
+          trueActive.push(o)
+        }
+      }
+
+      // Merge anuladas sin duplicados (por id)
+      const allAnuladasMap = new Map<string, Order>()
+      for (const o of [...cancelled, ...extraAnuladas]) {
+        allAnuladasMap.set(o.id, o)
+      }
+
+      setOrders(trueActive)
+      setAnuladas([...allAnuladasMap.values()])
       setLastRefresh(new Date())
 
-      // ── Debug: validar stuckSince para cada guía en tránsito ──
-      for (const o of active) {
-        const horas = horasEnTransito(o)
-        const crit  = transitCriticality(o)
-        console.log('[transito-debug]', {
-          tracking_number:      o.tracking_number,
-          raw_status:           o.raw_status,
-          normalized_status:    o.normalized_status,
-          status_since:         o.status_since,
-          shipment_created_at:  o.shipment_created_at,
-          last_tracking_update: o.last_tracking_update,
-          shopify_created_at:   o.shopify_created_at,
-          created_at:           o.created_at,
-          stuckSince_used:      o.status_since ?? o.shipment_created_at ?? o.shopify_created_at ?? o.created_at,
-          horas_calculadas:     Math.round(horas * 10) / 10,
-          categoria:            crit,
-        })
-      }
-      if (cancelled.length > 0) {
-        console.log('[transito-debug] anuladas:', cancelled.map(o => ({
-          tracking: o.tracking_number,
-          raw_status: o.raw_status,
-          normalized_status: o.normalized_status,
-        })))
+      // ── Debug en consola ──
+      if (process.env.NODE_ENV !== 'production') {
+        for (const o of trueActive) {
+          console.log('[transito-debug]', {
+            tracking_number:  o.tracking_number,
+            raw_status:       o.raw_status,
+            normalized_status: o.normalized_status,
+            status_since:     o.status_since,
+            horas:            Math.round(horasEnTransito(o) * 10) / 10,
+            categoria:        transitCriticality(o),
+          })
+        }
       }
     } catch (err) {
       console.error('[transito/fetchData]', err)
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [])
 
+  // ── Toast helper ─────────────────────────────────────────────────────────
+  function showToast(msg: string, type: 'ok' | 'err') {
+    if (toastRef.current) clearTimeout(toastRef.current)
+    setUpdateToast({ msg, type })
+    toastRef.current = setTimeout(() => setUpdateToast(null), 4500)
+  }
+
+  // ── Actualizar tracking de una guía individual ────────────────────────────
+  async function handleRefreshTracking(order: Order) {
+    if (updatingId) return                    // evitar concurrencia
+    setUpdatingId(order.id)
+    try {
+      const res  = await fetch(`/api/orders/${order.id}/tracking`, { method: 'POST' })
+      const data = await res.json() as { success?: boolean; normalized_status?: string; error?: string }
+
+      if (!res.ok || !data.success) {
+        showToast(data.error ?? 'Error al actualizar tracking', 'err')
+        return
+      }
+
+      // Refetch silencioso para actualizar estado local sin parpadeo de tabla
+      await fetchData(true)
+
+      const ns = data.normalized_status
+      if (ns === 'returned' || ns === 'cancelled') {
+        showToast('✓ Guía reclasificada — ya no está en tránsito activo', 'ok')
+      } else {
+        showToast(`✓ Tracking actualizado · Estado: ${ns ?? 'actualizado'}`, 'ok')
+      }
+    } catch {
+      showToast('Error de conexión al actualizar', 'err')
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
   useEffect(() => {
-    fetchData()
-    const interval = setInterval(fetchData, 5 * 60 * 1000)
+    fetchData(false)
+    const interval = setInterval(() => fetchData(false), 5 * 60 * 1000)
     return () => clearInterval(interval)
   }, [fetchData])
 
@@ -187,6 +239,16 @@ export default function TransitoPage() {
   return (
     <div className="space-y-4">
 
+      {/* ── Toast de actualización individual ── */}
+      {updateToast && (
+        <div className={`fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-3
+                         rounded-xl shadow-lg text-sm font-semibold text-white
+                         animate-in fade-in slide-in-from-top-2 duration-200
+                         ${updateToast.type === 'ok' ? 'bg-green-700' : 'bg-red-600'}`}>
+          {updateToast.type === 'ok' ? '✓' : '✗'} {updateToast.msg}
+        </div>
+      )}
+
       {/* ── Banner ── */}
       <div className="relative overflow-hidden rounded-2xl
                       bg-gradient-to-r from-blue-600 to-indigo-600
@@ -232,7 +294,7 @@ export default function TransitoPage() {
               {lastRefresh.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' })}
             </p>
             <button
-              onClick={fetchData}
+              onClick={() => fetchData(false)}
               disabled={loading}
               className="flex items-center gap-2 bg-white/20 hover:bg-white/30 text-white
                          text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
@@ -599,16 +661,34 @@ export default function TransitoPage() {
                         )}
                       </td>
 
-                      {/* Ver detalle */}
+                      {/* Acciones: Ver + Actualizar tracking */}
                       <td className="px-3 py-2.5">
-                        <Link
-                          href={`/orders/${order.id}`}
-                          className="inline-flex items-center gap-1 text-xs font-medium
-                                     text-blue-600 hover:text-blue-800 whitespace-nowrap hover:underline"
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                          Ver
-                        </Link>
+                        <div className="flex flex-col gap-1.5 items-start">
+                          <Link
+                            href={`/orders/${order.id}`}
+                            className="inline-flex items-center gap-1 text-xs font-medium
+                                       text-blue-600 hover:text-blue-800 whitespace-nowrap hover:underline"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            Ver
+                          </Link>
+                          {!isAnulada && (
+                            <button
+                              onClick={() => handleRefreshTracking(order)}
+                              disabled={updatingId !== null}
+                              title="Consultar EFI y actualizar estado ahora"
+                              className="inline-flex items-center gap-1 text-xs font-medium
+                                         text-indigo-600 hover:text-indigo-800 whitespace-nowrap
+                                         disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              {updatingId === order.id
+                                ? <Spinner className="w-3 h-3" />
+                                : <RefreshCw className="w-3 h-3" />
+                              }
+                              {updatingId === order.id ? 'Actualizando…' : 'Actualizar'}
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   )

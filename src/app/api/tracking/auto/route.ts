@@ -10,6 +10,9 @@ const FINAL_STATUSES = ['delivered', 'returned', 'cancelled']
 const BATCH_SIZE     = 5
 const BATCH_DELAY_MS = 1_500
 
+// Campos mínimos necesarios para el loop de tracking
+const SELECT = 'id, tracking_number, normalized_status, last_tracking_update, store_id'
+
 type SB = Awaited<ReturnType<typeof createServiceClient>>
 
 function sleep(ms: number) {
@@ -17,22 +20,46 @@ function sleep(ms: number) {
 }
 
 // ── Lógica de tracking compartida entre GET (Vercel Cron) y POST (script local) ──
+//
+// Estrategia de dos queries:
+//   1. Hasta 80 pedidos in_transit (prioridad — son los que necesitan reclasificación)
+//   2. Hasta 80 pedidos en otros estados no finalizados (en_reparto, novedad, pending…)
+//
+// Esto garantiza que las guías en tránsito siempre se re-sincronizan, incluso
+// cuando hay >200 pedidos no finalizados en total (en ese caso, con una sola query
+// de 200 algunos in_transit quedaban fuera del lote).
 
 async function runTracking(supabase: SB, logPrefix: string): Promise<NextResponse> {
-  const { data: orders, error: fetchErr } = await supabase
-    .from('orders')
-    .select('id, tracking_number, normalized_status, last_tracking_update, store_id')
-    .not('tracking_number', 'is', null)
-    .not('normalized_status', 'in', `(${FINAL_STATUSES.join(',')})`)
-    .order('last_tracking_update', { ascending: true, nullsFirst: true })
-    .limit(200)
+  const [transitRes, otherRes] = await Promise.all([
+    supabase
+      .from('orders')
+      .select(SELECT)
+      .not('tracking_number', 'is', null)
+      .eq('normalized_status', 'in_transit')
+      .order('last_tracking_update', { ascending: true, nullsFirst: true })
+      .limit(80),
+    supabase
+      .from('orders')
+      .select(SELECT)
+      .not('tracking_number', 'is', null)
+      .not('normalized_status', 'in', `(in_transit,${FINAL_STATUSES.join(',')})`)
+      .order('last_tracking_update', { ascending: true, nullsFirst: true })
+      .limit(80),
+  ])
 
-  if (fetchErr) {
-    console.error(`${logPrefix} error fetching orders:`, fetchErr)
+  if (transitRes.error) {
+    console.error(`${logPrefix} error fetching in_transit orders:`, transitRes.error)
+    return NextResponse.json({ error: 'Error al obtener pedidos' }, { status: 500 })
+  }
+  if (otherRes.error) {
+    console.error(`${logPrefix} error fetching other orders:`, otherRes.error)
     return NextResponse.json({ error: 'Error al obtener pedidos' }, { status: 500 })
   }
 
-  if (!orders || orders.length === 0) {
+  const orders = [...(transitRes.data ?? []), ...(otherRes.data ?? [])]
+  console.log(`${logPrefix} in_transit=${transitRes.data?.length ?? 0} other=${otherRes.data?.length ?? 0} total=${orders.length}`)
+
+  if (orders.length === 0) {
     console.log(`${logPrefix} processed=0 updated=0 failed=0`)
     return NextResponse.json({ processed: 0, updated: 0, failed: 0 })
   }

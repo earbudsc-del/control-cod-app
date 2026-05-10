@@ -49,7 +49,8 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
-| **Fix /transito anuladas: parser detecta "Estado global: Anulada" y mapea a `returned`. Tarjetas Crítico/Riesgo/Normal/Anuladas son clickeables (filtran tabla). Anuladas excluidas del conteo activo. Fetch paralelo in_transit + rawStatus=anulada. Badge "Anulada" en tabla.** | 2026-05-09 | `efi-parser.ts`, `api/orders/route.ts`, `transito/page.tsx` |
+| **Fix definitivo /transito anuladas (2ª ronda): parser fallback body-text para "Estado global", cron con 2 queries separadas (in_transit+otros), botón "Actualizar tracking" por fila en /transito, silent refetch, doble-guarda client-side, endpoint diagnóstico.** | 2026-05-09 | `efi-parser.ts`, `api/tracking/auto/route.ts`, `transito/page.tsx`, `api/debug/transit-orders/route.ts` (nuevo) |
+| **Fix /transito anuladas (1ª ronda): parser detecta "Estado global: Anulada" y mapea a `returned`. Tarjetas Crítico/Riesgo/Normal/Anuladas son clickeables (filtran tabla). Anuladas excluidas del conteo activo. Fetch paralelo in_transit + rawStatus=anulada. Badge "Anulada" en tabla.** | 2026-05-09 | `efi-parser.ts`, `api/orders/route.ts`, `transito/page.tsx` |
 | **Fix crítico /transito stuckSince: `transitSinceMs` corregido para NO usar `last_tracking_update` (lo actualiza el cron cada 5 min). Nueva prioridad: status_since → shipment_created_at → shopify_created_at → created_at. Buscador funcional en /transito. Fallback ciudad "Ubicación no registrada". Logs debug server-side.** | 2026-05-09 | `transit-helpers.ts`, `transito/page.tsx` |
 | **novelty_agent: acceso a /reparto añadido (sidebar). raw_status visible en tabla desktop + mobile card de /reparto y /transito. Copy operativo de escalamiento con Effi/transportadora en info header y notas de ambas páginas. Alertas +24h y +48h en /transito.** | 2026-05-09 | `sidebar.tsx`, `reparto/page.tsx`, `transito/page.tsx` |
 | **Simplificación UX /confirmacion: tab "Nuevos" removido, tarjeta "Nuevos hoy" como KPI visual puro (sin navegación), `getLogisticsBadge` con `in_transit` explícito, 4 tabs operativos: Pedidos/Reintentar/Confirmados/Despachados** | 2026-05-09 | `confirmacion/page.tsx` |
@@ -311,7 +312,131 @@ AppLayout (Server Component — layout.tsx)
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
 
-### /transito — Anuladas + Tarjetas clickeables (2026-05-09) ← ÚLTIMO CAMBIO
+### /transito — Fix definitivo anuladas (2026-05-09) ← ÚLTIMO CAMBIO
+
+**Síntoma en producción:** Total activo 36 · Críticos +48h 36 · Anuladas 0. En Effi, ~14 de esas 36 tienen "Estado global: Anulada" y solo ~22 son activas reales.
+
+**Causa raíz (triple):**
+
+1. **Parser no detecta "Estado global" en todas las estructuras HTML de EFI.**
+   `findLabelInHTML` falla cuando la etiqueta y el valor están en text-nodes sueltos o anidados de forma imprevista. Si el parser no encontraba "Estado global: Anulada", guardaba `raw_status='Generada'` + `normalized_status='in_transit'` → la guía seguía como crítica activa indefinidamente.
+
+2. **El cron perdía guías in_transit cuando hay >200 pedidos no finalizados en total.**
+   La query original era `.not(normalized_status IN final) ORDER BY last_tracking_update ASC LIMIT 200`. Si en DB había 200+ pedidos en otros estados (en_reparto, novedad, pending), los in_transit quedaban fuera del lote de 200 y no se procesaban en ese ciclo.
+
+3. **El fetch secundario en /transito solo capturaba guías ya con `raw_status='Anulada'`.**
+   Guías que aún tenían `raw_status='Generada'` pero `normalized_status='in_transit'` (estado inconsistente transitorio) no aparecían en ningún fetch como anuladas.
+
+**Fixes aplicados:**
+
+**Fix A — `efi-parser.ts` (paso 7b):** Fallback de texto plano del body.
+Después de `findLabelInHTML`, si `estado_global` sigue null, se ejecuta un regex directo sobre `lowerBody`:
+```typescript
+const egMatch = /estado\s+(?:global|de\s+la\s+gu[íi]a)\s*:?\s*/i.exec(lowerBody)
+if (egMatch) {
+  const after  = bodyText.slice(egMatch.index + egMatch[0].length).trimStart()
+  const rawVal = after.split(/\s+/).slice(0, 2).join(' ').trim().slice(0, 40)
+  // si rawVal contiene 'anulad' → override estado_actual + normalized_status='returned'
+}
+```
+Esto captura el valor aunque EFI cambie su estructura HTML.
+
+**Fix B — `api/tracking/auto/route.ts`:** Dos queries separadas en el cron.
+```
+Query 1: normalized_status='in_transit' → LIMIT 80 (siempre se procesan todos)
+Query 2: otros estados no finales       → LIMIT 80
+Total máximo: 160 guías por ciclo
+```
+Con 36 in_transit, todas se procesan en cada ciclo independientemente de cuántos pedidos haya en otros estados.
+
+**Fix C — `transito/page.tsx`:** Botón "Actualizar tracking" + doble-guarda client-side.
+- Botón "Actualizar" por fila (solo activas, no anuladas) → llama `POST /api/orders/[id]/tracking`
+- Silent refetch tras éxito (no parpadeo de tabla)
+- Toast flotante: éxito verde / error rojo (auto-dismiss 4.5s)
+- Doble-guarda client-side: si `activeRes.data` contiene guías con `raw_status~anulada`, las mueve al array anuladas aunque `normalized_status` sea todavía `in_transit`
+- Fetch secundario ampliado a `limit=200`
+
+**Endpoint diagnóstico:** `GET /api/debug/transit-orders`
+- Sin params: devuelve todos los in_transit + returned-anuladas recientes
+- `?tracking_numbers=9000539795,9000540492`: inspecciona guías específicas
+- Devuelve: `tracking_number`, `raw_status`, `normalized_status`, `status_since`, `last_tracking_update`, `horas_en_transito`, `tracking_events`, `diagnostico`
+
+**Cómo funciona el flujo completo después del fix:**
+
+```
+EFI HTML (scraping por cron o botón manual)
+  ↓
+parseEFITracking()
+  ↓ paso 7: findLabelInHTML('Estado global')
+  ↓ paso 7b: fallback regex en lowerBody [NUEVO]
+  ↓ si 'anulad' en estadoGlobal:
+      estado_actual = 'Anulada'
+      normalized_status = 'returned'
+  ↓
+update-order.ts → DB:
+  raw_status = 'Anulada'
+  normalized_status = 'returned'
+  last_tracking_update = now()
+  ↓
+/transito fetchData():
+  fetch1: status=in_transit → guía YA NO aparece (es returned)
+  fetch2: rawStatus=anulada → guía SÍ aparece (raw_status='Anulada')
+  ↓
+UI: guía sale de Crítico → entra en tarjeta Anuladas
+```
+
+**Cómo revalidar una guía manualmente:**
+
+1. Ir a `/transito`
+2. Buscar la guía por número (ej. `9000539795`)
+3. Hacer clic en "Actualizar" en la fila correspondiente
+4. Observar spinner en el botón y esperar (1–5s según EFI)
+5. Si EFI detecta "Estado global: Anulada" → toast verde "Guía reclasificada"
+6. La tabla se refresca silenciosamente: la guía desaparece de activos y suma 1 en Anuladas
+
+**Cómo trata el cron guías viejas in_transit:**
+- El cron prioriza hasta 80 guías `in_transit` en cada ciclo (query separada)
+- Las guías más antiguas (`last_tracking_update ASC NULLS FIRST`) van primero
+- Con 36 guías en_transit (< 80), todas se procesan en cada ciclo de 5 min
+- Al detectar `normalized_status='returned'` → FINAL_STATUSES incluye 'returned' → el cron deja de re-sincronizar esa guía (correcto)
+- El parser loguea en Vercel: `[efi-parser] guia=X estado_global="Anulada" normalized="returned"` para verificar
+
+**Cómo probar con 9000539795:**
+1. `npm run dev` en `control-cod-app/`
+2. Login → ir a `/transito`
+3. Buscar `9000539795` → aparece como "Crítico +48h" (estado actual en DB)
+4. Click "Actualizar" en la fila → esperar respuesta EFI
+5. Si EFI muestra "Estado global: Anulada": toast verde, la guía desaparece de activos
+6. Click en tarjeta "Anuladas" → 9000539795 aparece con badge "Anulada"
+7. Total activo debe bajar; Crítico -1 o más
+
+**Cómo probar con 9000546686 (guía activa real):**
+1. Buscar `9000546686` → debe seguir apareciendo como Crítico +48h
+2. Click "Actualizar" → EFI debe devolver estado activo (no anulada)
+3. La guía permanece en activos con su criticidad correcta
+
+**Diagnóstico DB con endpoint:**
+```
+GET /api/debug/transit-orders?tracking_numbers=9000539795,9000540492,9000541283,9000543695,9000543696
+```
+Interpretar campo `diagnostico`:
+- `OK — ya reclasificada como Anulada` → el fix ya actuó
+- `PENDIENTE — cron no detectó Estado global aún` → usar botón "Actualizar" manualmente
+- `NUNCA SINCRONIZADA — sin last_tracking_update` → el cron nunca alcanzó esta guía
+- `INCONSISTENTE — raw_status anulada pero normalized=in_transit` → estado a punto de corregirse
+
+**Archivos modificados:**
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/tracking/efi-parser.ts` | Paso 7b: fallback regex sobre texto plano del body. Log diagnóstico en Vercel cuando se detecta estado_global. |
+| `src/app/api/tracking/auto/route.ts` | Dos queries separadas: 80 in_transit + 80 otros estados. Garantiza que todos los in_transit se procesan aunque haya >200 no finalizados en total. |
+| `src/app/(app)/transito/page.tsx` | Botón "Actualizar" por fila + `handleRefreshTracking`. Toast flotante. Silent refetch (`fetchData(true)`). Doble-guarda client-side (in_transit con raw_status~anulada → array anuladas). Fetch secundario ampliado a 200. |
+| `src/app/api/debug/transit-orders/route.ts` | NUEVO — endpoint de diagnóstico con campos completos y campo `diagnostico` para cada guía. |
+
+---
+
+### /transito — Anuladas + Tarjetas clickeables (2026-05-09)
 
 **Problema:** Después de corregir `stuckSince`, aparecían 36 "Críticos +48h". Pero muchas guías en EFI tenían "Estado global: Anulada" aunque su movimiento interno dijera "Generada". Esas guías fueron duplicadas o mal subidas y ya están canceladas en EFI. Mezcladas con las activas, confundían al agente de novedades.
 

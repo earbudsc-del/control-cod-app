@@ -453,6 +453,37 @@ export function parseEFITracking(html: string, guia: string): TrackingResult {
     }
   }
 
+  // ── 7b. Fallback: escaneo del texto plano del body ─────────────────────────
+  // findLabelInHTML puede fallar cuando EFI cambia la estructura HTML (etiqueta como
+  // text-node suelto, nesting imprevisto, etc.). Como segundo intento, buscar el
+  // patrón directamente en el texto plano del body completo.
+  // IMPORTANTE: lowerBody y bodyText tienen la misma longitud (toLowerCase conserva
+  // índices), por lo que podemos usar el índice de lowerBody para slicear bodyText.
+  if (!result.estado_global) {
+    const egMatch = /estado\s+(?:global|de\s+la\s+gu[íi]a)\s*:?\s*/i.exec(lowerBody)
+    if (egMatch) {
+      const after  = bodyText.slice(egMatch.index + egMatch[0].length).trimStart()
+      // Tomamos hasta 2 palabras (ej. "Anulada", "Activa", "En proceso")
+      const rawVal = after.split(/\s+/).slice(0, 2).join(' ').trim().slice(0, 40)
+      if (rawVal.length >= 2) {
+        result.estado_global = rawVal
+        const normVal = stripAccents(rawVal.toLowerCase())
+        if (normVal.includes('anulad') || normVal.includes('inactiv')) {
+          result.estado_actual     = rawVal
+          result.normalized_status = 'returned'
+        }
+      }
+    }
+  }
+
+  // Log de diagnóstico — ayuda a verificar qué detectó el parser en producción
+  if (result.estado_global) {
+    console.log(
+      `[efi-parser] guia=${guia} estado_global="${result.estado_global}" ` +
+      `estado_actual="${result.estado_actual}" normalized="${result.normalized_status}"`,
+    )
+  }
+
   result._debug.tables_found    = $('table').length
   result._debug.raw_text_sample = bodyText.slice(0, 400)
 
