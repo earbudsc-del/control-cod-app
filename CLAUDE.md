@@ -28,6 +28,7 @@
 | Parser EFI | `src/lib/tracking/efi-parser.ts` | Basado en divs `tracking-item/content`, fallback a tablas |
 | Pipeline mini KPI | `components/shared/flujo-kpis.tsx` | Generadas activas → Tránsito activo → En reparto + chip Anuladas (en /novedad y /reparto) |
 | Helpers de estado | `src/lib/order-status-helpers.ts` | `isCancelledGuide` / `isGeneratedActive` / `isTransitActive` — lógica compartida entre /transito, /novedad, /reparto y flujo-stats |
+| Carritos abandonados | `/carritos-abandonados` | Recuperación de ventas COD desde Shopify abandoned checkouts. Roles: admin + confirmation_agent. Sync manual. Badges cobertura + SD. WA message pre-llenado. |
 | Alertas críticas | `src/lib/alert-helpers.ts` + `components/shared/alert-badges.tsx` | Duplicado + Fuera de cobertura en /confirmacion y /confirmados |
 
 ### APIs internas relevantes
@@ -39,6 +40,10 @@
 | `POST /api/admin/recover-orders` | **Solo admin.** Versión directa para recuperación operativa. Body opcional: `{ from: "YYYY-MM-DD", to: "YYYY-MM-DD" }` (default: 2026-05-03 completo). Llama a Shopify API 2026-04, inserta faltantes idempotentemente, crea tasks de confirmación. Devuelve `{ shopify_found, already_in_db, inserted, errors_count, errors }`. |
 | `GET /api/confirmados` | Pedidos `confirmation_status='confirmed'`, filtros: `?filter=hoy\|ayer`, `?from=&to=` |
 | `GET /api/flujo-stats` | Conteos pipeline corregidos: `generadas` (activas, sin anuladas), `in_transit` (sin generadas ni anuladas), `en_reparto` (sin anuladas), `anuladas` (count separado) |
+| `GET /api/abandoned-carts` | Lista carritos abandonados con filtros (status, fecha, búsqueda). Devuelve `{ data, total, stats }`. Stats: pending/today/contactedToday/recovered. Roles: admin/ia_supervisor/confirmation_agent. |
+| `POST /api/abandoned-carts/sync` | Llama Shopify `checkouts.json?status=open` (últimos 30 días, >10 min). Upsert idempotente por shopify_checkout_id. Preserva recovery_status y notes del agente. Devuelve `{ synced, new, updated, errors }`. |
+| `PATCH /api/abandoned-carts/[id]/status` | Actualiza recovery_status + recovery_attempts + last_contacted_at. Body: `{ status, note? }`. Agrega nota de cambio si se provee. |
+| `POST /api/abandoned-carts/[id]/note` | Agrega nota con timestamp + agente al campo notes (prepend). Preserva historial de notas. |
 | `GET /api/dashboard` | Stats generales + `confirmed_hoy` + `confirmed_ayer` |
 | `GET /api/novedad/performance` | Métricas agente novedad: trabajados, reprogramados, tasaRecuperación, **recuperadasHoy/Ayer** |
 | `GET /api/reparto/performance` | Métricas agente reparto: entregados, contactados, críticos activos, **entregadosAyer** |
@@ -50,6 +55,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Módulo Carritos Abandonados: nuevo módulo /carritos-abandonados para recuperación ventas COD. Tabla abandoned_carts (migración 021). Sync desde Shopify `checkouts.json`. Badges cobertura y SD reutilizados. Mensaje WA pre-llenado con variantes por zona. Estados: pending/contacted/no_answer/recovered/discarded. Roles: admin + confirmation_agent. Mobile-first cards + tabla desktop.** | 2026-05-10 | `021_abandoned_carts.sql` (nuevo), `types/index.ts`, `api/abandoned-carts/route.ts` (nuevo), `api/abandoned-carts/sync/route.ts` (nuevo), `api/abandoned-carts/[id]/status/route.ts` (nuevo), `api/abandoned-carts/[id]/note/route.ts` (nuevo), `(app)/carritos-abandonados/page.tsx` (nuevo), `sidebar.tsx` |
 | **Fix pipeline logístico /novedad y /reparto: queries corregidas en /api/flujo-stats para excluir anuladas/canceladas de Generadas e In_transit. Helper compartido `order-status-helpers.ts` con `isCancelledGuide`/`isGeneratedActive`/`isTransitActive`. FlujoKpis muestra chip "N anuladas". /transito usa `isCancelledGuide` del helper compartido.** | 2026-05-10 | `api/flujo-stats/route.ts`, `components/shared/flujo-kpis.tsx`, `lib/order-status-helpers.ts` (nuevo), `transito/page.tsx` |
 | **Refactor /transito — nueva arquitectura 3 etapas: tabs Generadas / En tránsito / Anuladas. Separación client-side por raw_status. Alertas y mensajes de escalamiento diferenciados por etapa. Botón "Anular" manual (admin/novelty_agent). Endpoint mark-anulada. API excluye anuladas/canceladas del query in_transit.** | 2026-05-09 | `transito/page.tsx` (rewrite), `api/orders/[id]/mark-anulada/route.ts` (nuevo), `api/orders/route.ts` |
 | **Fix definitivo /transito anuladas (2ª ronda): parser fallback body-text para "Estado global", cron con 2 queries separadas (in_transit+otros), botón "Actualizar tracking" por fila en /transito, silent refetch, doble-guarda client-side, endpoint diagnóstico.** | 2026-05-09 | `efi-parser.ts`, `api/tracking/auto/route.ts`, `transito/page.tsx`, `api/debug/transit-orders/route.ts` (nuevo) |
@@ -1675,6 +1681,100 @@ Usado en: `/transito/page.tsx` (via alias `isAnuladaRaw = isCancelledGuide`), di
 | `src/components/shared/flujo-kpis.tsx` | Interface agrega `anuladas`. Chip informativo "N anuladas" si > 0. Import `Ban` de lucide. |
 | `src/lib/order-status-helpers.ts` | **NUEVO.** 3 helpers compartidos: `isCancelledGuide`, `isGeneratedActive`, `isTransitActive`. |
 | `src/app/(app)/transito/page.tsx` | Import `isCancelledGuide`. Alias local `isAnuladaRaw = isCancelledGuide` para consistencia. |
+
+---
+
+### Módulo Carritos Abandonados — /carritos-abandonados (2026-05-10)
+
+**Propósito:** Recuperar ventas COD de clientes que iniciaron el checkout en Shopify pero no completaron el pago.
+
+**Roles con acceso:** `admin`, `ia_supervisor`, `confirmation_agent`.
+`novelty_agent` y `delivery_agent` no ven el link en el sidebar ni pueden llamar las APIs (403).
+
+**Fuente de datos — Shopify Abandoned Checkouts API:**
+```
+GET /admin/api/2024-07/checkouts.json?status=open&limit=250&created_at_min=...&created_at_max=...
+```
+- `status=open` → checkouts con `completed_at IS NULL` (nunca completados como pedidos)
+- `created_at_max = now - 10 min` → evita checkouts que aún están en proceso
+- `created_at_min = now - 30 días` → ventana operativa
+- Paginación via `Link: <url>; rel="next"` header
+- Datos de cliente: prioridad `note_attributes` (Nombre/WhatsApp/Dirección/Provincia/Ciudad) → `shipping_address` → `billing_address`
+
+**Tabla: `abandoned_carts` (migración 021):**
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `shopify_checkout_id` | TEXT | Unique por store, fuente de verdad para idempotencia |
+| `recovery_status` | TEXT | pending / contacted / no_answer / recovered / discarded |
+| `recovery_attempts` | INT | Incrementa al marcar contacted/no_answer |
+| `notes` | TEXT | Historial de notas del agente (prepend con timestamp) |
+| `abandoned_at` | TIMESTAMPTZ | `checkout.updated_at` (última actividad antes de abandonar) |
+
+**RLS:** Solo `get_user_role() IN ('admin', 'ia_supervisor', 'confirmation_agent')` con `store_id = get_user_store_id()`.
+
+**Flujo de sync:**
+1. Agente hace click "Sync Shopify" → `POST /api/abandoned-carts/sync`
+2. API descarga todos los checkouts abiertos de los últimos 30 días
+3. Upsert idempotente por `shopify_checkout_id`: INSERT si no existe, UPDATE solo datos del carrito (preserva `recovery_status` y `notes` del agente)
+4. La página refresca automáticamente tras sync exitoso
+
+**Lógica de cobertura (reutiliza helpers existentes):**
+- `checkCoverage(address, city)` → `isOutOfCoverage`, `isSpecialDestination`, `isUnknownZone`
+- `isSantoDomingoOrder(city, province, address)` → badge púrpura "SD / Transporte local"
+- Badges idénticos a los de `/confirmacion`
+
+**Mensaje WA pre-llenado:**
+- **Normal:** "Hola [nombre] 😊 vimos que dejaste tu pedido de [producto] casi listo..."
+- **Santo Domingo:** + "Como estás en Santo Domingo, podemos coordinar entrega con nuestro transporte local."
+- **Fuera de cobertura:** Versión sin prometer envío: "...vamos a validar si tenemos cobertura para tu zona."
+- Link: `https://wa.me/1{10digitos}?text={mensaje_encoded}`
+
+**Estados de recuperación:**
+
+| Estado | Color | Transición típica |
+|---|---|---|
+| pending | gris | Estado inicial |
+| contacted | índigo | Agente llamó/escribió |
+| no_answer | amarillo | No responde después de contactar |
+| recovered | verde | Completó el pedido |
+| discarded | gris claro | Sin interés / número inválido |
+
+**Métricas (cards):**
+- Pendientes (DB total pending)
+- Hoy (abandoned_at >= hoy RD)
+- Contactados hoy (contacted + last_contacted_at >= hoy RD)
+- Recuperados (DB total recovered)
+- Fuera cobertura (client-side sobre array actual)
+- Santo Domingo (client-side sobre array actual)
+
+**Cómo probar:**
+1. `npm run dev` → login como admin → `/carritos-abandonados`
+2. Click "Sync Shopify" → si SHOPIFY_ADMIN_ACCESS_TOKEN configurado: muestra `X nuevos · Y actualizados`
+3. Sin env vars: devuelve 500 con mensaje descriptivo
+4. Verificar badges de cobertura en filas con ciudad fuera de cobertura
+5. Verificar badge púrpura en filas con Santo Domingo
+6. Click botón WA → abre wa.me con mensaje pre-llenado
+7. Marcar "Contactado" → estado cambia a índigo inmediatamente (optimistic update)
+8. Marcar "Recuperado" → estado cambia a verde
+9. Agregar nota → modal, textarea, guarda con timestamp + nombre agente
+10. Filtrar por "Pendientes" → muestra solo recovery_status='pending'
+11. Buscar por nombre o teléfono → resultados en tiempo real (debounce 400ms)
+12. Login como novelty_agent → `/carritos-abandonados` NO debe aparecer en sidebar
+13. Si novelty_agent navega directo a la URL → página carga pero API devuelve 403 (sin datos)
+
+**Archivos creados/modificados:**
+
+| Archivo | Cambio |
+|---|---|
+| `supabase/migrations/021_abandoned_carts.sql` | Tabla `abandoned_carts`, índices, trigger `updated_at`, RLS restringida a 3 roles |
+| `src/types/index.ts` | `CartRecoveryStatus` type + `AbandonedCart` interface |
+| `src/app/api/abandoned-carts/route.ts` | GET lista con filtros y stats agregadas |
+| `src/app/api/abandoned-carts/sync/route.ts` | POST sync Shopify — descarga checkouts, upsert idempotente |
+| `src/app/api/abandoned-carts/[id]/status/route.ts` | PATCH status con nota opcional |
+| `src/app/api/abandoned-carts/[id]/note/route.ts` | POST agrega nota con timestamp |
+| `src/app/(app)/carritos-abandonados/page.tsx` | Página completa: cards móvil + tabla desktop, filtros, WA, modal de nota, paginación |
+| `src/components/layout/sidebar.tsx` | Icono `ShoppingCart` importado. `/carritos-abandonados` añadido a admin (entre /despachados y /orders) y confirmation_agent (después de /confirmacion) |
 
 ---
 

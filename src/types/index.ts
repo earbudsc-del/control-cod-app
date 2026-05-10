@@ -7,6 +7,7 @@ export type UserRole =
   | 'agent'
   | 'viewer'
 export type ConfirmationStatus     = 'pending' | 'confirmed' | 'unreachable' | 'cancelled'
+export type CartRecoveryStatus     = 'pending' | 'contacted' | 'no_answer' | 'recovered' | 'discarded'
 export type ConfirmationMethod     = 'call' | 'whatsapp' | 'other'
 export type ConfirmationConfidence = 'high' | 'medium' | 'low' | 'risky'
 export type NormalizedStatus =
@@ -162,6 +163,31 @@ export interface Order {
   duplicate_alert?: boolean
   duplicate_of_order_id?: string | null
   duplicate_reason?: string | null
+}
+
+export interface AbandonedCart {
+  id:                   string
+  store_id:             string
+  shopify_checkout_id:  string
+  customer_name:        string | null
+  customer_phone:       string | null
+  customer_email:       string | null
+  products_summary:     string | null
+  total_amount:         number | null
+  currency:             string | null
+  checkout_url:         string | null
+  customer_address:     string | null
+  city:                 string | null
+  province:             string | null
+  recovery_status:      CartRecoveryStatus
+  recovery_attempts:    number
+  last_contacted_at:    string | null
+  recovered_order_id:   string | null
+  notes:                string | null
+  abandoned_at:         string | null
+  source:               string | null
+  created_at:           string
+  updated_at:           string
 }
 
 export interface Note {

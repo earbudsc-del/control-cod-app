@@ -7,7 +7,7 @@ import { createClient } from '@/lib/supabase/client'
 import {
   LayoutDashboard, Package, Upload, BarChart2,
   Settings, LogOut, Truck, Bike, AlertCircle, ClipboardList,
-  ListTodo, TrendingUp, Box, CheckCircle2, X,
+  ListTodo, TrendingUp, Box, CheckCircle2, X, ShoppingCart,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
@@ -26,17 +26,18 @@ interface NavItem {
 const NAV_BY_ROLE: Record<string, NavItem[]> = {
 
   admin: [
-    { href: '/dashboard',    label: 'Dashboard',      icon: LayoutDashboard, alert: null     },
-    { href: '/reparto',      label: 'En Reparto',     icon: Bike,            alert: 'amber'  },
-    { href: '/novedad',      label: 'Novedades',      icon: AlertCircle,     alert: 'red'    },
-    { href: '/transito',     label: 'Tránsito',       icon: Box,             alert: null     },
-    { href: '/confirmacion', label: 'Confirmación',   icon: ClipboardList,   alert: 'indigo' },
-    { href: '/confirmados',  label: 'Confirmados',    icon: CheckCircle2,    alert: 'green'  },
-    { href: '/despachados',  label: 'Despachados',    icon: Truck,           alert: null     },
-    { href: '/orders',       label: 'Pedidos',        icon: Package,         alert: null     },
-    { href: '/imports',      label: 'Importar',       icon: Upload,          alert: null     },
-    { href: '/performance',  label: 'Rendimiento',    icon: BarChart2,       alert: null     },
-    { href: '/settings',     label: 'Configuración',  icon: Settings,        alert: null     },
+    { href: '/dashboard',              label: 'Dashboard',            icon: LayoutDashboard, alert: null     },
+    { href: '/reparto',                label: 'En Reparto',           icon: Bike,            alert: 'amber'  },
+    { href: '/novedad',                label: 'Novedades',            icon: AlertCircle,     alert: 'red'    },
+    { href: '/transito',               label: 'Tránsito',             icon: Box,             alert: null     },
+    { href: '/confirmacion',           label: 'Confirmación',         icon: ClipboardList,   alert: 'indigo' },
+    { href: '/confirmados',            label: 'Confirmados',          icon: CheckCircle2,    alert: 'green'  },
+    { href: '/despachados',            label: 'Despachados',          icon: Truck,           alert: null     },
+    { href: '/carritos-abandonados',   label: 'Carritos abandonados', icon: ShoppingCart,    alert: null     },
+    { href: '/orders',                 label: 'Pedidos',              icon: Package,         alert: null     },
+    { href: '/imports',                label: 'Importar',             icon: Upload,          alert: null     },
+    { href: '/performance',            label: 'Rendimiento',          icon: BarChart2,       alert: null     },
+    { href: '/settings',               label: 'Configuración',        icon: Settings,        alert: null     },
   ],
 
   ia_supervisor: [
@@ -47,8 +48,9 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
   ],
 
   confirmation_agent: [
-    { href: '/mi-rendimiento', label: 'Mi rendimiento', icon: TrendingUp,    alert: null     },
-    { href: '/confirmacion',   label: 'Confirmaciones', icon: ClipboardList, alert: 'indigo' },
+    { href: '/mi-rendimiento',           label: 'Mi rendimiento',       icon: TrendingUp,    alert: null     },
+    { href: '/confirmacion',             label: 'Confirmaciones',       icon: ClipboardList, alert: 'indigo' },
+    { href: '/carritos-abandonados',     label: 'Carritos abandonados', icon: ShoppingCart,  alert: null     },
   ],
 
   novelty_agent: [
