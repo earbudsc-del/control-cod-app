@@ -168,7 +168,7 @@ export interface Order {
 export interface AbandonedCart {
   id:                   string
   store_id:             string
-  shopify_checkout_id:  string
+  shopify_checkout_id:  string | null
   customer_name:        string | null
   customer_phone:       string | null
   customer_email:       string | null
@@ -179,12 +179,22 @@ export interface AbandonedCart {
   customer_address:     string | null
   city:                 string | null
   province:             string | null
+  // Campos COD form (migración 022)
+  product_id:           string | null
+  variant_id:           string | null
+  page_url:             string | null
+  referrer:             string | null
+  utm_source:           string | null
+  utm_campaign:         string | null
+  utm_content:          string | null
+  session_id:           string | null
   recovery_status:      CartRecoveryStatus
   recovery_attempts:    number
   last_contacted_at:    string | null
   recovered_order_id:   string | null
   notes:                string | null
   abandoned_at:         string | null
+  // 'shopify_abandoned_checkout' | 'cod_form_lead' | 'manual_import' | 'shopify' (legacy)
   source:               string | null
   created_at:           string
   updated_at:           string

@@ -176,7 +176,7 @@ export async function POST() {
           city,
           province,
           abandoned_at:        checkout.updated_at ?? checkout.created_at,
-          source:              'shopify',
+          source:              'shopify_abandoned_checkout',
         }
 
         // Verificar si ya existe para preservar recovery_status y notes del agente
@@ -205,8 +205,16 @@ export async function POST() {
     }
 
     console.log(
-      `[sync abandoned-carts] fetched=${abandoned.length} new=${newCount} updated=${updatedCount} errors=${errors.length}`,
+      `[sync abandoned-carts] source=shopify_abandoned_checkout` +
+      ` fetched=${abandoned.length} new=${newCount} updated=${updatedCount} errors=${errors.length}`,
     )
+    if (abandoned.length === 0) {
+      console.log(
+        '[sync abandoned-carts] 0 checkouts encontrados — ' +
+        'ESPERADO si usas flujo COD form (no checkout nativo Shopify). ' +
+        'Los leads COD llegan via POST /api/abandoned-carts/cod-form.',
+      )
+    }
 
     return NextResponse.json({
       synced:   abandoned.length,
@@ -214,6 +222,9 @@ export async function POST() {
       updated:  updatedCount,
       errors:   errors.length,
       errorLog: errors.slice(0, 5),
+      note:     abandoned.length === 0
+        ? 'Sin checkouts Shopify. Si usas COD form, los leads llegan por /api/abandoned-carts/cod-form.'
+        : undefined,
     })
   } catch (err) {
     console.error('[POST /api/abandoned-carts/sync]', err)

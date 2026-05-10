@@ -368,6 +368,48 @@ export async function POST(request: Request) {
     priority: 'high',
   })
 
+  // 11. Auto-recuperar carritos abandonados por phone match
+  //     Cuando un pedido entra, marca como 'recovered' cualquier carrito pendiente
+  //     del mismo teléfono (coincidencia normalizada sin dígitos).
+  if (customerPhone) {
+    try {
+      const normalizedIncoming = customerPhone.replace(/\D/g, '')
+      const { data: pendingCarts } = await supabase
+        .from('abandoned_carts')
+        .select('id, customer_phone')
+        .eq('store_id', storeId)
+        .not('recovery_status', 'in', '(recovered,discarded)')
+        .limit(500)
+
+      if (pendingCarts?.length) {
+        const matchIds = pendingCarts
+          .filter(c => {
+            if (!c.customer_phone) return false
+            return c.customer_phone.replace(/\D/g, '') === normalizedIncoming
+          })
+          .map(c => c.id)
+
+        if (matchIds.length > 0) {
+          await supabase
+            .from('abandoned_carts')
+            .update({
+              recovery_status:    'recovered',
+              recovered_order_id: shopifyOrderId,
+              updated_at:         new Date().toISOString(),
+            })
+            .in('id', matchIds)
+          console.log(
+            `[shopify-webhook] auto-recovered ${matchIds.length} abandoned cart(s)` +
+            ` — phone match ${normalizedIncoming} — order ${shopifyOrderId}`,
+          )
+        }
+      }
+    } catch (cartErr) {
+      // No crítico — no afecta el flujo principal del pedido
+      console.warn('[shopify-webhook] error auto-recovering abandoned carts:', String(cartErr))
+    }
+  }
+
   console.log(
     `[shopify-webhook] Pedido ${shopifyOrderId} (${payload.name ?? ''}) guardado` +
     (duplicateAlert ? ` — ALERTA DUPLICADO: ${duplicateNoteText}` : '') +

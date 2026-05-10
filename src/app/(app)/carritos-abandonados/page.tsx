@@ -87,6 +87,36 @@ function buildWAMessage(cart: AbandonedCart): string {
   return msg
 }
 
+// ── Badge de fuente ───────────────────────────────────────────────────────────
+
+function SourceBadge({ source }: { source: string | null }) {
+  if (!source) return null
+  const isShopify = source === 'shopify_abandoned_checkout' || source === 'shopify'
+  const isCod     = source === 'cod_form_lead'
+  const isManual  = source === 'manual_import'
+
+  if (isShopify) return (
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-600 border border-slate-200">
+      Shopify
+    </span>
+  )
+  if (isCod) return (
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 text-blue-700 border border-blue-200">
+      COD Form
+    </span>
+  )
+  if (isManual) return (
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 text-gray-500 border border-gray-200">
+      Manual
+    </span>
+  )
+  return (
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 text-gray-500 border border-gray-200">
+      {source}
+    </span>
+  )
+}
+
 // ── Componente de badges de cobertura ────────────────────────────────────────
 
 function CartCoverageBadges({ cart }: { cart: AbandonedCart }) {
@@ -284,14 +314,14 @@ export default function CarritosAbandonadosPage() {
       )}
 
       {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
+      <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <ShoppingCart className="w-5 h-5 text-indigo-600" />
             Carritos abandonados
           </h1>
           {lastSynced && (
-            <p className="text-xs text-gray-400 mt-0.5">Última sync: {lastSynced}</p>
+            <p className="text-xs text-gray-400 mt-0.5">Última sync Shopify: {lastSynced}</p>
           )}
         </div>
         <button
@@ -301,8 +331,17 @@ export default function CarritosAbandonadosPage() {
                      rounded-lg hover:bg-indigo-700 disabled:opacity-60 transition-colors"
         >
           <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-          {syncing ? 'Sincronizando…' : 'Sync Shopify'}
+          {syncing ? 'Sincronizando…' : 'Sync Shopify Checkouts'}
         </button>
+      </div>
+
+      {/* Info COD form */}
+      <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-sm text-blue-800 space-y-1">
+        <p className="font-semibold">Fuentes de leads soportadas</p>
+        <ul className="text-xs text-blue-700 space-y-0.5 list-disc list-inside">
+          <li><span className="font-medium">COD Form</span> — llegan automáticamente cuando el formulario envía el lead parcial al endpoint <code className="bg-blue-100 px-1 rounded">/api/abandoned-carts/cod-form</code></li>
+          <li><span className="font-medium">Shopify Checkouts</span> — "Sync Shopify Checkouts" descarga <code className="bg-blue-100 px-1 rounded">checkouts.json?status=open</code>. Devuelve 0 si usas solo COD form.</li>
+        </ul>
       </div>
 
       {/* Métricas */}
@@ -438,6 +477,9 @@ export default function CarritosAbandonadosPage() {
                       <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold ${STATUS_STYLES[cart.recovery_status]}`}>
                         {STATUS_LABELS[cart.recovery_status]}
                       </span>
+                      <div className="mt-1">
+                        <SourceBadge source={cart.source} />
+                      </div>
                       {cart.recovery_attempts > 0 && (
                         <p className="text-[10px] text-gray-400 mt-0.5">{cart.recovery_attempts} intento{cart.recovery_attempts !== 1 ? 's' : ''}</p>
                       )}
@@ -535,9 +577,12 @@ export default function CarritosAbandonadosPage() {
                       <p className="text-xs text-gray-400 truncate">{cart.customer_email}</p>
                     )}
                   </div>
-                  <span className={`shrink-0 inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold ${STATUS_STYLES[cart.recovery_status]}`}>
-                    {STATUS_LABELS[cart.recovery_status]}
-                  </span>
+                  <div className="shrink-0 flex flex-col items-end gap-1">
+                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold ${STATUS_STYLES[cart.recovery_status]}`}>
+                      {STATUS_LABELS[cart.recovery_status]}
+                    </span>
+                    <SourceBadge source={cart.source} />
+                  </div>
                 </div>
 
                 {/* Producto + monto */}
@@ -633,7 +678,7 @@ export default function CarritosAbandonadosPage() {
           <p className="text-sm mt-1">
             {search || statusFilter !== 'all' || dateFilter !== 'all'
               ? 'Ningún resultado para los filtros aplicados'
-              : 'Haz clic en "Sync Shopify" para cargar los carritos abandonados'}
+              : 'Si usas COD form, los carritos aparecerán cuando el formulario envíe leads parciales al endpoint COD.'}
           </p>
         </div>
       )}
