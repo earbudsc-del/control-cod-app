@@ -4,6 +4,184 @@
 
 ---
 
+## SUPERVISOR IA — Fase 2: Auditoría operativa, scoring, courier y agentes (2026-05-10)
+
+### Qué se hizo
+
+Implementación completa de la Fase 2 del Supervisor IA: motor de scoring de riesgo operacional, auditoría de casos sospechosos, score de gestión courier, score de agentes, y cards de dinero en riesgo. Sin IA externa — todo basado en reglas, señales y análisis interno de datos.
+
+### Archivos creados/modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/supervisor-ia/auditoria/route.ts` | **NUEVO.** Endpoint GET con 27 queries paralelas en Supabase. Devuelve `{ casosAuditoria, courier, agentes, dineroRiesgo }`. Motor de scoring server-side con función `calcRiskScore()`. Solo admin/ia_supervisor (403 para otros). |
+| `src/app/(app)/supervisor-ia/page.tsx` | **MODIFICADO.** Nuevos tipos `CasoAuditoria`, `CourierMetrics`, `AgentesMetrics`, `DineroRiesgo`, `AuditoriaData`. Nuevo estado `auditoriaData`, `auditoriaLoading`, `showAuditoria`, `auditFiltroNivel`. Fetch paralelo a `/api/supervisor-ia/auditoria`. Recomendaciones mejoradas con señales de auditoría (`generarRecomendacionesV2`). 4 nuevas secciones de Fase 2. |
+
+### API: `GET /api/supervisor-ia/auditoria`
+
+**Auth:** Supabase session + check de rol (admin/ia_supervisor). 403 para otros roles.
+
+**Estructura de respuesta:**
+
+```typescript
+{
+  generatedAt: string
+
+  casosAuditoria: Array<{      // ordered by score desc, max 80
+    id, tracking_number, order_number, customer_name, city, province,
+    delivery_attempts, last_attempt_reason, raw_status, normalized_status,
+    status_since, cod_amount,
+    score: number,             // 0–100
+    level: string,             // 'Bajo' | 'Medio' | 'Alto' | 'Crítico'
+    signals: string[],         // categorías de señales detectadas
+  }>
+
+  courier: {
+    totalProcesados, entregados, devueltos, novedades, retrasos72h,
+    intentosSospechosos, coberturaDudosa, anuladasSospechosas,
+    tasaEntrega, tasaDevolucion, tasaRetraso72h, tasaNovedades  // en %
+  }
+
+  agentes: {
+    confirmation: { confirmadosHoy, inalcanzablesTotal, canceladosTotal, pendientesEnCola, fueraCobertura }
+    novedad:      { novedadesActivas, recuperadasHoy, dosIntentosActivos, masViejas14dias, indemnizacionesDetectadas }
+    delivery:     { enRepartoTotal, entregadosHoy, repartoCritico48h, claimsRegistrados }
+  }
+
+  dineroRiesgo: {
+    devolucionesIndemnizables: number   // SUM cod_amount WHERE returned + delivery_attempts >= 2
+    pedidosEnRiesgoNovedad: number      // SUM cod_amount WHERE novedad + delivery_attempts >= 2
+    repartoRetraso72h: number           // SUM cod_amount WHERE en_reparto + status_since < cutoff72h
+    totalEnRiesgo: number               // suma de los tres anteriores
+  }
+}
+```
+
+### Motor de scoring (calcRiskScore — server-side)
+
+Calcula score 0–100 para cada pedido sospechoso:
+
+| Condición | Puntos | Señales generadas |
+|---|---|---|
+| `delivery_attempts >= 3` | +30 | Posible intento falso · Riesgo alto devolución injusta · Cliente probablemente sí quería recibir |
+| `delivery_attempts >= 2` | +20 | Cliente probablemente sí quería recibir |
+| `returned + delivery_attempts >= 2` | +20 | Caso potencialmente indemnizable · Riesgo alto devolución injusta |
+| `returned + delivery_attempts == 0` | +25 | Riesgo alto devolución injusta · Courier posiblemente falló |
+| `returned + delivery_attempts == 1` | +10 | Riesgo alto devolución injusta |
+| `hoursStuck > 72h` | +20 | Retraso excesivo · Courier posiblemente falló (si en_reparto/in_transit/novedad) |
+| `hoursStuck 48–72h` | +10 | Retraso excesivo |
+| `last_attempt_reason` contiene `cobertura/zona` | +15 | Fuera cobertura dudoso · Courier posiblemente falló |
+| `last_attempt_reason` contiene `direcci/domicil` | +10 | Reprogramación sospechosa |
+| `novedad + 2+ intentos + sin razón` | +10 | Reprogramación sospechosa |
+| `novedad + > 7 días` | +10 | Reprogramación sospechosa · Retraso excesivo |
+| `confirmation_status = no_coverage` | +10 | Fuera cobertura dudoso |
+
+**Niveles:**
+- Bajo: 0–25 · Medio: 26–50 · Alto: 51–75 · Crítico: 76–100
+
+**`hoursStuck`:** usa `status_since ?? shipment_created_at ?? shopify_created_at` (misma lógica que transit-helpers.ts, sin `last_tracking_update`)
+
+### Categorías de señales
+
+| Señal | Color | Cuándo aparece |
+|---|---|---|
+| Cliente probablemente sí quería recibir | azul | delivery_attempts >= 2 |
+| Courier posiblemente falló | naranja | cobertura + retraso > 72h + returned sin intentos |
+| Fuera cobertura dudoso | púrpura | razón contiene cobertura/zona OR no_coverage |
+| Retraso excesivo | ámbar | status_since > 48h |
+| Posible intento falso | rojo | delivery_attempts >= 3 |
+| Reprogramación sospechosa | ámbar | sin razón + 2+ intentos OR > 7 días en novedad |
+| Riesgo alto devolución injusta | rojo | returned + cualquier condición sospechosa |
+| Caso potencialmente indemnizable | naranja | returned + delivery_attempts >= 2 |
+
+### Score de gestión courier
+
+Métricas globales de toda la operación. Sin segmentación por mensajero (Fase 3).
+
+| Métrica | Verde | Amarillo | Rojo |
+|---|---|---|---|
+| % Entregas exitosas | ≥ 70% | 50–69% | < 50% |
+| % Devoluciones | ≤ 5% | 6–15% | > 15% |
+| % Novedades activas | ≤ 5% | 6–15% | > 15% |
+| % Retrasos +72h | 0% | 1–5% | > 5% |
+
+### Score de agentes (primera versión)
+
+Sección `agentes` del dashboard con métricas operativas por rol. No incluye cálculo de pagos ni bonos.
+
+| Agente | Métricas clave |
+|---|---|
+| `confirmation_agent` | confirmados hoy · en cola · inalcanzables · cancelados · fuera cobertura |
+| `novelty_agent` | novedades activas · recuperadas hoy · casos críticos · +14 días · indemnizaciones |
+| `delivery_agent` | en reparto · entregados hoy · crítico +48h · claims |
+
+### Cards de dinero en riesgo
+
+Cálculo server-side sumando `cod_amount` de los pedidos relevantes:
+- **Devoluciones indemnizables:** returned + delivery_attempts >= 2
+- **Novedades en riesgo:** novedad + delivery_attempts >= 2
+- **Reparto retrasado +72h:** en_reparto + status_since < cutoff72h
+- **Total en riesgo:** suma de los tres anteriores
+
+### Nuevas secciones en `/supervisor-ia` (Fase 2)
+
+| Sección | Qué muestra |
+|---|---|
+| **Dinero en riesgo** | 4 cards: devoluciones indemnizables · novedades en riesgo · reparto +72h · total en riesgo (en DOP) |
+| **Auditoría Operativa IA** | Tabla de casos con score, nivel, señales, estado, intentos. Filtros por nivel (Todos/Crítico/Alto/Medio/Bajo). Cards colapsadas con conteos por nivel cuando está oculta. Máximo 50 desktop / 30 mobile. |
+| **Score de gestión courier** | Tabla de métricas: % entrega · % devolución · % novedades · % retrasos. Codificación de color verde/amarillo/rojo. Fila adicional con señales absolutas (intentos sospechosos · cobertura dudosa · devoluciones sospechosas). |
+| **Score operativo de agentes** | 3 columnas (confirmation/novelty/delivery). Cada columna con 4–5 métricas y codificación de color. Nota Fase 3 sobre coaching IA futuro. |
+
+### Recomendaciones mejoradas (`generarRecomendacionesV2`)
+
+Motor V2 que remplaza `generarRecomendaciones`. Añade detección de patrones de auditoría:
+- Si hay casos Críticos → recomendación crítica "Evaluar reclamo de indemnización"
+- Si `tasaDevolucion > 15%` → recomendación crítica "Revisar gestión courier"
+- Si `retrasos72h > 0` → recomendación alta "Retrasos elevando riesgo devolución"
+- Si `coberturaDudosa > 0` → recomendación alta "Verificar zonas fuera cobertura"
+- Mensajes enriquecidos con contexto logístico COD
+
+### Arquitectura coaching IA (preparada para Fase 3)
+
+En la sección Score de Agentes se incluye un banner informativo que explica qué vendrá en Fase 3:
+- Feedback individual a agentes
+- Recomendaciones personalizadas
+- Generación automática de tareas
+- Seguimiento de patrones por agente
+
+La estructura de datos ya está preparada (`agentes.confirmation`, `agentes.novedad`, `agentes.delivery`) y puede extenderse sin romper la API.
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `admin` → ir a `/supervisor-ia`
+3. **Cards Dinero en riesgo:** visible si hay devoluciones/novedades/reparto retrasado (valores en DOP)
+4. **Auditoría Operativa IA:**
+   - Cards colapsadas muestran conteo por nivel (Crítico/Alto/Medio/Bajo)
+   - Click en "Crítico" → abre tabla filtrada solo por casos Críticos
+   - Click "Ver N casos" → expande tabla completa
+   - Filtros de nivel (Todos/Crítico/Alto/Medio/Bajo) filtran la tabla
+   - Cada fila: score/nivel · guía · cliente · ciudad · estado · intentos · señales · link
+5. **Score courier:** % entrega, % devolución, % novedades, % retrasos en colores semáforo
+6. **Score agentes:** 3 columnas con métricas de cada tipo de agente
+7. **Recomendaciones:** si hay casos Críticos en auditoría → aparece recomendación crítica "Evaluar reclamo"
+8. Login como `confirmation_agent` → NO puede ver `/supervisor-ia` (redirige a /my-tasks)
+9. `npx tsc --noEmit` → sin errores
+
+### Pendientes Fase 3
+
+- Guardar reportes diarios en tabla `supervisor_reports`
+- Timeline detallado por guía (eventos con timestamps desde `order_history` o tracking_events)
+- Separación de métricas courier por mensajero (requiere campo `carrier` consistente en orders)
+- Score personal de agentes con historial y tendencias
+- Coaching IA: feedback automático a agentes desde dashboard
+- Envío de tareas automáticas a agentes
+- IA externa (Claude API) para análisis de patrones complejos
+- Alertas por WhatsApp al admin para casos Críticos
+- Scoring salarial / bonos de agentes
+
+---
+
 ## SUPERVISOR IA — Fase 2: Acciones clickeables y query params (2026-05-10)
 
 ### Qué se hizo
