@@ -7,7 +7,7 @@ import { createClient } from '@/lib/supabase/client'
 import {
   LayoutDashboard, Package, Upload, BarChart2,
   Settings, LogOut, Truck, Bike, AlertCircle, ClipboardList,
-  ListTodo, TrendingUp, Box, CheckCircle2, X, ShoppingCart,
+  ListTodo, TrendingUp, Box, CheckCircle2, X, ShoppingCart, Brain,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
@@ -27,6 +27,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
 
   admin: [
     { href: '/dashboard',              label: 'Dashboard',            icon: LayoutDashboard, alert: null     },
+    { href: '/supervisor-ia',          label: 'Supervisor IA',        icon: Brain,           alert: null     },
     { href: '/reparto',                label: 'En Reparto',           icon: Bike,            alert: 'amber'  },
     { href: '/novedad',                label: 'Novedades',            icon: AlertCircle,     alert: 'red'    },
     { href: '/transito',               label: 'Tránsito',             icon: Box,             alert: null     },
@@ -41,10 +42,11 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
   ],
 
   ia_supervisor: [
-    { href: '/dashboard',    label: 'Dashboard',      icon: LayoutDashboard, alert: null     },
-    { href: '/my-tasks',     label: 'Mis tareas',     icon: ListTodo,        alert: null     },
-    { href: '/transito',     label: 'Tránsito',       icon: Box,             alert: null     },
-    { href: '/orders',       label: 'Pedidos',        icon: Package,         alert: null     },
+    { href: '/supervisor-ia', label: 'Supervisor IA', icon: Brain,           alert: null },
+    { href: '/dashboard',     label: 'Dashboard',     icon: LayoutDashboard, alert: null },
+    { href: '/my-tasks',      label: 'Mis tareas',    icon: ListTodo,        alert: null },
+    { href: '/transito',      label: 'Tránsito',      icon: Box,             alert: null },
+    { href: '/orders',        label: 'Pedidos',       icon: Package,         alert: null },
   ],
 
   confirmation_agent: [

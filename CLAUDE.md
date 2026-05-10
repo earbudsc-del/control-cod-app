@@ -4,6 +4,169 @@
 
 ---
 
+## SUPERVISOR IA — Fase 1 (2026-05-10)
+
+### Arquitectura general
+
+Módulo de supervisión operativa con dashboard ejecutivo para admin e ia_supervisor. Motor de reglas client-side que genera recomendaciones automáticas y alertas sin IA externa.
+
+### Ruta
+
+`/supervisor-ia`
+
+### Permisos
+
+| Rol                | Acceso     |
+|--------------------|------------|
+| `admin`            | ✅ Sí      |
+| `ia_supervisor`    | ✅ Sí      |
+| `confirmation_agent` | ❌ No — redirige a /my-tasks |
+| `novelty_agent`    | ❌ No — redirige a /my-tasks |
+| `delivery_agent`   | ❌ No — redirige a /my-tasks |
+| `agent`            | ❌ No — redirige a /my-tasks |
+| `viewer`           | ❌ No — redirige a /my-tasks |
+
+### Archivos creados/modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/supervisor-ia/metrics/route.ts` | **NUEVO.** 24 queries paralelas en Supabase. Devuelve `{ operacion, alertas, modulos, indemnizables, novedad2IntentosLista }`. Solo admin/ia_supervisor (403 para otros). |
+| `src/app/(app)/supervisor-ia/page.tsx` | **NUEVO.** Dashboard ejecutivo Client Component. Auto-refresh cada 5 min. 7 secciones. Motor de recomendaciones client-side. |
+| `src/components/layout/sidebar.tsx` | `/supervisor-ia` añadido a `admin` (posición 2, después de Dashboard) y como primera entrada de `ia_supervisor`. Icono `Brain`. |
+| `src/middleware.ts` | Nueva constante `SUPERVISOR_PATHS = ['/supervisor-ia']`. Roles sin acceso redirigen a /my-tasks. `isSupervisor = role === 'admin' \|\| role === 'ia_supervisor'`. |
+
+### API: `GET /api/supervisor-ia/metrics`
+
+**Auth:** Supabase session + check de rol (admin/ia_supervisor). Devuelve 403 para otros roles.
+
+**Estructura de respuesta:**
+
+```typescript
+{
+  generatedAt: string,                    // ISO timestamp
+
+  operacion: {
+    nuevosHoy: number,                    // pedidos Shopify creados hoy (RD)
+    confirmadosHoy: number,               // confirmados hoy (last_confirmation_attempt hoy RD)
+    carritosRecuperadosHoy: number,       // abandoned_carts recovered hoy
+    entregadosHoy: number,                // normalized_status='delivered' hoy
+    novedadesActivas: number,             // normalized_status='novedad' total
+    reparto48h: number,                   // en_reparto con criticidad +48h
+    transito48h: number,                  // in_transit (no generadas) +48h
+    generadas48h: number,                 // in_transit raw_status~generada +48h
+    fueraCobertura: number,               // confirmation_status='no_coverage'
+  },
+
+  alertas: {
+    sinConfirmar24h: number,              // pending + sin tracking + shopify_created_at < 24h atrás
+    reparto48h: number,                   // = operacion.reparto48h
+    transito48h: number,                  // = operacion.transito48h
+    generadas48h: number,                 // = operacion.generadas48h
+    novedad2Intentos: number,             // novedad + delivery_attempts >= 2
+    novedad7dias: number,                 // novedad + status_since < 7 días (fallback updated_at)
+    novedad14dias: number,                // novedad + status_since < 14 días
+    guiasAnuladas: number,                // returned + raw_status~anulada/cancelada
+    posiblesIndemnizables: number,        // returned + delivery_attempts >= 2 (count de la lista)
+    fueraCobertura: number,               // = operacion.fueraCobertura
+    carritosPendientes: number,           // abandoned_carts pending
+  },
+
+  modulos: {
+    confirmacion: { nuevosHoy, confirmadosHoy, inalcanzables, cancelados, sinCobertura, pendientes24h },
+    novedad:      { activas, recuperadasHoy, dosIntentos, mas7dias, mas14dias, posiblesIndemnizables },
+    reparto:      { enReparto, criticos48h, entregadosHoy },
+    transito:     { generadas, enTransito, criticas48h, anuladas },
+    carritos:     { pendientes, contactadosHoy, recuperadosHoy, recuperadosTotal },
+  },
+
+  indemnizables: Array<{                  // returned + delivery_attempts >= 2, limit 50
+    id, tracking_number, order_number, customer_name, customer_phone,
+    city, province, delivery_attempts, last_attempt_reason, raw_status, cod_amount
+  }>,
+
+  novedad2IntentosLista: Array<{          // novedad + delivery_attempts >= 2, limit 50
+    id, tracking_number, customer_name, city, delivery_attempts, last_attempt_reason, customer_phone, cod_amount
+  }>,
+}
+```
+
+**Criticidad temporal (reparto):** `status_since < cutoff48h OR (status_since IS NULL AND last_tracking_update < cutoff48h) OR (status_since IS NULL AND last_tracking_update IS NULL AND updated_at < cutoff48h)`
+
+**Criticidad temporal (tránsito):** `status_since < cutoff48h OR (status_since IS NULL AND shipment_created_at < cutoff48h) OR (status_since IS NULL AND shipment_created_at IS NULL AND created_at < cutoff48h)`
+
+### Secciones del dashboard
+
+| Sección | Qué muestra |
+|---|---|
+| **Operación del día** | 9 KPIs: nuevos, confirmados, entregados, carritos recuperados, novedades activas, reparto +48h, tránsito +48h, generadas +48h, fuera cobertura |
+| **Alertas críticas** | Lista de alertas clickeables con count y prioridad. Solo muestra si count > 0. |
+| **Reporte del día** | Texto resumen auto-generado: actividad + alertas + prioridades |
+| **Recomendaciones operativas** | Motor de reglas client-side: 8 reglas con prioridad (crítica/alta/media/baja), módulo, cantidad, mensaje, acción y link |
+| **Rendimiento por módulo** | 5 cards: Confirmación, Novedad, Reparto, Tránsito, Carritos. Cada card con métricas clave y link al módulo. |
+| **Posibles indemnizaciones** | Tabla expandible: guía, cliente, ciudad, intentos, razón, recomendación generada, link al pedido. |
+| **Tareas sugeridas por agente** | 3 columnas (confirmation/novelty/delivery). Cada tarea muestra count de afectados con badge de color. |
+
+### Motor de recomendaciones (client-side)
+
+Función `generarRecomendaciones(metrics)` en la página. Genera objetos `{ id, prioridad, modulo, cantidad, mensaje, accion, link }` ordenados por prioridad:
+
+| Condición | Prioridad | Módulo |
+|---|---|---|
+| `reparto48h > 0` | crítica | Reparto |
+| `generadas48h > 0` | crítica | Tránsito · Generadas |
+| `transito48h > 0` | crítica | Tránsito |
+| `novedad14dias > 0` | alta | Novedad |
+| `novedad2Intentos > 0` | alta | Novedad |
+| `sinConfirmar24h > 0` | alta | Confirmación |
+| `novedad7dias > 0` | media | Novedad |
+| `carritosPendientes > 0` | media | Carritos abandonados |
+| `fueraCobertura > 0` | baja | Confirmación |
+
+### Reglas posibles indemnizaciones
+
+Marcar como "Posible indemnización" si:
+- `normalized_status = 'returned'` AND `delivery_attempts >= 2`
+
+Recomendación generada (`getIndemnRecomendacion`):
+- `>= 3 intentos` → "Reclamar por múltiples intentos fallidos sin entrega"
+- `last_attempt_reason` contiene "cobertura/zona" → "Reclamar — área en cobertura pero no entregado"
+- `last_attempt_reason` contiene "rechaz" → "Verificar — posible rechazo sin contacto previo"
+- `last_attempt_reason` contiene "direcci/domicil" → "Verificar dirección y reclamar si fue correcta"
+- Default → "Revisar historial y evaluar reclamo de indemnización"
+
+No se toma ninguna acción automática. Solo alerta visual al admin.
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `admin` → sidebar muestra "Supervisor IA" en segunda posición (icono Brain)
+3. Navegar a `/supervisor-ia` → dashboard carga con métricas reales
+4. Login como `ia_supervisor` → sidebar muestra "Supervisor IA" como primera entrada
+5. Login como `confirmation_agent` → NO ve `/supervisor-ia` en sidebar; navegación directa redirige a `/my-tasks`
+6. Login como `novelty_agent` → NO ve `/supervisor-ia` en sidebar
+7. Login como `delivery_agent` → NO ve `/supervisor-ia` en sidebar
+8. Verificar secciones: operación del día, alertas, reporte, recomendaciones, módulos, indemnizables, tareas sugeridas
+9. Si hay guías +48h → aparecen en alertas (fondo rojo) y en recomendaciones (prioridad crítica)
+10. Click en "Ver N casos" en indemnizaciones → expande tabla con detalles
+11. Refresh manual con botón → datos se actualizan; auto-refresh cada 5 min
+12. `npx tsc --noEmit` → sin errores
+
+### Pendientes Fase 2 y Fase 3 (NO implementar ahora)
+
+**Fase 2:**
+- Guardar reportes diarios en tabla `supervisor_reports` (propuesta de schema en prompt original)
+- Envío de tareas automáticas a agentes desde el dashboard
+- Vista de rendimiento histórico por agente
+- Productos/SKUs con mayor tasa de devolución
+
+**Fase 3:**
+- IA externa (OpenAI/Claude API) para análisis de patrones
+- Reportes automáticos por WhatsApp a admin
+- Scoring salarial / bonos de agentes
+- Cálculo de pagos de comisión
+
+---
+
 ## 1. ESTADO ACTUAL DEL SISTEMA
 
 ### Módulos activos

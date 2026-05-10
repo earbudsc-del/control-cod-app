@@ -4,6 +4,9 @@ import { NextResponse, type NextRequest } from 'next/server'
 // Rutas que solo admin puede ver — agentes son redirigidos a /my-tasks
 const ADMIN_ONLY_PATHS = ['/dashboard', '/performance']
 
+// Rutas que requieren admin o ia_supervisor
+const SUPERVISOR_PATHS = ['/supervisor-ia']
+
 async function getUserRole(supabase: ReturnType<typeof createServerClient>, userId: string) {
   const { data } = await supabase
     .from('profiles')
@@ -51,12 +54,14 @@ export async function middleware(request: NextRequest) {
   const needsRoleCheck =
     path === '/' ||
     path.startsWith('/login') ||
-    ADMIN_ONLY_PATHS.some(p => path.startsWith(p))
+    ADMIN_ONLY_PATHS.some(p => path.startsWith(p)) ||
+    SUPERVISOR_PATHS.some(p => path.startsWith(p))
 
   if (!needsRoleCheck) return response
 
   const role = await getUserRole(supabase, user.id)
-  const isAdmin = role === 'admin'
+  const isAdmin      = role === 'admin'
+  const isSupervisor = role === 'admin' || role === 'ia_supervisor'
   const home = isAdmin ? '/dashboard' : '/my-tasks'
 
   // Si ya está logueado, redirigir desde login a su home según rol
@@ -71,6 +76,11 @@ export async function middleware(request: NextRequest) {
 
   // Bloquear rutas admin para agentes
   if (!isAdmin && ADMIN_ONLY_PATHS.some(p => path.startsWith(p))) {
+    return NextResponse.redirect(new URL('/my-tasks', request.url))
+  }
+
+  // Bloquear rutas de supervisor para roles sin permisos
+  if (!isSupervisor && SUPERVISOR_PATHS.some(p => path.startsWith(p))) {
     return NextResponse.redirect(new URL('/my-tasks', request.url))
   }
 
