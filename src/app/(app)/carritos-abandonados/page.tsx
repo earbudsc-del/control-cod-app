@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
+import Link from 'next/link'
 import {
   ShoppingCart, RefreshCw, Phone, MessageCircle,
   CheckCircle2, XCircle, Clock, Search, X, StickyNote,
   ChevronLeft, ChevronRight, AlertTriangle, MapPinOff,
-  Building2, HelpCircle, Navigation, RotateCcw,
+  Building2, HelpCircle, Navigation, RotateCcw, Eye,
 } from 'lucide-react'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 import type { AbandonedCart, CartRecoveryStatus } from '@/types'
@@ -523,6 +524,11 @@ export default function CarritosAbandonadosPage() {
                     {/* Acciones */}
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5 flex-wrap">
+                        <Link href={`/carritos-abandonados/${cart.id}`}
+                             className="p-1.5 rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors"
+                             title="Ver detalle">
+                          <Eye className="w-3.5 h-3.5" />
+                        </Link>
                         {wa && (
                           <a href={wa} target="_blank" rel="noreferrer"
                              className="p-1.5 rounded-lg bg-green-50 text-green-700 hover:bg-green-100 transition-colors"
@@ -653,6 +659,10 @@ export default function CarritosAbandonadosPage() {
 
                 {/* Acciones */}
                 <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-gray-100">
+                  <Link href={`/carritos-abandonados/${cart.id}`}
+                       className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 text-xs font-medium rounded-lg hover:bg-indigo-100">
+                    <Eye className="w-3.5 h-3.5" /> Ver detalle
+                  </Link>
                   {wa && (
                     <a href={wa} target="_blank" rel="noreferrer"
                        className="flex items-center gap-1.5 px-3 py-1.5 bg-green-50 text-green-700 text-xs font-medium rounded-lg hover:bg-green-100">

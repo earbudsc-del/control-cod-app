@@ -28,7 +28,7 @@
 | Parser EFI | `src/lib/tracking/efi-parser.ts` | Basado en divs `tracking-item/content`, fallback a tablas |
 | Pipeline mini KPI | `components/shared/flujo-kpis.tsx` | Generadas activas → Tránsito activo → En reparto + chip Anuladas (en /novedad y /reparto) |
 | Helpers de estado | `src/lib/order-status-helpers.ts` | `isCancelledGuide` / `isGeneratedActive` / `isTransitActive` — lógica compartida entre /transito, /novedad, /reparto y flujo-stats |
-| Carritos abandonados | `/carritos-abandonados` | Recuperación de ventas COD desde Shopify abandoned checkouts. Roles: admin + confirmation_agent. Sync manual. Badges cobertura + SD. WA message pre-llenado. |
+| Carritos abandonados | `/carritos-abandonados` + `/carritos-abandonados/[id]` | Recuperación de ventas COD. Lista con filtros + vista detalle por carrito. Fuentes: Draft Orders (principal), COD Form, Checkout nativo. Roles: admin + confirmation_agent. Sync manual. Badges cobertura + SD. Mensaje WA inteligente. Timeline operativo. Señales IA preparadas. |
 | Alertas críticas | `src/lib/alert-helpers.ts` + `components/shared/alert-badges.tsx` | Duplicado + Fuera de cobertura en /confirmacion y /confirmados |
 
 ### APIs internas relevantes
@@ -41,6 +41,7 @@
 | `GET /api/confirmados` | Pedidos `confirmation_status='confirmed'`, filtros: `?filter=hoy\|ayer`, `?from=&to=` |
 | `GET /api/flujo-stats` | Conteos pipeline corregidos: `generadas` (activas, sin anuladas), `in_transit` (sin generadas ni anuladas), `en_reparto` (sin anuladas), `anuladas` (count separado) |
 | `GET /api/abandoned-carts` | Lista carritos abandonados con filtros (status, fecha, búsqueda). Devuelve `{ data, total, stats }`. Stats: pending/today/contactedToday/recovered. Roles: admin/ia_supervisor/confirmation_agent. |
+| `GET /api/abandoned-carts/[id]` | Devuelve `{ cart, recoveredOrder? }`. `recoveredOrder` tiene `{ id, tracking_number, order_number }` si `recovered_order_id` existe. Roles: admin/ia_supervisor/confirmation_agent. |
 | `POST /api/abandoned-carts/sync` | Sync paralelo: (1) `draft_orders.json?status=open+invoice_sent` (90 días) → fuente `shopify_draft_order` — **fuente principal en flujo COD**; (2) `checkouts.json?status=open` (30 días) → fuente `shopify_abandoned_checkout`. Upsert idempotente por su ID respectivo. Devuelve `{ drafts:{synced,new,updated,recovered}, checkouts:{synced,new,updated}, errors, draftScopeError? }`. Si falta scope `read_draft_orders` → `draftScopeError` con instrucción. |
 | `POST /api/abandoned-carts/cod-form` | **Endpoint público** — llamado desde el tema Shopify cuando el cliente inicia el formulario COD pero no completa. Protegido por `x-cod-form-secret` header. Deduplicación por session_id (a) o phone+24h (b). Fuente: `cod_form_lead`. Requiere `customer_phone` o `customer_email`. |
 | `PATCH /api/abandoned-carts/[id]/status` | Actualiza recovery_status + recovery_attempts + last_contacted_at. Body: `{ status, note? }`. Agrega nota de cambio si se provee. |
@@ -56,6 +57,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Carritos abandonados — Vista detalle `/carritos-abandonados/[id]`: nueva ruta + API GET. Datos cliente, producto, UTM, señales IA (placeholders), timeline de eventos, historial de notas. Acciones: cambio de estado, WA, llamar, nota. Mensaje WA inteligente según source y cobertura. Link "Ver orden" si recovered_order_id existe. Botón ojo (👁) en lista. npx tsc --noEmit limpio.** | 2026-05-10 | `api/abandoned-carts/[id]/route.ts` (nuevo), `(app)/carritos-abandonados/[id]/page.tsx` (nuevo), `(app)/carritos-abandonados/page.tsx` |
 | **Carritos abandonados — Draft Orders como fuente principal COD: migración 023 agrega campos draft order (shopify_draft_order_id, name, draft_status, completed_at). Sync reescrito para traer draft_orders.json?status=open+invoice_sent en paralelo con checkouts. Auto-recover de drafts completados durante sync. Badge "Shopify Draft" (violeta) + nombre #D2256 en UI. Toast desglosado por fuente. Aviso si falta scope read_draft_orders.** | 2026-05-10 | `023_abandoned_carts_draft_orders.sql` (nuevo), `api/abandoned-carts/sync/route.ts` (rewrite), `types/index.ts`, `(app)/carritos-abandonados/page.tsx` |
 | **Carritos abandonados — soporte COD form: migración 022 extiende tabla (shopify_checkout_id nullable, nuevos campos COD). Endpoint público `POST /api/abandoned-carts/cod-form` para leads parciales de formularios COD. Auto-recover por phone match en webhook orders/create. Badge de fuente (COD Form / Shopify / Manual) en UI. Info box en página explicando flujo COD. sync/route.ts ahora usa source='shopify_abandoned_checkout'. 0 checkouts en sync es esperado en flujo COD.** | 2026-05-10 | `022_abandoned_carts_cod_form.sql` (nuevo), `api/abandoned-carts/cod-form/route.ts` (nuevo), `api/webhooks/shopify/orders/route.ts`, `api/abandoned-carts/sync/route.ts`, `(app)/carritos-abandonados/page.tsx`, `types/index.ts` |
 | **Módulo Carritos Abandonados: nuevo módulo /carritos-abandonados para recuperación ventas COD. Tabla abandoned_carts (migración 021). Sync desde Shopify `checkouts.json`. Badges cobertura y SD reutilizados. Mensaje WA pre-llenado con variantes por zona. Estados: pending/contacted/no_answer/recovered/discarded. Roles: admin + confirmation_agent. Mobile-first cards + tabla desktop.** | 2026-05-10 | `021_abandoned_carts.sql` (nuevo), `types/index.ts`, `api/abandoned-carts/route.ts` (nuevo), `api/abandoned-carts/sync/route.ts` (nuevo), `api/abandoned-carts/[id]/status/route.ts` (nuevo), `api/abandoned-carts/[id]/note/route.ts` (nuevo), `(app)/carritos-abandonados/page.tsx` (nuevo), `sidebar.tsx` |
@@ -1894,7 +1896,73 @@ El endpoint `cod-form` usa `createServiceClient()` (bypass RLS) — no requiere 
 | `cod_form_lead` | "COD Form" | azul |
 | `manual_import` | "Manual" | gris |
 
-Componente `SourceBadge` inline en `carritos-abandonados/page.tsx`. Aparece junto al badge de estado en tabla desktop y mobile cards.
+Componente `SourceBadge` inline en `carritos-abandonados/page.tsx` y `carritos-abandonados/[id]/page.tsx`. Aparece junto al badge de estado en tabla desktop, mobile cards y header del detalle.
+
+---
+
+#### Vista detalle: `/carritos-abandonados/[id]`
+
+**Ruta:** `src/app/(app)/carritos-abandonados/[id]/page.tsx`
+**API:** `GET /api/abandoned-carts/[id]` → `src/app/api/abandoned-carts/[id]/route.ts`
+**Roles con acceso:** `admin`, `ia_supervisor`, `confirmation_agent` (mismos que la lista)
+
+**Layout:** header + banners de cobertura + grid `lg:grid-cols-3`
+
+**Columna izquierda (col-span-2):**
+| Sección | Contenido |
+|---|---|
+| Datos del cliente | nombre, teléfono (link tel:), email, dirección, ciudad, provincia, timestamps |
+| Producto / Pedido | products_summary, total_amount, currency, shopify_draft_order_name, draft_status, product_id, variant_id, checkout_url / invoice_url |
+| Tracking marketing | utm_source, utm_campaign, utm_content, referrer, page_url, session_id — solo visible si hay algún dato |
+| Señales de intención | Placeholders preparados para IA: score intención / prob. recuperación / riesgo fake lead / cliente frecuente. Badge "IA próxima". Sin datos reales. |
+| Historial operativo | Timeline de eventos (created_at, abandoned_at, last_contacted_at, completed_at, recovery status). Historial de notas del agente (split `\n\n`). |
+
+**Columna derecha:**
+| Sección | Contenido |
+|---|---|
+| Estado del carrito | 5 botones: Pendiente / Contactado / No responde / Recuperado / Descartado. Checkmark en estado actual. Link "Ver orden recuperada" si `recovered_order_id` existe. |
+| Contactar | Botón WhatsApp (verde, llama PATCH status = 'contacted' automáticamente al hacer click) + Llamar + Agregar nota |
+| Mensaje sugerido | Mensaje WA dinámico según fuente + cobertura. Botón "Copiar". |
+| Cobertura | Resumen: SD / OOC / Destino especial / Zona desconocida / Dentro de cobertura |
+
+**Banners de cobertura (en header):**
+- `isOutOfCoverage` → banner rojo
+- `isSpecialDestination` → banner azul
+- `isUnknownZone` → banner amarillo
+- `isSantoDomingoOrder` → banner púrpura
+
+**Banner de recuperación (si `recovery_status = 'recovered'` y `recoveredOrder` existe):**
+- Banner verde con link directo a `/orders/{recoveredOrder.id}`
+
+**Timeline — eventos mostrados:**
+| Evento | Fuente | Color dot |
+|---|---|---|
+| Carrito registrado | `created_at` | gris |
+| Sincronizado / Lead recibido | `abandoned_at` (si ≠ created_at) | violeta |
+| Contactado | `last_contacted_at` | índigo |
+| Completado en Shopify | `completed_at` | verde |
+| Marcado recuperado (manual) | `updated_at` si recovery_status=recovered | verde |
+| Descartado | `updated_at` si recovery_status=discarded | gris claro |
+
+**Notas del agente:** campo `notes` (TEXT) se muestra como entradas individuales separadas por `\n\n`. Cada entrada tiene formato: `"dd/mm/yyyy, hh:mm:ss — Agente [Estado]: texto"`.
+
+**Mensaje WA inteligente en detalle:**
+- Draft Shopify → "Tu pedido de [producto] quedó casi listo en nuestra tienda."
+- COD Form → "Vimos que comenzaste un pedido de [producto] en nuestra tienda."
+- SD → closing "Como estás en Santo Domingo, podemos coordinar entrega rápida con nuestro transporte local."
+- OOC → closing "Antes de procesarlo, queremos validar si tenemos cobertura para tu zona."
+- Default → closing "Hacemos entrega con pago contra entrega, sin necesidad de pagar por adelantado."
+
+**Navegación:** botón ← vuelve a `/carritos-abandonados` (no `router.back()` — usa `router.push` para predictibilidad). La lista tiene botón ojo (👁) en tabla desktop y "Ver detalle" en mobile cards.
+
+**Cómo probar con #D2256:**
+1. Sync Shopify → carrito #D2256 aparece con badge "Shopify Draft"
+2. Click ojo en la fila → `/carritos-abandonados/{id}`
+3. Verificar: datos cliente, producto con "Draft #D2256" en violeta, cobertura
+4. Click WA → mensaje usa intro de Draft Shopify
+5. Cambiar estado a "Contactado" → checkmark se mueve
+6. Agregar nota → nota aparece en historial con timestamp
+7. Si `recovered_order_id` existe → banner verde + link al pedido
 
 ---
 
@@ -1967,17 +2035,23 @@ Esperado: `{ "ok": true, "action": "created", "id": "..." }` o `"action": "updat
 
 ---
 
-#### Archivos creados/modificados (2026-05-10)
+#### Archivos creados/modificados
 
 | Archivo | Cambio |
 |---|---|
 | `supabase/migrations/021_abandoned_carts.sql` | Base original: tabla, índices, RLS |
-| `supabase/migrations/022_abandoned_carts_cod_form.sql` | **NUEVO.** shopify_checkout_id nullable, índice único condicional, 8 nuevos campos COD form |
-| `src/types/index.ts` | `AbandonedCart` actualizada: shopify_checkout_id nullable, 8 nuevos campos |
-| `src/app/api/abandoned-carts/cod-form/route.ts` | **NUEVO.** Endpoint público para leads COD form. Auth por secret header. Deduplicación session_id → phone+24h. |
-| `src/app/api/abandoned-carts/sync/route.ts` | source actualizado a `shopify_abandoned_checkout`. Log explícito cuando sync devuelve 0. |
-| `src/app/api/webhooks/shopify/orders/route.ts` | Paso 11 nuevo: auto-recover carritos por phone match normalizado tras insertar pedido. |
-| `src/app/(app)/carritos-abandonados/page.tsx` | Componente `SourceBadge`. Info box fuentes soportadas. Badge fuente en tabla desktop y cards mobile. Texto sync actualizado. Empty state actualizado. |
+| `supabase/migrations/022_abandoned_carts_cod_form.sql` | shopify_checkout_id nullable, índice único condicional, 8 nuevos campos COD form |
+| `supabase/migrations/023_abandoned_carts_draft_orders.sql` | shopify_draft_order_id, shopify_draft_order_name, draft_status, completed_at. Índice único condicional por draft. |
+| `src/types/index.ts` | `AbandonedCart` actualizada: shopify_checkout_id nullable, campos COD form, campos draft order |
+| `src/app/api/abandoned-carts/route.ts` | Lista con filtros y stats |
+| `src/app/api/abandoned-carts/[id]/route.ts` | **NUEVO.** GET por ID. Devuelve `{ cart, recoveredOrder? }`. |
+| `src/app/api/abandoned-carts/cod-form/route.ts` | Endpoint público leads COD form. Auth header + deduplicación. |
+| `src/app/api/abandoned-carts/sync/route.ts` | Sync paralelo Draft Orders (fuente principal) + Checkouts (secundario). Auto-recover completed drafts. |
+| `src/app/api/abandoned-carts/[id]/status/route.ts` | PATCH recovery_status + incremento intentos + nota opcional |
+| `src/app/api/abandoned-carts/[id]/note/route.ts` | POST agrega nota con timestamp + agente (prepend) |
+| `src/app/api/webhooks/shopify/orders/route.ts` | Paso 11: auto-recover carritos por phone match normalizado tras insertar pedido. |
+| `src/app/(app)/carritos-abandonados/page.tsx` | Lista con filtros, sync, badges fuente, botón ojo → detalle. |
+| `src/app/(app)/carritos-abandonados/[id]/page.tsx` | **NUEVO.** Vista detalle completa: cliente, producto, UTM, IA signals, timeline, acciones, WA inteligente. |
 
 ---
 
