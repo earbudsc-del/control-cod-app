@@ -6,6 +6,7 @@ export interface SupervisorFeedback {
   title:          string
   message:        string
   recommendation: string
+  href?:          string
 }
 
 export interface RepartoPerf {
@@ -44,6 +45,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: 'Cola crítica alta',
       message: `Hay ${criticosActivos} pedidos con más de 48 horas en reparto sin novedad.`,
       recommendation: 'Prioriza contactar y escalar estos pedidos inmediatamente. Coordina con la mensajería.',
+      href:  '/reparto?filter=critical',
     })
   } else if (criticosActivos >= 2) {
     items.push({
@@ -52,6 +54,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: 'Pedidos críticos pendientes',
       message: `${criticosActivos} pedido${criticosActivos !== 1 ? 's' : ''} lleva${criticosActivos === 1 ? '' : 'n'} más de 48h en reparto.`,
       recommendation: 'Contacta al cliente y verifica con el mensajero para actualizar el estado.',
+      href:  '/reparto?filter=critical',
     })
   }
 
@@ -63,6 +66,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: 'Sin actividad registrada',
       message: 'No hay contactos ni entregas registradas hoy.',
       recommendation: 'Registra cada gestión en el sistema. Sin datos no hay visibilidad de tu operación.',
+      href:  '/reparto',
     })
   }
 
@@ -74,6 +78,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: 'Tasa de entrega baja',
       message: `Solo ${entregadosHoy} de ${contactadosHoy} gestiones resultaron en entrega (${tasaHoy}%).`,
       recommendation: 'Verifica si hay problemas de dirección o disponibilidad del cliente. Escala los casos difíciles.',
+      href:  '/reparto',
     })
   }
 
@@ -85,6 +90,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: 'Muchos clientes sin respuesta',
       message: `${incidenciasHoy} de ${contactadosHoy} contactos no pudieron completarse (no responde o número incorrecto).`,
       recommendation: 'Intenta en distintos horarios. Para números incorrectos, verifica con el agente de confirmación.',
+      href:  '/reparto',
     })
   }
 
@@ -96,6 +102,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: 'Varios escalados hoy',
       message: `Registraste ${escaladosHoy} reclamos a mensajería hoy.`,
       recommendation: 'Asegúrate de que cada reclamo tenga toda la información necesaria para que el courier pueda actuar.',
+      href:  '/reparto',
     })
   }
 
@@ -111,6 +118,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: 'Rendimiento por debajo de ayer',
       message: `Ayer entregaste ${entregadosAyer} pedidos, hoy llevas ${entregadosHoy}.`,
       recommendation: 'Revisa si hay un factor externo afectando las entregas hoy (zona, horario, clima).',
+      href:  '/reparto',
     })
   }
 
@@ -122,6 +130,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: '¡Meta de entregas alcanzada!',
       message: `Superaste las 10 entregas del día con ${entregadosHoy} en total.`,
       recommendation: 'Excelente desempeño. Mantén el ritmo y apoya a gestionar los casos críticos restantes.',
+      href:  '/reparto',
     })
   }
 
@@ -133,6 +142,7 @@ export function generateRepartoFeedback(perf: RepartoPerf): SupervisorFeedback[]
       title: 'Excelente desempeño hoy',
       message: `${entregadosHoy} entregas completadas y sin pedidos críticos en cola.`,
       recommendation: 'Sigue así. Registra cualquier novedad para mantener la operación transparente.',
+      href:  '/reparto',
     })
   }
 

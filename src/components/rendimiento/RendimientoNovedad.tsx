@@ -378,9 +378,22 @@ function SupervisorSection({ items }: { items: ReturnType<typeof generateNovelty
                     <p className="text-sm text-gray-600 mt-0.5 leading-snug">{item.message}</p>
                   </div>
                 </div>
-                <p className="text-xs text-red-700 bg-red-50 rounded-lg px-3 py-1.5 leading-snug ml-6">
-                  <span className="font-semibold">Recomendación:</span> {item.recommendation}
-                </p>
+                <div className="flex items-start justify-between gap-2 ml-6">
+                  <p className="text-xs text-red-700 bg-red-50 rounded-lg px-3 py-1.5 leading-snug flex-1">
+                    <span className="font-semibold">Recomendación:</span> {item.recommendation}
+                  </p>
+                  {item.href && (
+                    <Link
+                      href={item.href}
+                      className="shrink-0 text-xs font-semibold px-2.5 py-1.5 rounded-lg
+                                 bg-red-600 hover:bg-red-700 text-white transition-colors
+                                 flex items-center gap-1"
+                    >
+                      Ver casos
+                      <ArrowRight className="w-3 h-3" />
+                    </Link>
+                  )}
+                </div>
               </div>
             </div>
           )

@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { NavShell } from '@/components/layout/nav-shell'
+import { SupervisorFloatingAssistant } from '@/components/supervisor/SupervisorFloatingAssistant'
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient()
@@ -26,6 +27,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           {children}
         </div>
       </main>
+      {/* Asistente flotante del Supervisor IA — visible solo para agentes operativos */}
+      <SupervisorFloatingAssistant role={role} />
     </div>
   )
 }

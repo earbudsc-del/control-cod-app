@@ -6,6 +6,7 @@ export interface SupervisorFeedback {
   title:          string
   message:        string
   recommendation: string
+  href?:          string
 }
 
 export interface NoveltyPerf {
@@ -47,6 +48,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          'Pocas novedades trabajadas',
       message:        `Solo has trabajado ${novedadesTrabajadasHoy} novedad${novedadesTrabajadasHoy !== 1 ? 'es' : ''} hoy. El objetivo mínimo es 5 antes del mediodía.`,
       recommendation: 'Revisa la cola de novedades y prioriza los pedidos con más intentos de entrega fallidos.',
+      href:           '/novedad',
     })
   }
 
@@ -58,6 +60,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          'Tasa de recuperación crítica',
       message:        `Tu tasa de recuperación es ${tasaRecuperacionHoy}%, muy por debajo del mínimo del 40%.`,
       recommendation: 'Asegúrate de registrar correctamente cada resultado. Si el cliente no responde, intenta en un horario diferente antes de marcar como no salvable.',
+      href:           '/novedad',
     })
   }
 
@@ -69,6 +72,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          'Excelente tasa de recuperación',
       message:        `Llevas un ${tasaRecuperacionHoy}% de recuperación hoy. Sigue así.`,
       recommendation: 'Mantén el ritmo y enfócate en reducir los pedidos atrasados pendientes.',
+      href:           '/novedad',
     })
   }
 
@@ -80,6 +84,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          'Cola de atrasados crítica',
       message:        `Tienes ${atrasadosPendientes} novedades con más de 24h sin gestionar.`,
       recommendation: 'Atiéndelos primero antes de nuevas novedades. Escala al supervisor los que no puedas resolver hoy.',
+      href:           '/novedad',
     })
   } else if (atrasadosPendientes > 0) {
     items.push({
@@ -88,6 +93,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          'Novedades atrasadas pendientes',
       message:        `Tienes ${atrasadosPendientes} novedad${atrasadosPendientes !== 1 ? 'es' : ''} con más de 24h sin gestionar.`,
       recommendation: 'Priorízalas al inicio de tu jornada antes de atender novedades nuevas.',
+      href:           '/novedad',
     })
   }
 
@@ -99,6 +105,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          'Muchos clientes sin respuesta',
       message:        `El ${Math.round((pedidosNoRespondenHoy / pedidosContactadosHoy) * 100)}% de tus contactos hoy no respondieron (${pedidosNoRespondenHoy} de ${pedidosContactadosHoy}).`,
       recommendation: 'Prueba contactar entre 11am–1pm y 5pm–7pm. Si un cliente no responde en 2 intentos, coordina con el courier para reprogramar directamente.',
+      href:           '/novedad',
     })
   }
 
@@ -110,6 +117,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          `${pedidosNoSalvablesHoy} pedidos marcados como no salvables`,
       message:        'Un número elevado de no salvables puede indicar problemas con la dirección, producto o proceso de contacto.',
       recommendation: 'Revisa si hay un patrón común (misma ciudad, mismo motivo de novedad) y comenta al supervisor.',
+      href:           '/novedad',
     })
   }
 
@@ -128,6 +136,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          'Tasa inferior a ayer',
       message:        `Hoy llevas ${tasaRecuperacionHoy}% vs ${tasaAyer}% de ayer (−${diff} puntos).`,
       recommendation: 'Identifica qué funcionó ayer y trata de replicarlo. Revisa si los pedidos de hoy tienen más intentos fallidos que los de ayer.',
+      href:           '/novedad',
     })
   }
 
@@ -139,6 +148,7 @@ export function generateNoveltyFeedback(perf: NoveltyPerf): SupervisorFeedback[]
       title:          '¡Meta del día alcanzada!',
       message:        `Has reprogramado ${pedidosReprogramadosHoy} pedidos hoy, superando el objetivo de 20.`,
       recommendation: 'Aprovecha el resto de la jornada para reducir la cola de atrasados.',
+      href:           '/novedad',
     })
   }
 

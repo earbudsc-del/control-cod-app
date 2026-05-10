@@ -4,6 +4,113 @@
 
 ---
 
+## SUPERVISOR IA — Comunicación directa con agentes: SupervisorFloatingAssistant (2026-05-10)
+
+### Qué se hizo
+
+Primera versión de comunicación directa del Supervisor IA con los agentes operativos. El Supervisor aparece como un botón flotante en la esquina inferior derecha de la pantalla, visible solo para agentes (`confirmation_agent`, `novelty_agent`, `delivery_agent`). Al hacer click abre un panel lateral con alertas, prioridades y coaching personalizados por rol, basados en métricas reales de la DB. Cada alerta es clickeable y lleva al módulo exacto.
+
+### Archivos creados/modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/supervisor-ia/agent-feed/route.ts` | **NUEVO.** Endpoint `GET /api/supervisor-ia/agent-feed`. Solo para agentes (401/403 para admin/ia_supervisor). Tres funciones de construcción: `buildConfirmationFeed`, `buildNoveltyFeed`, `buildDeliveryFeed`. Queries paralelas en Supabase. Devuelve `{ role, generatedAt, alerts, priorities, coaching }`. |
+| `src/components/supervisor/SupervisorFloatingAssistant.tsx` | **NUEVO.** Componente client-side con botón flotante, overlay y panel lateral deslizable. Auto-fetch al montar + refresh cada 5 min. Badge con contador de alertas. Cierre con Escape o click en overlay. |
+| `src/app/(app)/layout.tsx` | **MODIFICADO.** Importa y renderiza `<SupervisorFloatingAssistant role={role} />` después de `<main>`. Solo se activa internamente si el rol es agente. |
+| `src/lib/supervisor/confirmation-feedback.ts` | **MODIFICADO.** `SupervisorFeedback` interface añade `href?: string`. Todos los items del generador incluyen `href: '/confirmacion'`. |
+| `src/lib/supervisor/novelty-feedback.ts` | **MODIFICADO.** Igual — `href?: string` + `href: '/novedad'` en cada item. |
+| `src/lib/supervisor/reparto-feedback.ts` | **MODIFICADO.** Igual — `href?: string`. Items con `href` específico: críticos → `/reparto?filter=critical`, resto → `/reparto`. |
+| `src/components/rendimiento/RendimientoConfirmacion.tsx` | **MODIFICADO.** `SupervisorSection` ahora muestra botón "Ver casos →" (indigo) cuando `item.href` existe. |
+| `src/components/rendimiento/RendimientoNovedad.tsx` | **MODIFICADO.** Igual — botón "Ver casos →" (rojo). |
+| `src/components/rendimiento/RendimientoReparto.tsx` | **MODIFICADO.** Igual — botón "Ver casos →" (ámbar). |
+
+### API: `GET /api/supervisor-ia/agent-feed`
+
+**Auth:** Supabase session + check de rol. 401 sin sesión. 403 para admin/ia_supervisor.
+
+**Respuesta:**
+```typescript
+{
+  role:        'confirmation_agent' | 'novelty_agent' | 'delivery_agent',
+  generatedAt: string,   // ISO timestamp
+  alerts:      AgentAlert[],    // críticas y warnings urgentes
+  priorities:  AgentAlert[],    // prioridades del día
+  coaching:    AgentAlert[]     // contexto y sugerencias operativas
+}
+
+interface AgentAlert {
+  id:       string
+  severity: 'info' | 'warning' | 'critical'
+  title:    string
+  message:  string
+  count?:   number
+  href?:    string
+}
+```
+
+### Reglas por rol
+
+#### confirmation_agent
+| Alerta | Severidad | Href |
+|---|---|---|
+| Pedidos +24h sin confirmar | critical | `/confirmacion` |
+| Reintentos pendientes | warning/info | `/confirmacion` |
+| Pedidos nuevos | info | `/confirmacion` |
+| Carritos abandonados pendientes | warning/info | `/carritos-abandonados?status=pending` |
+| Sin cobertura | info | `/confirmacion` |
+
+#### novelty_agent
+| Alerta | Severidad | Href |
+|---|---|---|
+| Novedades con 2+ intentos | critical/warning | `/novedad?filter=2-intentos` |
+| Novedades +14 días | critical | `/novedad` |
+| Generadas críticas +48h | critical | `/transito?tab=generadas` |
+| Novedades +7 días | warning | `/novedad` |
+| Tránsito crítico +48h | warning | `/transito?tab=transito` |
+| Novedades activas total | info | `/novedad` |
+| Posibles indemnizaciones | warning | `/supervisor-ia#indemnizaciones` |
+
+#### delivery_agent
+| Alerta | Severidad | Href |
+|---|---|---|
+| Reparto crítico +48h | critical | `/reparto?filter=critical` |
+| Reparto en riesgo 24–48h | warning | `/reparto?filter=risk` |
+| Total en reparto | info | `/reparto` |
+| Entregados hoy | info | `/reparto` |
+
+### SupervisorFloatingAssistant — comportamiento
+
+- **Posición:** `fixed bottom-6 right-6 z-40` — esquina inferior derecha
+- **Botón:** Bot icon + "Supervisor IA" (label oculto en mobile) + badge contador
+- **Badge rojo:** cuando hay alertas críticas → botón se vuelve rojo
+- **Panel:** `fixed right-0 top-0 h-full w-80` — desliza desde la derecha
+- **Overlay:** `bg-black/30` detrás del panel — click cierra
+- **Cierre:** botón ✕ en header, tecla Escape, o click en overlay
+- **Auto-refresh:** cada 5 min via `setInterval`. Timestamp visible en sub-header del panel.
+- **Secciones del panel:** Alertas / Prioridades del día / Coaching (cada una se oculta si está vacía)
+- **Estado vacío:** Icono CheckCircle2 verde + "Todo en orden"
+
+### Integración Mi rendimiento — sugerencias accionables
+
+Los 3 componentes de rendimiento ahora muestran un botón "Ver casos →" junto a cada recomendación del Supervisor IA cuando tiene `href`. El botón es del color del módulo (indigo/rojo/ámbar según el componente).
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `confirmation_agent` → ver botón flotante "Supervisor IA" esquina inferior derecha
+3. Click en el botón → panel lateral desliza desde la derecha
+4. Verificar: alertas correctas con conteos reales (pedidos +24h, reintentos, carritos)
+5. Click en "Ver casos" → navega al módulo correcto con filtro aplicado
+6. Esperar 5 min o click "Actualizar" → datos se refrescan
+7. Login como `novelty_agent` → alertas diferentes (novedades 2 intentos, generadas críticas, etc.)
+8. Login como `delivery_agent` → alertas de reparto crítico y en riesgo
+9. Login como `admin` → NO aparece el botón flotante
+10. Login como `ia_supervisor` → NO aparece el botón flotante
+11. Ir a `/mi-rendimiento` como cualquier agente → sugerencias del Supervisor IA tienen botón "Ver casos →" clickeable
+12. `npx tsc --noEmit` → sin errores
+
+---
+
 ## SUPERVISOR IA — Devoluciones indemnizables auditables (2026-05-10)
 
 ### Qué se hizo

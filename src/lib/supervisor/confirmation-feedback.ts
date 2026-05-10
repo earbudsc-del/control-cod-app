@@ -6,6 +6,7 @@ export interface SupervisorFeedback {
   title:          string
   message:        string
   recommendation: string
+  href?:          string
 }
 
 export interface ConfirmPerf {
@@ -38,6 +39,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          'Ritmo de contacto bajo',
       message:        `Solo has contactado ${contactadosHoy} cliente${contactadosHoy !== 1 ? 's' : ''} hoy. El objetivo mínimo es 10 antes del mediodía.`,
       recommendation: 'Revisa la cola de nuevos pedidos y prioriza los más recientes.',
+      href:           '/confirmacion',
     })
   }
 
@@ -49,6 +51,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          'Tasa de confirmación crítica',
       message:        `Tu tasa es ${tasaConfirmacionHoy}%, muy por debajo del mínimo del 40%.`,
       recommendation: 'Asegúrate de registrar cada resultado correctamente. Si el cliente no contestó, márquelo como "no responde" y no como cancelado.',
+      href:           '/confirmacion',
     })
   }
 
@@ -60,6 +63,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          'Excelente tasa de confirmación',
       message:        `Llevas un ${tasaConfirmacionHoy}% de confirmaciones hoy. Sigue así.`,
       recommendation: 'Mantén el ritmo y enfócate en reducir los pedidos atrasados.',
+      href:           '/confirmacion',
     })
   }
 
@@ -71,6 +75,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          'Cola de atrasados crítica',
       message:        `Tienes ${atrasadosPendientes} pedidos con más de 48h sin confirmar.`,
       recommendation: 'Atiéndelos primero antes de nuevos pedidos. Escala al supervisor los que no puedas resolver.',
+      href:           '/confirmacion',
     })
   } else if (atrasadosPendientes > 0) {
     items.push({
@@ -79,6 +84,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          'Pedidos atrasados pendientes',
       message:        `Tienes ${atrasadosPendientes} pedido${atrasadosPendientes !== 1 ? 's' : ''} con más de 48h sin confirmar.`,
       recommendation: 'Priorízalos al inicio de tu jornada antes de atender pedidos nuevos.',
+      href:           '/confirmacion',
     })
   }
 
@@ -90,6 +96,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          'Muchos clientes sin respuesta',
       message:        `El ${Math.round((noRespondieronHoy / contactadosHoy) * 100)}% de tus contactos de hoy no respondieron (${noRespondieronHoy} de ${contactadosHoy}).`,
       recommendation: 'Prueba contactar en horarios distintos: entre 11am–1pm y 5pm–7pm suele haber mejor respuesta.',
+      href:           '/confirmacion',
     })
   }
 
@@ -101,6 +108,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          `${canceladosHoy} pedidos cancelados hoy`,
       message:        'Un número elevado de cancelaciones puede indicar problemas con los pedidos o el proceso de contacto.',
       recommendation: 'Revisa si hay un patrón (misma ciudad, mismo producto) y comenta al supervisor si se repite.',
+      href:           '/confirmacion',
     })
   }
 
@@ -119,6 +127,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          'Tasa inferior a ayer',
       message:        `Hoy llevas ${tasaConfirmacionHoy}% vs ${tasaAyer}% de ayer (−${diff} puntos).`,
       recommendation: 'Identifica qué funcionó ayer y trata de replicarlo. Revisa si cambiaste el guión de contacto.',
+      href:           '/confirmacion',
     })
   }
 
@@ -130,6 +139,7 @@ export function generateSupervisorFeedback(perf: ConfirmPerf): SupervisorFeedbac
       title:          '¡Meta del día alcanzada!',
       message:        `Has confirmado ${confirmadosHoy} pedidos hoy, superando el objetivo de 25.`,
       recommendation: 'Aprovecha el resto de la jornada para reducir la cola de atrasados.',
+      href:           '/confirmacion',
     })
   }
 
