@@ -57,6 +57,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Recuperados en /confirmados: API enriquece pedidos con `recovered_cart_id` + `recovered_cart_source` via JOIN secundario a `abandoned_carts`. Tarjeta "Recuperados de carrito" con count. Filtro `?filter=recuperados` server-side. Badge visual por tipo (Draft/COD Form/carrito). Fondo teal en filas recuperadas. Link "Ver carrito →" navega a `/carritos-abandonados/[id]`. Info banner contextual cuando el filtro está activo. `npx tsc --noEmit` limpio.** | 2026-05-10 | `api/confirmados/route.ts`, `(app)/confirmados/page.tsx` |
 | **Carritos abandonados — Vista detalle `/carritos-abandonados/[id]`: nueva ruta + API GET. Datos cliente, producto, UTM, señales IA (placeholders), timeline de eventos, historial de notas. Acciones: cambio de estado, WA, llamar, nota. Mensaje WA inteligente según source y cobertura. Link "Ver orden" si recovered_order_id existe. Botón ojo (👁) en lista. npx tsc --noEmit limpio.** | 2026-05-10 | `api/abandoned-carts/[id]/route.ts` (nuevo), `(app)/carritos-abandonados/[id]/page.tsx` (nuevo), `(app)/carritos-abandonados/page.tsx` |
 | **Carritos abandonados — Draft Orders como fuente principal COD: migración 023 agrega campos draft order (shopify_draft_order_id, name, draft_status, completed_at). Sync reescrito para traer draft_orders.json?status=open+invoice_sent en paralelo con checkouts. Auto-recover de drafts completados durante sync. Badge "Shopify Draft" (violeta) + nombre #D2256 en UI. Toast desglosado por fuente. Aviso si falta scope read_draft_orders.** | 2026-05-10 | `023_abandoned_carts_draft_orders.sql` (nuevo), `api/abandoned-carts/sync/route.ts` (rewrite), `types/index.ts`, `(app)/carritos-abandonados/page.tsx` |
 | **Carritos abandonados — soporte COD form: migración 022 extiende tabla (shopify_checkout_id nullable, nuevos campos COD). Endpoint público `POST /api/abandoned-carts/cod-form` para leads parciales de formularios COD. Auto-recover por phone match en webhook orders/create. Badge de fuente (COD Form / Shopify / Manual) en UI. Info box en página explicando flujo COD. sync/route.ts ahora usa source='shopify_abandoned_checkout'. 0 checkouts en sync es esperado en flujo COD.** | 2026-05-10 | `022_abandoned_carts_cod_form.sql` (nuevo), `api/abandoned-carts/cod-form/route.ts` (nuevo), `api/webhooks/shopify/orders/route.ts`, `api/abandoned-carts/sync/route.ts`, `(app)/carritos-abandonados/page.tsx`, `types/index.ts` |
@@ -2052,6 +2053,92 @@ Esperado: `{ "ok": true, "action": "created", "id": "..." }` o `"action": "updat
 | `src/app/api/webhooks/shopify/orders/route.ts` | Paso 11: auto-recover carritos por phone match normalizado tras insertar pedido. |
 | `src/app/(app)/carritos-abandonados/page.tsx` | Lista con filtros, sync, badges fuente, botón ojo → detalle. |
 | `src/app/(app)/carritos-abandonados/[id]/page.tsx` | **NUEVO.** Vista detalle completa: cliente, producto, UTM, IA signals, timeline, acciones, WA inteligente. |
+
+---
+
+### /confirmados — Pedidos recuperados de carrito (2026-05-10)
+
+**Flujo completo: carrito abandonado → recovered → pedido real → /confirmados**
+
+```
+Cliente abandona → abandoned_carts (recovery_status='pending')
+  ↓ agente contacta en /carritos-abandonados
+  ↓ cliente completa la compra (COD form o Draft Order completa)
+  ↓ Shopify crea la orden → webhook orders/create
+      → auto-recover: abandoned_carts.recovery_status='recovered'
+                      abandoned_carts.recovered_order_id = shopify_order_id
+      → INSERT orders (source='shopify_webhook', confirmation_status='pending')
+  ↓ agente confirma en /confirmacion
+      → confirmation_status='confirmed'
+  ↓ aparece en /confirmados con badge "Recuperado de carrito"
+  ↓ admin despacha normalmente
+```
+
+**Cómo se detecta `recovered_order_id`:**
+- El campo `abandoned_carts.recovered_order_id` se setea con el `shopify_order_id` del pedido.
+- El webhook `orders/create` hace auto-recover por phone match: normaliza el teléfono del pedido entrante y busca carritos pendientes del mismo teléfono. Los que coinciden quedan `recovered` con `recovered_order_id = shopify_order_id`.
+- También el sync de Draft Orders marca como recovered si el draft tiene `completed_at`.
+
+**Relación entre tablas:**
+```
+orders.shopify_order_id = abandoned_carts.recovered_order_id
+```
+No hay FK formal — el join se hace en TypeScript en la API.
+
+**`GET /api/confirmados` — enriquecimiento:**
+1. Query principal: pedidos `confirmed + tracking IS NULL` (igual que antes)
+2. Se agrega `shopify_order_id` al SELECT
+3. Query secundaria: `abandoned_carts WHERE recovered_order_id IN (shopify_order_ids) AND recovery_status='recovered'`
+4. Se construye un `cartMap: Record<shopify_order_id, { id, source }>` para lookup O(1)
+5. Cada pedido recibe `recovered_cart_id` y `recovered_cart_source` (null si no recuperado)
+6. Stats agrega campo `recuperados` (count de pedidos con `recovered_cart_id != null`)
+7. Nuevo param `?filter=recuperados`: filtra pedidos cuyo `shopify_order_id` está en `abandoned_carts.recovered_order_id`
+
+**Tab/filtro "Recuperados de carrito":**
+- Botón en la barra de filtros: `🛒 Recuperados` → llama `/api/confirmados?filter=recuperados`
+- Tarjeta teal en el grid de resumen: muestra `stats.recuperados` y es clickeable
+- No crea duplicados — solo filtra los ya existentes en `/confirmados`
+- Los pedidos recuperados siguen apareciendo en "Todos" (sin filtro)
+
+**Badges visuales (componente `RecoveredBadge`):**
+| `recovered_cart_source` | Badge | Color |
+|---|---|---|
+| `shopify_draft_order` | "Recuperado Draft" | violeta |
+| `cod_form_lead` | "Recuperado COD Form" | azul |
+| cualquier otro | "Recuperado de carrito" | teal |
+
+- Badge aparece bajo el teléfono del cliente en la columna "Cliente"
+- Incluye link "Ver carrito →" que navega a `/carritos-abandonados/{id}`
+- Filas recuperadas tienen fondo teal sutil (`bg-teal-50/40`)
+
+**Info banner:** Cuando el filtro `recuperados` está activo, aparece un banner teal explicando que estos pedidos deben tratarse como cualquier confirmado (asignar guía EFI y despachar normalmente).
+
+**Archivos modificados:**
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/confirmados/route.ts` | Agrega `shopify_order_id` al SELECT. Query secundaria a `abandoned_carts`. Enriquece cada orden con `recovered_cart_id`/`recovered_cart_source`. Nuevo `?filter=recuperados`. Stats agrega campo `recuperados`. |
+| `src/app/(app)/confirmados/page.tsx` | Tipo `ConfirmadoOrder` agrega `shopify_order_id`, `recovered_cart_id`, `recovered_cart_source`. Tarjeta teal "Recuperados de carrito". Botón filtro "🛒 Recuperados". Componente `RecoveredBadge`. Fondo teal en filas recuperadas. Info banner. |
+
+**Cómo probar con un Draft Order real:**
+1. Crear/sincronizar un Draft Order en Shopify Admin → aparece en `/carritos-abandonados`
+2. Completar el Draft Order en Shopify (convierte a pedido real)
+3. El webhook `orders/create` entra → auto-recover marca el carrito como `recovered`
+   - O bien: hacer Sync en `/carritos-abandonados` → el draft con `completed_at` se auto-recupera
+4. El agente confirma el pedido en `/confirmacion`
+5. El pedido aparece en `/confirmados`:
+   - Tarjeta "Recuperados de carrito" muestra count ≥ 1
+   - Filtro "🛒 Recuperados" lista el pedido
+   - Badge "Recuperado Draft" (violeta) aparece en la fila
+   - Link "Ver carrito →" lleva a `/carritos-abandonados/{id}`
+   - El pedido también aparece en "Todos" (sin duplicación)
+6. El admin puede marcar "Listo para despacho" igual que cualquier pedido confirmado
+
+**Restricciones:**
+- No se hacen migraciones de DB — detección 100% via JOIN TypeScript
+- El `recovered_order_id` en `abandoned_carts` debe ser un `shopify_order_id` válido (lo garantiza el webhook)
+- Si un pedido tiene múltiples carritos recuperados (edge case), se usa el primero encontrado en el cartMap
+- `npx tsc --noEmit` limpio confirmado
 
 ---
 

@@ -8,17 +8,18 @@ import { formatCurrency, formatEventDate } from '@/lib/utils'
 import {
   CheckCircle2, RefreshCw, Package, Search,
   Calendar, Truck, MapPin, AlertTriangle,
-  ChevronLeft, ChevronRight, ClipboardList,
+  ChevronLeft, ChevronRight, ClipboardList, ShoppingCart,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 
-type FilterType  = 'todos' | 'hoy' | 'ayer' | 'rango'
+type FilterType  = 'todos' | 'hoy' | 'ayer' | 'rango' | 'recuperados'
 type AlertFilter = 'todos' | 'duplicados' | 'cobertura' | 'zona_desconocida' | 'santo_domingo'
 
 interface ConfirmadoOrder {
   id:                        string
   order_number:              string | null
+  shopify_order_id:          string | null
   customer_name:             string | null
   customer_phone:            string | null
   customer_address:          string | null
@@ -31,11 +32,13 @@ interface ConfirmadoOrder {
   duplicate_alert:           boolean | null
   duplicate_of_order_id:     string | null
   duplicate_reason:          string | null
+  recovered_cart_id:         string | null
+  recovered_cart_source:     string | null
 }
 
 interface ApiResponse {
   data:  ConfirmadoOrder[]
-  stats: { confirmados_hoy: number; confirmados_ayer: number }
+  stats: { confirmados_hoy: number; confirmados_ayer: number; recuperados: number }
 }
 
 const METHOD_BADGE: Record<string, { label: string; cls: string }> = {
@@ -44,12 +47,35 @@ const METHOD_BADGE: Record<string, { label: string; cls: string }> = {
   other:    { label: 'Otro',     cls: 'bg-gray-100 text-gray-600'   },
 }
 
+function RecoveredBadge({ source, cartId }: { source: string; cartId: string }) {
+  const badge = source === 'shopify_draft_order'
+    ? { label: 'Recuperado Draft',        cls: 'bg-violet-100 text-violet-700 border border-violet-200' }
+    : source === 'cod_form_lead'
+      ? { label: 'Recuperado COD Form',   cls: 'bg-blue-100 text-blue-700 border border-blue-200' }
+      : { label: 'Recuperado de carrito', cls: 'bg-teal-100 text-teal-700 border border-teal-200' }
+
+  return (
+    <div className="flex items-center gap-1 mt-0.5 flex-wrap">
+      <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${badge.cls}`}>
+        <ShoppingCart className="w-2.5 h-2.5 shrink-0" />
+        {badge.label}
+      </span>
+      <Link
+        href={`/carritos-abandonados/${cartId}`}
+        className="text-[10px] text-teal-600 hover:underline font-medium"
+      >
+        Ver carrito →
+      </Link>
+    </div>
+  )
+}
+
 export default function ConfirmadosPage() {
   const searchParams   = useSearchParams()
   const initialFilter  = (searchParams.get('filter') as FilterType) ?? 'todos'
 
   const [orders, setOrders]           = useState<ConfirmadoOrder[]>([])
-  const [stats, setStats]             = useState({ confirmados_hoy: 0, confirmados_ayer: 0 })
+  const [stats, setStats]             = useState({ confirmados_hoy: 0, confirmados_ayer: 0, recuperados: 0 })
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const [activeFilter, setActiveFilter] = useState<FilterType>(initialFilter)
@@ -64,8 +90,9 @@ export default function ConfirmadosPage() {
   const PAGE_SIZE = 50
 
   function buildUrl(filter: FilterType, from: string, to: string): string {
-    if (filter === 'hoy')  return '/api/confirmados?filter=hoy'
-    if (filter === 'ayer') return '/api/confirmados?filter=ayer'
+    if (filter === 'hoy')         return '/api/confirmados?filter=hoy'
+    if (filter === 'ayer')        return '/api/confirmados?filter=ayer'
+    if (filter === 'recuperados') return '/api/confirmados?filter=recuperados'
     if (filter === 'rango' && from && to) return `/api/confirmados?from=${from}T04:00:00Z&to=${to}T03:59:59Z`
     return '/api/confirmados'
   }
@@ -82,7 +109,7 @@ export default function ConfirmadosPage() {
         fetch('/api/confirmacion/stats').then(r => r.json()),
       ])
       setOrders(res.data  ?? [])
-      setStats(res.stats  ?? { confirmados_hoy: 0, confirmados_ayer: 0 })
+      setStats(res.stats  ?? { confirmados_hoy: 0, confirmados_ayer: 0, recuperados: 0 })
       setPipelineCounts({
         pendingTotal: pipelineRes.pendingTotal ?? 0,
         despachados:  pipelineRes.despachados  ?? 0,
@@ -104,11 +131,13 @@ export default function ConfirmadosPage() {
 
   function applyFilter(filter: FilterType) {
     setActiveFilter(filter)
+    setAlertFilter('todos')
     fetchData(filter, fromDate, toDate)
   }
 
   function applyRango() {
     setActiveFilter('rango')
+    setAlertFilter('todos')
     fetchData('rango', fromDate, toDate)
   }
 
@@ -117,6 +146,7 @@ export default function ConfirmadosPage() {
     cobertura:    orders.filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage).length,
     unknown:      orders.filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone).length,
     santoDomingo: orders.filter(o => isSantoDomingoOrder(o.city, null, o.customer_address)).length,
+    recuperados:  orders.filter(o => o.recovered_cart_id !== null).length,
   }), [orders])
 
   const displayed = useMemo(() => {
@@ -151,6 +181,11 @@ export default function ConfirmadosPage() {
     setReadyMap(prev => ({ ...prev, [id]: true }))
   }
 
+  // Count de recuperados en el filtro actual (para mostrar en el banner cuando aplica)
+  const recuperadosInView = activeFilter === 'recuperados'
+    ? orders.length
+    : alertCounts.recuperados
+
   return (
     <div className="space-y-4">
 
@@ -177,6 +212,13 @@ export default function ConfirmadosPage() {
                                    text-xs font-bold px-2.5 py-1 rounded-full">
                     <span className="w-1.5 h-1.5 rounded-full bg-white" />
                     CONFIRMADOS
+                  </span>
+                )}
+                {!loading && recuperadosInView > 0 && (
+                  <span className="flex items-center gap-1.5 bg-teal-400/30 text-white
+                                   text-xs font-bold px-2.5 py-1 rounded-full border border-teal-300/50">
+                    <ShoppingCart className="w-3 h-3" />
+                    {recuperadosInView} recuperados
                   </span>
                 )}
               </div>
@@ -255,7 +297,7 @@ export default function ConfirmadosPage() {
       </div>
 
       {/* ── Tarjetas de resumen ── */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <button
           onClick={() => applyFilter('hoy')}
           className={`flex items-center gap-3 p-4 rounded-xl border-2 text-left transition-all
@@ -283,6 +325,22 @@ export default function ConfirmadosPage() {
           </div>
           <Package className="w-7 h-7 opacity-25 shrink-0" />
         </button>
+
+        {/* Tarjeta Recuperados de carrito */}
+        <button
+          onClick={() => applyFilter('recuperados')}
+          className={`flex items-center gap-3 p-4 rounded-xl border-2 text-left transition-all col-span-2 md:col-span-1
+            ${activeFilter === 'recuperados'
+              ? 'border-teal-400 bg-teal-100 text-teal-800 ring-2 ring-teal-300/50'
+              : 'border-teal-200 bg-teal-50 text-teal-700 hover:bg-teal-100'}`}
+        >
+          <div className="flex-1 min-w-0">
+            <p className="text-3xl font-black tabular-nums leading-none">{stats.recuperados}</p>
+            <p className="text-sm font-bold mt-1">Recuperados de carrito</p>
+            <p className="text-[11px] opacity-70 mt-0.5">Draft · COD Form · Checkout</p>
+          </div>
+          <ShoppingCart className="w-7 h-7 opacity-25 shrink-0" />
+        </button>
       </div>
 
       {/* ── Filtros ── */}
@@ -291,16 +349,17 @@ export default function ConfirmadosPage() {
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider shrink-0">Filtrar</span>
           <div className="flex items-center gap-2 flex-wrap">
             {([
-              { key: 'todos', label: 'Todos' },
-              { key: 'hoy',   label: 'Hoy'   },
-              { key: 'ayer',  label: 'Ayer'  },
+              { key: 'todos',       label: 'Todos'                },
+              { key: 'hoy',         label: 'Hoy'                  },
+              { key: 'ayer',        label: 'Ayer'                 },
+              { key: 'recuperados', label: '🛒 Recuperados'       },
             ] as { key: FilterType; label: string }[]).map(({ key, label }) => (
               <button
                 key={key}
                 onClick={() => applyFilter(key)}
                 className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors
                   ${activeFilter === key
-                    ? 'bg-green-600 text-white'
+                    ? key === 'recuperados' ? 'bg-teal-600 text-white' : 'bg-green-600 text-white'
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
               >
                 {label}
@@ -338,8 +397,22 @@ export default function ConfirmadosPage() {
         </div>
       </div>
 
+      {/* ── Info banner para filtro recuperados ── */}
+      {activeFilter === 'recuperados' && (
+        <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3 flex items-start gap-3">
+          <ShoppingCart className="w-4 h-4 text-teal-600 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-teal-800">Pedidos recuperados desde carritos abandonados</p>
+            <p className="text-xs text-teal-700 mt-0.5">
+              Estos pedidos fueron confirmados por clientes que habían iniciado pero no completado su compra.
+              Tratar como cualquier pedido confirmado — asignar guía EFI y despachar normalmente.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* ── Filtros de alerta ── */}
-      {(alertCounts.duplicados > 0 || alertCounts.cobertura > 0 || alertCounts.unknown > 0 || alertCounts.santoDomingo > 0) && (
+      {activeFilter !== 'recuperados' && (alertCounts.duplicados > 0 || alertCounts.cobertura > 0 || alertCounts.unknown > 0 || alertCounts.santoDomingo > 0) && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 shrink-0">
@@ -461,7 +534,9 @@ export default function ConfirmadosPage() {
             <p className="text-gray-500 font-medium">
               {searchQuery
                 ? `Sin resultados para "${searchQuery}"`
-                : 'No hay pedidos confirmados sin guía en este período'}
+                : activeFilter === 'recuperados'
+                  ? 'No hay pedidos recuperados de carrito confirmados sin guía'
+                  : 'No hay pedidos confirmados sin guía en este período'}
             </p>
             {activeFilter !== 'todos' && (
               <button
@@ -489,24 +564,27 @@ export default function ConfirmadosPage() {
               </thead>
               <tbody className="divide-y divide-green-50">
                 {pagedDisplayed.map(order => {
-                  const isReady    = !!readyMap[order.id]
-                  const method     = order.confirmation_method
+                  const isReady      = !!readyMap[order.id]
+                  const method       = order.confirmation_method
                     ? (METHOD_BADGE[order.confirmation_method] ?? METHOD_BADGE['other'])
                     : null
-                  const hasDup     = !!order.duplicate_alert
-                  const cov        = checkCoverage(order.customer_address, order.city)
-                  const hasAlert   = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
-                  const isSD       = isSantoDomingoOrder(order.city, null, order.customer_address)
+                  const hasDup       = !!order.duplicate_alert
+                  const cov          = checkCoverage(order.customer_address, order.city)
+                  const hasAlert     = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
+                  const isSD         = isSantoDomingoOrder(order.city, null, order.customer_address)
+                  const isRecovered  = !!order.recovered_cart_id
 
                   return (
                     <tr
                       key={order.id}
                       className={`transition-colors
-                        ${isSD
-                          ? 'bg-purple-50/40 hover:bg-purple-50/70'
-                          : hasAlert
-                            ? 'bg-amber-50/40 hover:bg-amber-50/70'
-                            : 'hover:bg-green-50/40'
+                        ${isRecovered
+                          ? 'bg-teal-50/40 hover:bg-teal-50/70'
+                          : isSD
+                            ? 'bg-purple-50/40 hover:bg-purple-50/70'
+                            : hasAlert
+                              ? 'bg-amber-50/40 hover:bg-amber-50/70'
+                              : 'hover:bg-green-50/40'
                         }`}
                     >
 
@@ -530,6 +608,12 @@ export default function ConfirmadosPage() {
                           customerAddress={order.customer_address}
                           city={order.city}
                         />
+                        {isRecovered && order.recovered_cart_id && order.recovered_cart_source && (
+                          <RecoveredBadge
+                            source={order.recovered_cart_source}
+                            cartId={order.recovered_cart_id}
+                          />
+                        )}
                       </td>
 
                       {/* Ciudad */}
