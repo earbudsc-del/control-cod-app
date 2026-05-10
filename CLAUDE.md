@@ -18,7 +18,7 @@
 | Despachados | `/despachados` | Pedidos `tracking IS NOT NULL + no finalizados`. Vista monitoreo, refresh 5 min, mini KPI por estado |
 | Novedades | `/novedad` | Tabla acciones, métricas agente, filtros por intentos, mini KPI pipeline, tab Recuperadas. **Mobile-first cards + tabla desktop** |
 | Reparto | `/reparto` | Tabla criticidad por tiempo, acciones, métricas, mini KPI pipeline, tab Entregados DB-backed. **Mobile-first cards + tabla desktop** |
-| Tránsito | `/transito` | Pedidos `in_transit` sin movimiento, criticidad por horas, refresh 5 min |
+| Tránsito | `/transito` | **3 tabs por etapa: Generadas / En tránsito / Anuladas.** Criticidad por horas por etapa. Refresh 5 min. Botones "Actualizar" y "Anular" por fila. |
 | My-tasks | `/my-tasks` | Filtrado por rol automáticamente |
 | Panel admin | `/settings` | Ver usuarios (con email, último login, última acción), asignar roles con confirm dialog |
 | Auth + sesión | `middleware.ts` | Funcional — tokens se refrescan correctamente |
@@ -49,6 +49,7 @@
 
 | Cambio | Fecha | Archivos |
 |---|---|---|
+| **Refactor /transito — nueva arquitectura 3 etapas: tabs Generadas / En tránsito / Anuladas. Separación client-side por raw_status. Alertas y mensajes de escalamiento diferenciados por etapa. Botón "Anular" manual (admin/novelty_agent). Endpoint mark-anulada. API excluye anuladas/canceladas del query in_transit.** | 2026-05-09 | `transito/page.tsx` (rewrite), `api/orders/[id]/mark-anulada/route.ts` (nuevo), `api/orders/route.ts` |
 | **Fix definitivo /transito anuladas (2ª ronda): parser fallback body-text para "Estado global", cron con 2 queries separadas (in_transit+otros), botón "Actualizar tracking" por fila en /transito, silent refetch, doble-guarda client-side, endpoint diagnóstico.** | 2026-05-09 | `efi-parser.ts`, `api/tracking/auto/route.ts`, `transito/page.tsx`, `api/debug/transit-orders/route.ts` (nuevo) |
 | **Fix /transito anuladas (1ª ronda): parser detecta "Estado global: Anulada" y mapea a `returned`. Tarjetas Crítico/Riesgo/Normal/Anuladas son clickeables (filtran tabla). Anuladas excluidas del conteo activo. Fetch paralelo in_transit + rawStatus=anulada. Badge "Anulada" en tabla.** | 2026-05-09 | `efi-parser.ts`, `api/orders/route.ts`, `transito/page.tsx` |
 | **Fix crítico /transito stuckSince: `transitSinceMs` corregido para NO usar `last_tracking_update` (lo actualiza el cron cada 5 min). Nueva prioridad: status_since → shipment_created_at → shopify_created_at → created_at. Buscador funcional en /transito. Fallback ciudad "Ubicación no registrada". Logs debug server-side.** | 2026-05-09 | `transit-helpers.ts`, `transito/page.tsx` |
@@ -208,19 +209,30 @@ tracking_number     IS NULL         -- si ya tiene guía → /despachados
 ### Tránsito
 - Muestra pedidos con `normalized_status = 'in_transit'`
 - Accesible para: admin, ia_supervisor, novelty_agent, delivery_agent
-- Criticidad por horas sin movimiento:
+- **Nueva arquitectura por etapas (2026-05-09):** 3 tabs separados. Cada tab tiene sus propias tarjetas y alertas:
+
+| Tab | Qué incluye | Clasificación raw_status |
+|---|---|---|
+| **Generadas** | Guías creadas en Effi pero sin movimiento real | `raw_status ilike '%generada%'` |
+| **En tránsito** | Guías en movimiento real hacia destino | `normalized_status='in_transit'` AND raw_status ≠ Generada/Anulada/Cancelada |
+| **Anuladas** | Guías canceladas/anuladas en Effi | `raw_status ilike '%anulada%'` OR `'%cancelada%'` |
+
+- Criticidad por horas (independiente por tab):
   - `>= 48h` → crítico (badge rojo)
   - `24h–48h` → riesgo (badge naranja)
   - `< 24h` → normal
+- **Mensajes de escalamiento diferenciados:**
+  - Generadas +24h → "Confirmar recogida con Effi / transportadora"
+  - Generadas +48h → "Escalar despacho — posible bloqueo o candidata a anulación"
+  - En tránsito +24h → "Seguimiento con transportadora sobre ruta / movimiento"
+  - En tránsito +48h → "Escalar ruta/bloqueo — posible novedad sin registrar"
 - Lógica centralizada en `src/lib/transit-helpers.ts` — reutilizada en `/transito` y `/reparto`
-- Refresh cada 5 min (más lento que reparto/novedad — tránsito cambia menos)
-- **raw_status visible (2026-05-09):** columna "Estado EFI" muestra `order.raw_status` debajo del badge de criticidad — permite identificar "Generada" vs otros estados de tránsito
-- **Alertas de escalamiento (2026-05-09):** Banners separados para +24h (riesgo, amarillo) y +48h (crítico, rojo) con instrucción explícita de escalar con Effi / transportadora. Nota pie actualizada con guía operativa (Generada +24h, +48h, +72h)
-- **Buscador (2026-05-09):** Filtra client-side por tracking_number, order_number, customer_name, customer_phone, city, province, raw_status. Muestra count de resultados al buscar.
-- **stuckSince corregido (2026-05-09):** `transitSinceMs` usa `status_since ?? shipment_created_at ?? shopify_created_at ?? created_at` — NO usa `last_tracking_update` (ver sección "Fix crítico /transito stuckSince" más abajo)
-- **Fallback ciudad (2026-05-09):** `cityDisplay(order)` → city → province → último segmento de customer_address → "Ubicación no registrada". Ya no muestra "—" para pedidos sin ciudad.
-- **Anuladas (2026-05-09):** fetch secundario `?rawStatus=anulada` + tarjeta "Anuladas (EFI)" separada. Anuladas excluidas de conteos Crítico/Riesgo/Normal. Badge gris "Anulada" + "No escalar". Parser detecta "Estado global: Anulada" → override normalized_status='returned' + raw_status='Anulada'.
-- **Tarjetas clickeables (2026-05-09):** Crítico/Riesgo/Normal/Anuladas filtran la tabla al hacer click. Segundo click desactiva el filtro. Chip de filtro activo con botón X encima del buscador.
+- Refresh cada 5 min
+- **Buscador:** Filtra en el tab activo por tracking_number, order_number, customer_name, customer_phone, city, province, raw_status.
+- **stuckSince:** `transitSinceMs` usa `status_since ?? shipment_created_at ?? shopify_created_at ?? created_at` — NO usa `last_tracking_update`
+- **Botón "Anular" manual (admin/novelty_agent):** Marca la guía como Anulada → `POST /api/orders/[id]/mark-anulada`. Crea nota interna + agent_action='cancelled'. La guía pasa al tab Anuladas en el próximo refetch.
+- **Botón "Actualizar":** Consulta EFI y actualiza estado → `POST /api/orders/[id]/tracking`. Silent refetch + toast.
+- **Query API in_transit:** Excluye `raw_status ilike '%anulada%'` y `'%cancelada%'` a nivel de DB.
 
 ### Novedad
 - `delivery_attempts >= 2` → prioridad de contacto (tab "2+ intentos")
@@ -312,7 +324,97 @@ AppLayout (Server Component — layout.tsx)
 
 **Archivos modificados (2026-05-06):** `src/app/(app)/layout.tsx`, `src/components/layout/sidebar.tsx`, `src/components/layout/nav-shell.tsx` (nuevo)
 
-### /transito — Fix definitivo anuladas (2026-05-09) ← ÚLTIMO CAMBIO
+### /transito — Nueva arquitectura por etapas (2026-05-09) ← ÚLTIMO CAMBIO
+
+**Problema resuelto:** `/transito` mezclaba guías "Generada" con guías realmente "En tránsito", reportando 36 críticos cuando solo ~22 son reales. Las guías anuladas tampoco se separaban correctamente porque el parser EFI no detectaba "Estado global: Anulada" en todos los casos.
+
+**Nueva arquitectura — 3 etapas:**
+
+La página separa el array `in_transit` en tres grupos según `raw_status`:
+
+```
+fetchData():
+  Query 1: ?status=in_transit&limit=200   → activeRaw
+  Query 2: ?rawStatus=anulada&limit=200   → anuladas (ya reclasificadas por cron)
+  Query 3: ?rawStatus=cancelada&limit=200 → canceladas ("Cancelada por transportadora")
+
+  Separación client-side de activeRaw:
+    isAnuladaRaw(o): raw_status contiene 'anulad' o 'cancelad' → cancelledOrders (doble-guarda)
+    isGenerada(o):   raw_status contiene 'generada'            → generatedOrders
+    resto:           normalized_status='in_transit' sin lo anterior → transitOrders
+
+  cancelledOrders = merge deduplicado de anuladas + canceladas + extraCancelled
+```
+
+**Tab "Generadas":**
+- `raw_status` contiene "generada" (case-insensitive)
+- Guías creadas en Effi que no han sido recogidas aún
+- Criticidad: Normal < 24h · Riesgo 1-2 días · Crítico +48h
+- Escalar: "Confirmar recogida / despacho con Effi"
+
+**Tab "En tránsito":**
+- `normalized_status='in_transit'` AND raw_status NO contiene 'generada', 'anulada', 'cancelada'
+- Guías realmente moviéndose (~22 reales en Effi)
+- Criticidad: Normal < 24h · Riesgo 1-2 días · Crítico +48h
+- Escalar: "Seguimiento con transportadora sobre ruta/bloqueo"
+
+**Tab "Anuladas":**
+- Guías de los 3 fetches con raw_status anulada/cancelada
+- Sin tarjetas de criticidad (no escalar)
+- Botón "Anular" en tabs activos para moverlas aquí manualmente
+
+**Query API mejorada (api/orders/route.ts):**
+```typescript
+// Cuando status='in_transit':
+query.eq('normalized_status', 'in_transit')
+     .not('raw_status', 'ilike', '%anulada%')
+     .not('raw_status', 'ilike', '%cancelada%')
+```
+Esto garantiza que guías ya detectadas como anuladas no aparecen en el primer fetch aunque `normalized_status` aún sea 'in_transit'.
+
+**Endpoint mark-anulada (api/orders/[id]/mark-anulada/route.ts — NUEVO):**
+- `POST /api/orders/[id]/mark-anulada`
+- Roles: admin, novelty_agent (403 para otros)
+- Actualiza: `raw_status='Anulada'`, `normalized_status='returned'`, `last_tracking_update=now()`
+- Crea: nota interna en tabla `notes` + `agent_action` tipo 'cancelled'
+- Log en Vercel: `[mark-anulada] order=X tracking=Y prev="Generada"/in_transit → Anulada/returned by=admin`
+
+**Validación esperada post-deploy:**
+- Tab "Generadas": las ~14 guías viejas con raw_status='Generada' (incluyendo las que hay que anular manualmente)
+- Tab "En tránsito": las ~22 guías reales moviéndose
+- Tab "Anuladas": 0 al inicio; se pobla al usar botón "Anular" o cuando cron detecta "Estado global: Anulada"
+- Total del banner: ~36 (Generadas + En tránsito); anuladas separadas
+- NO aparecen 36 como "En tránsito activo" — se distingue claramente
+
+**Flujo para limpiar guías viejas anuladas:**
+1. Ir a tab "Generadas" → buscar guías con 11+ días
+2. Click "Actualizar" → si EFI dice "Estado global: Anulada" → se mueve a Anuladas automáticamente
+3. Si EFI no la detecta → click "Anular" → se mueve a Anuladas + nota interna creada
+4. Repetir para las ~14 guías candidatas
+
+**Cómo probar:**
+1. `npm run dev` → login → `/transito`
+2. Verificar banner: "X pedidos en ruta · A generadas · B en tránsito · C anuladas"
+3. Click tab "Generadas": guías con raw_status='Generada', tarjetas Crítico/Riesgo/Normal propias
+4. Click tab "En tránsito": guías sin 'Generada' en raw_status, ~22 reales
+5. Click tab "Anuladas": vacío inicialmente; usar botón "Anular" en tab Generadas para mover una guía
+6. Verificar que la guía anulada: desaparece de Generadas → aparece en Anuladas
+7. Buscar una guía en cualquier tab → el buscador filtra dentro del tab activo
+8. Tarjetas Crítico/Riesgo/Normal: clickeables, filtran solo dentro del tab activo
+9. Botón "Actualizar" en una guía activa → EFI consulta → toast con resultado
+10. Botón "Anular" desde novelty_agent → 200 OK, guía desaparece; desde delivery_agent → toast "Sin permisos"
+
+**Archivos modificados:**
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/transito/page.tsx` | **Rewrite completo.** 3 tabs (Generadas/En tránsito/Anuladas). 3 arrays separados. Alertas diferenciadas por etapa. Botón "Anular". Banner con totales por etapa. |
+| `src/app/api/orders/[id]/mark-anulada/route.ts` | **NUEVO.** POST que actualiza raw_status+normalized_status + nota + agent_action. Solo admin/novelty_agent. |
+| `src/app/api/orders/route.ts` | Query in_transit excluye raw_status anulada/cancelada a nivel DB. |
+
+---
+
+### /transito — Fix definitivo anuladas (2026-05-09)
 
 **Síntoma en producción:** Total activo 36 · Críticos +48h 36 · Anuladas 0. En Effi, ~14 de esas 36 tienen "Estado global: Anulada" y solo ~22 son activas reales.
 
