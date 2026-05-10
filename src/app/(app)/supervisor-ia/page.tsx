@@ -8,6 +8,7 @@ import {
   ChevronDown, ChevronUp, TrendingUp, Clock, Truck,
   ClipboardList, FileWarning, CircleDollarSign, ArrowRight,
   ShieldAlert, BarChart3, DollarSign, Star, Info,
+  Check, XCircle, Filter, AlertOctagon,
 } from 'lucide-react'
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────
@@ -125,6 +126,7 @@ interface CasoAuditoria {
   tracking_number: string
   order_number: string | null
   customer_name: string | null
+  customer_phone: string | null
   city: string | null
   province: string | null
   delivery_attempts: number
@@ -132,10 +134,20 @@ interface CasoAuditoria {
   raw_status: string | null
   normalized_status: string
   status_since: string | null
+  shipment_created_at: string | null
+  shopify_created_at: string | null
   cod_amount: number | null
   score: number
   level: string
   signals: string[]
+}
+
+interface CasoIndemnizable extends CasoAuditoria {
+  iaReason: string
+  confidenceScore: number
+  isFalsePositive: boolean
+  falsePositiveReason: string
+  indemnCat: 'altamente_probable' | 'posible' | 'excluido'
 }
 
 interface CourierMetrics {
@@ -181,11 +193,15 @@ interface DineroRiesgo {
   pedidosEnRiesgoNovedad: number
   repartoRetraso72h: number
   totalEnRiesgo: number
+  devolucionesAltamenteProbables: number
+  devolucionesPosibles: number
+  devolucionesExcluidasCount: number
 }
 
 interface AuditoriaData {
   generatedAt: string
   casosAuditoria: CasoAuditoria[]
+  casosIndemnizablesDetalle: CasoIndemnizable[]
   courier: CourierMetrics
   agentes: AgentesMetrics
   dineroRiesgo: DineroRiesgo
@@ -643,6 +659,27 @@ const PRIO_BTN: Record<RecomPriority, string> = {
   'baja':    'bg-gray-600 hover:bg-gray-700 text-white',
 }
 
+// ─── Helpers indemnizables ───────────────────────────────────────────────────
+
+function calcDiasOperacion(caso: CasoIndemnizable): number {
+  const sinceTs = caso.status_since ?? caso.shipment_created_at ?? caso.shopify_created_at
+  if (!sinceTs) return 0
+  return Math.floor((Date.now() - new Date(sinceTs).getTime()) / (1000 * 3600 * 24))
+}
+
+function getConfidenceBadge(score: number): string {
+  if (score >= 65) return 'bg-red-100 text-red-700'
+  if (score >= 30) return 'bg-amber-100 text-amber-700'
+  return 'bg-gray-100 text-gray-500'
+}
+
+const INDEMN_SIGNAL_FILTER: Record<string, (c: CasoIndemnizable) => boolean> = {
+  '3+ intentos': c => c.delivery_attempts >= 3,
+  '2 intentos':  c => c.delivery_attempts === 2,
+  '+72h':        c => c.signals.includes('Retraso excesivo'),
+  'cobertura dudosa': c => c.signals.includes('Fuera cobertura dudoso'),
+}
+
 // ─── Componentes helper ──────────────────────────────────────────────────────
 
 function ClickableKpiCard({
@@ -755,6 +792,12 @@ export default function SupervisorIAPage() {
   const [auditoriaLoading, setAuditoriaLoading] = useState(true)
   const [showAuditoria, setShowAuditoria]     = useState(false)
   const [auditFiltroNivel, setAuditFiltroNivel] = useState<string>('all')
+  // Indemnizables detalle
+  const [showIndemnDetalle, setShowIndemnDetalle] = useState(false)
+  const [indemnFiltroNivel, setIndemnFiltroNivel] = useState<string>('all')
+  const [indemnFiltroSignal, setIndemnFiltroSignal] = useState<string>('all')
+  const [indemnRevisados, setIndemnRevisados] = useState<Set<string>>(new Set())
+  const [indemnEscalados, setIndemnEscalados] = useState<Set<string>>(new Set())
 
   const fetchData = useCallback(async () => {
     try {
@@ -1042,160 +1085,395 @@ export default function SupervisorIAPage() {
         </div>
       </section>
 
-      {/* ── Posibles indemnizaciones ────────────────────────────── */}
-      <section id="indemnizaciones">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Posibles indemnizaciones</h2>
-          <button
-            onClick={() => setShowIndemn(v => !v)}
-            className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-indigo-600 transition-colors"
-          >
-            {showIndemn ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            {showIndemn ? 'Ocultar' : `Ver ${data.indemnizables.length} casos`}
-          </button>
-        </div>
-
-        {!showIndemn && data.indemnizables.length > 0 && (
-          <div className="bg-orange-50 border border-orange-200 rounded-xl px-4 py-3 text-sm text-orange-800 flex items-center gap-2">
-            <FileWarning className="w-4 h-4 shrink-0" />
-            {data.indemnizables.length} pedido{data.indemnizables.length > 1 ? 's' : ''} devuelto{data.indemnizables.length > 1 ? 's' : ''} con 2+ intentos podrían reclamar indemnización a la transportadora.
-          </div>
-        )}
-
-        {showIndemn && data.indemnizables.length === 0 && (
-          <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-3 text-sm text-green-700 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
-            No hay casos de posible indemnización actualmente.
-          </div>
-        )}
-
-        {showIndemn && data.indemnizables.length > 0 && (
-          <div className="border border-gray-200 rounded-xl overflow-hidden">
-            {/* Desktop */}
-            <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    <th className="text-left px-4 py-2.5 font-medium text-gray-600">Guía</th>
-                    <th className="text-left px-4 py-2.5 font-medium text-gray-600">Cliente</th>
-                    <th className="text-left px-4 py-2.5 font-medium text-gray-600">Ciudad</th>
-                    <th className="text-center px-4 py-2.5 font-medium text-gray-600">Intentos</th>
-                    <th className="text-left px-4 py-2.5 font-medium text-gray-600">Razón</th>
-                    <th className="text-left px-4 py-2.5 font-medium text-gray-600">Prioridad</th>
-                    <th className="text-left px-4 py-2.5 font-medium text-gray-600">Recomendación</th>
-                    <th className="px-4 py-2.5"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {data.indemnizables.map(order => {
-                    const prio = getIndemnPriority(order)
-                    return (
-                      <tr key={order.id} className="hover:bg-gray-50">
-                        <td className="px-4 py-3 font-mono text-xs text-gray-700">
-                          {order.tracking_number}
-                        </td>
-                        <td className="px-4 py-3">
-                          <p className="font-medium text-gray-800">{order.customer_name ?? '—'}</p>
-                          {order.order_number && <p className="text-xs text-gray-400">{order.order_number}</p>}
-                        </td>
-                        <td className="px-4 py-3 text-gray-600">{order.city ?? '—'}</td>
-                        <td className="px-4 py-3 text-center">
-                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${order.delivery_attempts >= 3 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
-                            {order.delivery_attempts}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-xs text-gray-500 max-w-[160px] truncate" title={order.last_attempt_reason ?? ''}>
-                          {order.last_attempt_reason ?? '—'}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${prio.color}`}>
-                            {prio.label}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-xs text-gray-700 max-w-[180px]">{getIndemnRecomendacion(order)}</td>
-                        <td className="px-4 py-3">
-                          <Link
-                            href={`/orders/${order.id}`}
-                            className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-800 border border-indigo-200 hover:border-indigo-300 px-2 py-1 rounded-md transition-colors"
-                          >
-                            Ver pedido <ExternalLink className="w-3 h-3" />
-                          </Link>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-            {/* Mobile */}
-            <div className="md:hidden divide-y divide-gray-100">
-              {data.indemnizables.map(order => {
-                const prio = getIndemnPriority(order)
-                return (
-                  <div key={order.id} className="px-4 py-3 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-xs text-gray-500">{order.tracking_number}</span>
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${prio.color}`}>{prio.label}</span>
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${order.delivery_attempts >= 3 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
-                          {order.delivery_attempts} intentos
-                        </span>
-                      </div>
-                    </div>
-                    <p className="font-medium text-gray-800 text-sm">{order.customer_name ?? '—'}</p>
-                    <p className="text-xs text-gray-500">{order.city ?? '—'} · {order.last_attempt_reason ?? '—'}</p>
-                    <div className="flex items-center justify-between pt-1">
-                      <p className="text-xs text-gray-600">{getIndemnRecomendacion(order)}</p>
-                      <Link
-                        href={`/orders/${order.id}`}
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 border border-indigo-200 px-2 py-1 rounded-md ml-2 shrink-0"
-                      >
-                        Ver pedido <ExternalLink className="w-3 h-3" />
-                      </Link>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-      </section>
+      {/* ── Posibles indemnizaciones (anchor para compatibilidad) ── */}
+      {/* La vista detallada está integrada en "Dinero en riesgo" abajo */}
+      <div id="indemnizaciones" />
 
       {/* ══════════════════════════════════════════════════════════ */}
       {/* ── FASE 2: AUDITORÍA OPERATIVA IA ──────────────────────── */}
       {/* ══════════════════════════════════════════════════════════ */}
 
-      {/* ── Dinero en riesgo ───────────────────────────────────── */}
-      {auditoriaData && (
-        <section>
-          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center gap-2">
-            <DollarSign className="w-4 h-4 text-red-500" />
-            Dinero en riesgo
-          </h2>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="bg-red-50 border border-red-200 rounded-xl p-4">
-              <p className="text-xs text-red-600 font-medium mb-1">Devoluciones indemnizables</p>
-              <p className="text-xl font-bold text-red-800">{fmtDOP(auditoriaData.dineroRiesgo.devolucionesIndemnizables)}</p>
-              <p className="text-xs text-red-500 mt-0.5">{auditoriaData.courier.anuladasSospechosas} guías · 2+ intentos</p>
+      {/* ── Dinero en riesgo + Detalle indemnizables ────────────── */}
+      {auditoriaData && (() => {
+        const indemnizables = auditoriaData.casosIndemnizablesDetalle ?? []
+        const indemnFiltrados = indemnizables.filter(c => {
+          if (c.isFalsePositive) return false
+          if (indemnFiltroNivel !== 'all' && c.level !== indemnFiltroNivel) return false
+          if (indemnFiltroSignal !== 'all') {
+            const fn = INDEMN_SIGNAL_FILTER[indemnFiltroSignal]
+            if (fn && !fn(c)) return false
+          }
+          return true
+        })
+        const altamenteProbList = indemnizables.filter(c => !c.isFalsePositive && c.indemnCat === 'altamente_probable')
+        const posiblesList      = indemnizables.filter(c => !c.isFalsePositive && c.indemnCat === 'posible')
+        const montoTotal = indemnizables.filter(c => !c.isFalsePositive).reduce((s, c) => s + (c.cod_amount ?? 0), 0)
+        const montoPromedio = indemnizables.filter(c => !c.isFalsePositive).length > 0
+          ? Math.round(montoTotal / indemnizables.filter(c => !c.isFalsePositive).length)
+          : 0
+
+        return (
+          <section>
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center gap-2">
+              <DollarSign className="w-4 h-4 text-red-500" />
+              Dinero en riesgo
+            </h2>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+
+              {/* Card clickeable: Devoluciones indemnizables */}
+              <button
+                onClick={() => setShowIndemnDetalle(v => !v)}
+                className={`text-left rounded-xl p-4 border transition-all hover:shadow-md ${
+                  showIndemnDetalle
+                    ? 'bg-red-100 border-red-400 ring-2 ring-red-300'
+                    : 'bg-red-50 border-red-200 hover:border-red-400'
+                }`}
+              >
+                <p className="text-xs text-red-600 font-medium mb-1">Devoluciones indemnizables</p>
+                <p className="text-xl font-bold text-red-800">{fmtDOP(auditoriaData.dineroRiesgo.devolucionesIndemnizables)}</p>
+                <p className="text-xs text-red-500 mt-0.5">{auditoriaData.courier.anuladasSospechosas} guías · 2+ intentos</p>
+                <p className="text-[10px] text-red-400 mt-1.5 flex items-center gap-0.5 font-medium">
+                  {showIndemnDetalle ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  {showIndemnDetalle ? 'Ocultar auditoría' : 'Auditar casos →'}
+                </p>
+              </button>
+
+              <div className="bg-orange-50 border border-orange-200 rounded-xl p-4">
+                <p className="text-xs text-orange-600 font-medium mb-1">Novedades en riesgo</p>
+                <p className="text-xl font-bold text-orange-800">{fmtDOP(auditoriaData.dineroRiesgo.pedidosEnRiesgoNovedad)}</p>
+                <p className="text-xs text-orange-500 mt-0.5">{auditoriaData.agentes.novedad.dosIntentosActivos} novedades · 2+ intentos</p>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+                <p className="text-xs text-amber-600 font-medium mb-1">Reparto retrasado +72h</p>
+                <p className="text-xl font-bold text-amber-800">{fmtDOP(auditoriaData.dineroRiesgo.repartoRetraso72h)}</p>
+                <p className="text-xs text-amber-500 mt-0.5">{auditoriaData.courier.retrasos72h} guías en riesgo</p>
+              </div>
+              <div className={`rounded-xl p-4 border ${auditoriaData.dineroRiesgo.totalEnRiesgo > 0 ? 'bg-red-100 border-red-300' : 'bg-gray-50 border-gray-200'}`}>
+                <p className={`text-xs font-semibold mb-1 ${auditoriaData.dineroRiesgo.totalEnRiesgo > 0 ? 'text-red-700' : 'text-gray-500'}`}>Total en riesgo</p>
+                <p className={`text-xl font-bold ${auditoriaData.dineroRiesgo.totalEnRiesgo > 0 ? 'text-red-900' : 'text-gray-700'}`}>{fmtDOP(auditoriaData.dineroRiesgo.totalEnRiesgo)}</p>
+                <p className={`text-xs mt-0.5 ${auditoriaData.dineroRiesgo.totalEnRiesgo > 0 ? 'text-red-600' : 'text-gray-400'}`}>Suma acumulada</p>
+              </div>
             </div>
-            <div className="bg-orange-50 border border-orange-200 rounded-xl p-4">
-              <p className="text-xs text-orange-600 font-medium mb-1">Novedades en riesgo</p>
-              <p className="text-xl font-bold text-orange-800">{fmtDOP(auditoriaData.dineroRiesgo.pedidosEnRiesgoNovedad)}</p>
-              <p className="text-xs text-orange-500 mt-0.5">{auditoriaData.agentes.novedad.dosIntentosActivos} novedades · 2+ intentos</p>
-            </div>
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-              <p className="text-xs text-amber-600 font-medium mb-1">Reparto retrasado +72h</p>
-              <p className="text-xl font-bold text-amber-800">{fmtDOP(auditoriaData.dineroRiesgo.repartoRetraso72h)}</p>
-              <p className="text-xs text-amber-500 mt-0.5">{auditoriaData.courier.retrasos72h} guías en riesgo</p>
-            </div>
-            <div className={`rounded-xl p-4 border ${auditoriaData.dineroRiesgo.totalEnRiesgo > 0 ? 'bg-red-100 border-red-300' : 'bg-gray-50 border-gray-200'}`}>
-              <p className={`text-xs font-semibold mb-1 ${auditoriaData.dineroRiesgo.totalEnRiesgo > 0 ? 'text-red-700' : 'text-gray-500'}`}>Total en riesgo</p>
-              <p className={`text-xl font-bold ${auditoriaData.dineroRiesgo.totalEnRiesgo > 0 ? 'text-red-900' : 'text-gray-700'}`}>{fmtDOP(auditoriaData.dineroRiesgo.totalEnRiesgo)}</p>
-              <p className={`text-xs mt-0.5 ${auditoriaData.dineroRiesgo.totalEnRiesgo > 0 ? 'text-red-600' : 'text-gray-400'}`}>Suma acumulada</p>
-            </div>
-          </div>
-        </section>
-      )}
+
+            {/* ── Detalle auditable de devoluciones indemnizables ── */}
+            {showIndemnDetalle && (
+              <div className="mt-4 border border-red-200 rounded-xl overflow-hidden">
+
+                {/* Header + stats */}
+                <div className="bg-red-50 px-4 py-3 border-b border-red-100">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className="w-4 h-4 text-red-600" />
+                      <span className="font-semibold text-sm text-red-800">Auditoría de devoluciones indemnizables</span>
+                      <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-bold border border-red-200">
+                        {indemnizables.filter(c => !c.isFalsePositive).length} casos
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setShowIndemnDetalle(false)}
+                      className="text-xs text-red-500 hover:text-red-700 flex items-center gap-1"
+                    >
+                      <ChevronUp className="w-3.5 h-3.5" /> Cerrar
+                    </button>
+                  </div>
+
+                  {/* Stats bar */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                    <div className="bg-white rounded-lg border border-red-100 px-3 py-2">
+                      <p className="text-[10px] text-gray-500 font-medium">Monto total</p>
+                      <p className="text-sm font-bold text-red-800">{fmtDOP(montoTotal)}</p>
+                    </div>
+                    <div className="bg-white rounded-lg border border-red-100 px-3 py-2">
+                      <p className="text-[10px] text-gray-500 font-medium">Promedio</p>
+                      <p className="text-sm font-bold text-red-700">{fmtDOP(montoPromedio)}</p>
+                    </div>
+                    <div className="bg-white rounded-lg border border-red-100 px-3 py-2">
+                      <p className="text-[10px] text-gray-500 font-medium">Alta prob.</p>
+                      <p className="text-sm font-bold text-red-900">{fmtDOP(auditoriaData.dineroRiesgo.devolucionesAltamenteProbables ?? 0)}</p>
+                      <p className="text-[10px] text-red-500">{altamenteProbList.length} casos · ≥65% conf.</p>
+                    </div>
+                    <div className="bg-white rounded-lg border border-orange-100 px-3 py-2">
+                      <p className="text-[10px] text-gray-500 font-medium">Posibles</p>
+                      <p className="text-sm font-bold text-orange-800">{fmtDOP(auditoriaData.dineroRiesgo.devolucionesPosibles ?? 0)}</p>
+                      <p className="text-[10px] text-orange-500">{posiblesList.length} casos · 30–64% conf.</p>
+                    </div>
+                  </div>
+                  {(auditoriaData.dineroRiesgo.devolucionesExcluidasCount ?? 0) > 0 && (
+                    <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-3 py-1.5 mb-3">
+                      <XCircle className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                      {auditoriaData.dineroRiesgo.devolucionesExcluidasCount} caso{(auditoriaData.dineroRiesgo.devolucionesExcluidasCount ?? 0) > 1 ? 's' : ''} excluido{(auditoriaData.dineroRiesgo.devolucionesExcluidasCount ?? 0) > 1 ? 's' : ''} como falso positivo (cliente canceló, rechazó, teléfono incorrecto u otro).
+                    </div>
+                  )}
+
+                  {/* Filtros nivel */}
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    <span className="text-xs text-gray-500 font-medium self-center">Nivel:</span>
+                    {(['all', 'Crítico', 'Alto', 'Medio', 'Bajo'] as const).map(n => (
+                      <button
+                        key={n}
+                        onClick={() => setIndemnFiltroNivel(n)}
+                        className={`text-xs px-2.5 py-1 rounded-full font-medium border transition-colors ${
+                          indemnFiltroNivel === n
+                            ? 'bg-red-700 text-white border-red-700'
+                            : 'bg-white text-gray-600 border-gray-200 hover:border-red-300'
+                        }`}
+                      >
+                        {n === 'all' ? 'Todos' : n}
+                      </button>
+                    ))}
+                  </div>
+                  {/* Filtros señales */}
+                  <div className="flex flex-wrap gap-1.5">
+                    <span className="text-xs text-gray-500 font-medium self-center">Señal:</span>
+                    {(['all', '3+ intentos', '2 intentos', '+72h', 'cobertura dudosa'] as const).map(s => (
+                      <button
+                        key={s}
+                        onClick={() => setIndemnFiltroSignal(s)}
+                        className={`text-xs px-2.5 py-1 rounded-full font-medium border transition-colors ${
+                          indemnFiltroSignal === s
+                            ? 'bg-gray-800 text-white border-gray-800'
+                            : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                        }`}
+                      >
+                        {s === 'all' ? 'Todas' : s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {indemnFiltrados.length === 0 && (
+                  <div className="flex items-center gap-2 px-4 py-4 text-sm text-gray-500 bg-white">
+                    <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
+                    No hay casos que coincidan con los filtros seleccionados.
+                  </div>
+                )}
+
+                {indemnFiltrados.length > 0 && (
+                  <>
+                    {/* Desktop */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 border-b border-gray-200 text-xs">
+                          <tr>
+                            <th className="text-left px-3 py-2.5 font-medium text-gray-600">Nivel / Score</th>
+                            <th className="text-left px-3 py-2.5 font-medium text-gray-600">Guía / Pedido</th>
+                            <th className="text-left px-3 py-2.5 font-medium text-gray-600">Cliente / Ciudad</th>
+                            <th className="text-right px-3 py-2.5 font-medium text-gray-600">COD</th>
+                            <th className="text-center px-3 py-2.5 font-medium text-gray-600">Int.</th>
+                            <th className="text-center px-3 py-2.5 font-medium text-gray-600">Días op.</th>
+                            <th className="text-center px-3 py-2.5 font-medium text-gray-600">Estado</th>
+                            <th className="text-left px-3 py-2.5 font-medium text-gray-600">Razón IA</th>
+                            <th className="text-left px-3 py-2.5 font-medium text-gray-600">Señales</th>
+                            <th className="text-center px-3 py-2.5 font-medium text-gray-600">Conf.</th>
+                            <th className="text-center px-3 py-2.5 font-medium text-gray-600">Acciones</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 bg-white">
+                          {indemnFiltrados.map(caso => {
+                            const dias = calcDiasOperacion(caso)
+                            const revisado = indemnRevisados.has(caso.id)
+                            const escalado = indemnEscalados.has(caso.id)
+                            return (
+                              <tr key={caso.id} className={`${RISK_ROW_BG[caso.level] ?? ''} ${revisado ? 'opacity-60' : ''}`}>
+                                <td className="px-3 py-2.5">
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border inline-block ${RISK_LEVEL_STYLE[caso.level] ?? ''}`}>
+                                      {caso.level}
+                                    </span>
+                                    <span className="text-[10px] font-mono text-gray-400">{caso.score}/100</span>
+                                  </div>
+                                </td>
+                                <td className="px-3 py-2.5">
+                                  <p className="font-mono text-[11px] text-gray-700">{caso.tracking_number}</p>
+                                  {caso.order_number && <p className="text-[10px] text-gray-400">{caso.order_number}</p>}
+                                </td>
+                                <td className="px-3 py-2.5">
+                                  <p className="font-medium text-gray-800 text-xs">{caso.customer_name ?? '—'}</p>
+                                  <p className="text-[10px] text-gray-400">{[caso.city, caso.province].filter(Boolean).join(', ') || '—'}</p>
+                                </td>
+                                <td className="px-3 py-2.5 text-right">
+                                  <span className="text-xs font-semibold text-gray-800">{caso.cod_amount ? fmtDOP(caso.cod_amount) : '—'}</span>
+                                </td>
+                                <td className="px-3 py-2.5 text-center">
+                                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${caso.delivery_attempts >= 3 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
+                                    {caso.delivery_attempts}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2.5 text-center">
+                                  <span className={`text-[10px] font-semibold ${dias >= 7 ? 'text-red-600' : dias >= 3 ? 'text-amber-600' : 'text-gray-600'}`}>
+                                    {dias}d
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2.5 text-center">
+                                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${getStatusBadge(caso.normalized_status)}`}>
+                                    {getStatusLabel(caso.normalized_status)}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2.5 max-w-[160px]">
+                                  <p className="text-[11px] text-gray-700 leading-tight">{caso.iaReason}</p>
+                                  {caso.last_attempt_reason && (
+                                    <p className="text-[10px] text-gray-400 truncate mt-0.5" title={caso.last_attempt_reason}>
+                                      {caso.last_attempt_reason}
+                                    </p>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2.5">
+                                  <div className="flex flex-wrap gap-0.5 max-w-[180px]">
+                                    {caso.signals.slice(0, 2).map(s => (
+                                      <span key={s} className={`text-[9px] font-medium px-1 py-0.5 rounded ${SIGNAL_COLOR[s] ?? 'bg-gray-100 text-gray-600'}`}>
+                                        {s.length > 20 ? s.slice(0, 18) + '…' : s}
+                                      </span>
+                                    ))}
+                                    {caso.signals.length > 2 && (
+                                      <span className="text-[9px] text-gray-400">+{caso.signals.length - 2}</span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="px-3 py-2.5 text-center">
+                                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${getConfidenceBadge(caso.confidenceScore)}`}>
+                                    {caso.confidenceScore}%
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2.5">
+                                  <div className="flex flex-col gap-1 items-start">
+                                    <Link
+                                      href={`/orders/${caso.id}`}
+                                      className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 border border-indigo-200 px-1.5 py-0.5 rounded transition-colors whitespace-nowrap"
+                                    >
+                                      Ver pedido <ExternalLink className="w-2.5 h-2.5" />
+                                    </Link>
+                                    <button
+                                      onClick={() => setIndemnRevisados(prev => {
+                                        const next = new Set(prev)
+                                        revisado ? next.delete(caso.id) : next.add(caso.id)
+                                        return next
+                                      })}
+                                      className={`inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded border transition-colors whitespace-nowrap ${
+                                        revisado ? 'bg-green-100 text-green-700 border-green-200' : 'text-gray-500 border-gray-200 hover:border-green-300'
+                                      }`}
+                                    >
+                                      <Check className="w-2.5 h-2.5" />
+                                      {revisado ? 'Revisado' : 'Marcar revisado'}
+                                    </button>
+                                    <button
+                                      onClick={() => setIndemnEscalados(prev => {
+                                        const next = new Set(prev)
+                                        escalado ? next.delete(caso.id) : next.add(caso.id)
+                                        return next
+                                      })}
+                                      className={`inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded border transition-colors whitespace-nowrap ${
+                                        escalado ? 'bg-orange-100 text-orange-700 border-orange-200' : 'text-gray-500 border-gray-200 hover:border-orange-300'
+                                      }`}
+                                    >
+                                      <AlertOctagon className="w-2.5 h-2.5" />
+                                      {escalado ? 'Escalado' : 'Escalar'}
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Mobile */}
+                    <div className="md:hidden divide-y divide-gray-100 bg-white">
+                      {indemnFiltrados.map(caso => {
+                        const dias = calcDiasOperacion(caso)
+                        const revisado = indemnRevisados.has(caso.id)
+                        const escalado = indemnEscalados.has(caso.id)
+                        return (
+                          <div key={caso.id} className={`px-4 py-3 space-y-2 ${RISK_ROW_BG[caso.level] ?? ''} ${revisado ? 'opacity-60' : ''}`}>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${RISK_LEVEL_STYLE[caso.level] ?? ''}`}>
+                                  {caso.level} · {caso.score}
+                                </span>
+                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${getConfidenceBadge(caso.confidenceScore)}`}>
+                                  {caso.confidenceScore}% conf.
+                                </span>
+                              </div>
+                              {caso.cod_amount && (
+                                <span className="text-xs font-bold text-gray-800">{fmtDOP(caso.cod_amount)}</span>
+                              )}
+                            </div>
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <p className="font-medium text-gray-800 text-sm">{caso.customer_name ?? '—'}</p>
+                                <p className="text-xs text-gray-500">{[caso.city, caso.province].filter(Boolean).join(', ') || '—'}</p>
+                              </div>
+                              <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full ${getStatusBadge(caso.normalized_status)}`}>
+                                {getStatusLabel(caso.normalized_status)}
+                              </span>
+                            </div>
+                            <p className="font-mono text-[11px] text-gray-500">{caso.tracking_number} {caso.order_number ? `· ${caso.order_number}` : ''}</p>
+                            <p className="text-xs text-gray-600 font-medium">{caso.iaReason}</p>
+                            <div className="flex items-center gap-2 text-xs text-gray-400">
+                              <span>{caso.delivery_attempts} {caso.delivery_attempts === 1 ? 'intento' : 'intentos'}</span>
+                              <span>·</span>
+                              <span>{dias}d en operación</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1">
+                              {caso.signals.slice(0, 3).map(s => (
+                                <span key={s} className={`text-[9px] font-medium px-1 py-0.5 rounded ${SIGNAL_COLOR[s] ?? 'bg-gray-100 text-gray-600'}`}>
+                                  {s.length > 22 ? s.slice(0, 20) + '…' : s}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="flex items-center gap-2 pt-1">
+                              <Link
+                                href={`/orders/${caso.id}`}
+                                className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 border border-indigo-200 px-2 py-1 rounded-md"
+                              >
+                                Ver pedido <ExternalLink className="w-3 h-3" />
+                              </Link>
+                              <button
+                                onClick={() => setIndemnRevisados(prev => {
+                                  const next = new Set(prev)
+                                  revisado ? next.delete(caso.id) : next.add(caso.id)
+                                  return next
+                                })}
+                                className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md border transition-colors ${
+                                  revisado ? 'bg-green-100 text-green-700 border-green-200' : 'text-gray-500 border-gray-200'
+                                }`}
+                              >
+                                <Check className="w-3 h-3" />
+                                {revisado ? 'Revisado' : 'Revisar'}
+                              </button>
+                              <button
+                                onClick={() => setIndemnEscalados(prev => {
+                                  const next = new Set(prev)
+                                  escalado ? next.delete(caso.id) : next.add(caso.id)
+                                  return next
+                                })}
+                                className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md border transition-colors ${
+                                  escalado ? 'bg-orange-100 text-orange-700 border-orange-200' : 'text-gray-500 border-gray-200'
+                                }`}
+                              >
+                                <AlertOctagon className="w-3 h-3" />
+                                {escalado ? 'Escalado' : 'Escalar'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
+
+                {/* Footer con estadísticas */}
+                {indemnFiltrados.length > 0 && (
+                  <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 text-xs text-gray-400 flex items-center gap-1">
+                    <Info className="w-3 h-3 shrink-0" />
+                    Mostrando {indemnFiltrados.length} de {indemnizables.filter(c => !c.isFalsePositive).length} casos auditables. Excluidos {auditoriaData.dineroRiesgo.devolucionesExcluidasCount ?? 0} falsos positivos. Confianza ≥65% = altamente probable · 30–64% = posible.
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        )
+      })()}
 
       {/* ── Auditoría Operativa IA ─────────────────────────────── */}
       <section id="auditoria">

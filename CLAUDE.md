@@ -4,6 +4,125 @@
 
 ---
 
+## SUPERVISOR IA — Devoluciones indemnizables auditables (2026-05-10)
+
+### Qué se hizo
+
+Card "Devoluciones indemnizables" completamente auditable y clickeable. La card abre una sección expandida con lista detallada, lógica de falsos positivos, razón principal IA, confidence score, señales, filtros y acciones.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/supervisor-ia/auditoria/route.ts` | **MODIFICADO.** 4 nuevas funciones: `detectFalsePositive`, `getIAReason`, `calcConfidenceScore`, `getIndemnCat`. Query 28 (returned + 2+ intentos, limit 120) para detalle auditeable. `casosIndemnizablesDetalle` en response con scoring + FP + iaReason + confidence. `dineroRiesgo` ampliado con `devolucionesAltamenteProbables`, `devolucionesPosibles`, `devolucionesExcluidasCount`. |
+| `src/app/(app)/supervisor-ia/page.tsx` | **MODIFICADO.** Tipos `CasoIndemnizable`, `DineroRiesgo` (3 campos nuevos), `AuditoriaData` (nuevo campo). 5 estados nuevos: `showIndemnDetalle`, `indemnFiltroNivel`, `indemnFiltroSignal`, `indemnRevisados`, `indemnEscalados`. Card "Devoluciones indemnizables" → button clickeable con chevron. Sección expandible con stats bar, filtros nivel+señal, tabla auditeable (11 columnas desktop, cards mobile), acciones por fila. Sección "Posibles indemnizaciones" reemplazada por anchor div para compatibilidad de links. |
+
+### Lógica de falsos positivos (NO indemnizable si)
+
+| Condición | Lógica |
+|---|---|
+| Cliente canceló explícitamente | `last_attempt_reason` contiene `cancel` + `cliente` / `client` |
+| Cliente rechazó o no quiso recibir | `razón` contiene `rechaz` / `no quiso` / `no quería` |
+| Teléfono / número incorrecto | `razón` contiene `tel`/`número` + `incorr`/`equivoc`/`erron` |
+| Cliente solicitó devolución | `razón` contiene `pide`/`solicit`/`pidió` + `devoluci`/`retorno` |
+| Fuera cobertura confirmado en origen | `confirmation_status = 'no_coverage'` + razón vacía + sin `cobertura`/`zona` |
+
+Los casos excluidos como FP **no aparecen** en la lista. Se muestra un contador de excluidos.
+
+### Confidence score (probabilidad indemnización)
+
+```
+confidence = min(95, round(score * 0.95 + 5))
+```
+
+| Rango confidence | Categoría | Descripción |
+|---|---|---|
+| 65–95% | altamente_probable | Alta probabilidad de reclamo válido |
+| 30–64% | posible | Riesgo moderado, requiere verificación |
+| 0–29% | excluido | No recomendado como caso indemnizable |
+
+El score 0 → 5%, score 50 → 52%, score 76 → 77%, score 90 → 91%, score 95 → 95%.
+
+### Razones principales IA (iaReason)
+
+| Condición | Texto mostrado |
+|---|---|
+| 3+ intentos + Posible intento falso | "3 intentos con documentación insuficiente" |
+| 3+ intentos (sin señal FP) | "3 intentos fallidos sin entrega documentada" |
+| Señal Fuera cobertura dudoso | "Cobertura posiblemente válida según zona" |
+| Razón contiene dirección/domicilio | "Reprogramación por dirección — verificar si era correcta" |
+| Señal Reprogramación sospechosa | "Reprogramación sospechosa sin justificación" |
+| Retraso excesivo + Courier falló | "Novedad prolongada antes de devolución" |
+| Señal Courier falló | "Courier posiblemente inconsistente" |
+| 2+ intentos (sin lo anterior) | "Múltiples intentos sin entrega exitosa" |
+| 0 intentos | "Devuelto sin ningún intento registrado" |
+| Default | "Posible devolución injustificada" |
+
+### Señales de auditoría (badges en la UI)
+
+| Señal | Color | Filtro disponible |
+|---|---|---|
+| Posible intento falso | rojo | "3+ intentos" |
+| Riesgo alto devolución injusta | rojo | — |
+| Caso potencialmente indemnizable | naranja | — |
+| Courier posiblemente falló | naranja | — |
+| Cliente probablemente sí quería recibir | azul | — |
+| Fuera cobertura dudoso | púrpura | "cobertura dudosa" |
+| Retraso excesivo | ámbar | "+72h" |
+| Reprogramación sospechosa | ámbar | — |
+
+### Filtros en la sección de detalle
+
+**Nivel:** Todos / Crítico / Alto / Medio / Bajo  
+**Señal:** Todas / 3+ intentos / 2 intentos / +72h / cobertura dudosa
+
+### Acciones por caso
+
+- **Ver pedido** → `/orders/[id]`
+- **Marcar revisado** → estado local UI (badge verde, fila opacada). Toggle.
+- **Escalar** → estado local UI (badge naranja). Toggle. Arquitectura preparada para Fase 3.
+
+### Separación altamente probables vs posibles
+
+La stats bar muestra:
+- Monto total (excluidos FP)
+- Promedio por caso
+- Altamente probables: `devolucionesAltamenteProbables` (conf ≥65%)
+- Posibles: `devolucionesPosibles` (conf 30–64%)
+- Excluidos: count de falsos positivos detectados
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `admin` → `/supervisor-ia`
+3. **Card clickeable:** En "Dinero en riesgo", click en "Devoluciones indemnizables" → sección se expande con tabla completa
+4. **Filtros:** Click en Crítico/Alto/Medio/Bajo y señales filtra la tabla en tiempo real
+5. **Razón IA:** Cada caso muestra texto descriptivo (no solo números)
+6. **Señales:** Badges de colores según tipo de señal detectada
+7. **Confidence %:** Badge con % de probabilidad de indemnización por caso
+8. **Marcar revisado:** Click → fila se opaca + badge verde "Revisado"
+9. **Escalar:** Click → badge naranja "Escalado"
+10. **Ver pedido:** Link directo a `/orders/[id]`
+11. **Falsos positivos:** Los casos excluidos NO aparecen; contador visible en header
+12. **Stats bar:** Total, promedio, altamente probables vs posibles en tiempo real
+13. `npx tsc --noEmit` → sin errores
+
+### Query 28 (nueva)
+
+```typescript
+// returned + 2+ intentos, limit 120, todos los campos para auditoría
+supabase.from('orders')
+  .select('id, tracking_number, order_number, customer_name, customer_phone, ...')
+  .eq('normalized_status', 'returned')
+  .gte('delivery_attempts', 2)
+  .order('delivery_attempts', { ascending: false })
+  .limit(120)
+```
+
+Resultado en `casosIndemnizablesDetalle[]` ordenado por `confidenceScore DESC`.
+
+---
+
 ## SUPERVISOR IA — Fase 2: Auditoría operativa, scoring, courier y agentes (2026-05-10)
 
 ### Qué se hizo

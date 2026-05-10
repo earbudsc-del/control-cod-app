@@ -19,6 +19,7 @@ interface OrderAudit {
   tracking_number: string
   order_number: string | null
   customer_name: string | null
+  customer_phone: string | null
   city: string | null
   province: string | null
   delivery_attempts: number
@@ -31,6 +32,70 @@ interface OrderAudit {
   shopify_created_at: string | null
   cod_amount: number | null
   confirmation_status: string | null
+}
+
+// ─── Lógica de falsos positivos ───────────────────────────────────────────
+
+function detectFalsePositive(order: Pick<OrderAudit, 'last_attempt_reason' | 'confirmation_status' | 'delivery_attempts'>): { isFP: boolean; reason: string } {
+  const r = (order.last_attempt_reason ?? '').toLowerCase()
+
+  // Cliente canceló explícitamente
+  if ((r.includes('cancel') && (r.includes('cliente') || r.includes('client'))) || r.includes('canceló el pedido'))
+    return { isFP: true, reason: 'Cliente canceló explícitamente' }
+
+  // Cliente rechazó / no quiso recibir
+  if (r.includes('rechaz') || r.includes('no quiso') || r.includes('no quería') || r.includes('no queria'))
+    return { isFP: true, reason: 'Cliente rechazó o no quiso recibir' }
+
+  // Teléfono / número incorrecto (datos de contacto erróneos)
+  if ((r.includes('tel') || r.includes('número') || r.includes('numero')) &&
+      (r.includes('incorr') || r.includes('equivoc') || r.includes('erron')))
+    return { isFP: true, reason: 'Teléfono/número incorrecto registrado' }
+
+  // Cliente solicitó devolución activamente
+  if ((r.includes('pide') || r.includes('solicit') || r.includes('pidió')) &&
+      (r.includes('devoluci') || r.includes('retorno')))
+    return { isFP: true, reason: 'Cliente solicitó devolución' }
+
+  // Fuera de cobertura confirmado en origen (no sólo dicho por el courier)
+  if (order.confirmation_status === 'no_coverage' &&
+      !r.includes('cobertura') && !r.includes('zona') && !r.trim())
+    return { isFP: true, reason: 'Fuera de cobertura confirmado al crear pedido' }
+
+  return { isFP: false, reason: '' }
+}
+
+// ─── Razón principal IA (texto auditeable) ────────────────────────────────
+
+function getIAReason(signals: string[], order: Pick<OrderAudit, 'delivery_attempts' | 'last_attempt_reason'>): string {
+  const r = (order.last_attempt_reason ?? '').toLowerCase()
+
+  if (order.delivery_attempts >= 3) {
+    if (signals.includes('Posible intento falso')) return '3 intentos con documentación insuficiente'
+    return '3 intentos fallidos sin entrega documentada'
+  }
+  if (signals.includes('Fuera cobertura dudoso')) return 'Cobertura posiblemente válida según zona'
+  if (r.includes('direcci') || r.includes('domicil')) return 'Reprogramación por dirección — verificar si era correcta'
+  if (signals.includes('Reprogramación sospechosa')) return 'Reprogramación sospechosa sin justificación'
+  if (signals.includes('Retraso excesivo') && signals.includes('Courier posiblemente falló'))
+    return 'Novedad prolongada antes de devolución'
+  if (signals.includes('Courier posiblemente falló')) return 'Courier posiblemente inconsistente'
+  if (order.delivery_attempts >= 2) return 'Múltiples intentos sin entrega exitosa'
+  if (order.delivery_attempts === 0) return 'Devuelto sin ningún intento registrado'
+  return 'Posible devolución injustificada'
+}
+
+// ─── Confidence score (probabilidad indemnización 0-95) ───────────────────
+
+function calcConfidenceScore(score: number, isFP: boolean): number {
+  if (isFP) return 0
+  return Math.min(95, Math.round(score * 0.95 + 5))
+}
+
+function getIndemnCat(confidence: number): 'altamente_probable' | 'posible' | 'excluido' {
+  if (confidence >= 65) return 'altamente_probable'
+  if (confidence >= 30) return 'posible'
+  return 'excluido'
 }
 
 // ─── Motor de scoring ──────────────────────────────────────────────────────
@@ -199,18 +264,19 @@ export async function GET() {
       returnedCodsRes,
       novedadRiskCodsRes,
       repartoRetrasoCodsRes,
+      returnedDetailRes,
     ] = await Promise.all([
 
       // 1 — Casos auditoria A: novedad + returned (todos, ordenados por intentos)
       supabase.from('orders')
-        .select('id, tracking_number, order_number, customer_name, city, province, delivery_attempts, last_attempt_reason, raw_status, normalized_status, status_since, last_tracking_update, shipment_created_at, shopify_created_at, cod_amount, confirmation_status')
+        .select('id, tracking_number, order_number, customer_name, customer_phone, city, province, delivery_attempts, last_attempt_reason, raw_status, normalized_status, status_since, last_tracking_update, shipment_created_at, shopify_created_at, cod_amount, confirmation_status')
         .in('normalized_status', ['novedad', 'returned'])
         .order('delivery_attempts', { ascending: false })
         .limit(60),
 
       // 2 — Casos auditoria B: en_reparto + in_transit con 2+ intentos o retrasados
       supabase.from('orders')
-        .select('id, tracking_number, order_number, customer_name, city, province, delivery_attempts, last_attempt_reason, raw_status, normalized_status, status_since, last_tracking_update, shipment_created_at, shopify_created_at, cod_amount, confirmation_status')
+        .select('id, tracking_number, order_number, customer_name, customer_phone, city, province, delivery_attempts, last_attempt_reason, raw_status, normalized_status, status_since, last_tracking_update, shipment_created_at, shopify_created_at, cod_amount, confirmation_status')
         .in('normalized_status', ['en_reparto', 'in_transit'])
         .gte('delivery_attempts', 2)
         .order('delivery_attempts', { ascending: false })
@@ -333,6 +399,14 @@ export async function GET() {
       supabase.from('orders').select('cod_amount')
         .eq('normalized_status', 'en_reparto')
         .or(repOrFilter72),
+
+      // 28 — Detalle indemnizables: returned + 2+ intentos (lista auditeable completa)
+      supabase.from('orders')
+        .select('id, tracking_number, order_number, customer_name, customer_phone, city, province, delivery_attempts, last_attempt_reason, raw_status, normalized_status, status_since, last_tracking_update, shipment_created_at, shopify_created_at, cod_amount, confirmation_status')
+        .eq('normalized_status', 'returned')
+        .gte('delivery_attempts', 2)
+        .order('delivery_attempts', { ascending: false })
+        .limit(120),
     ])
 
     // ── Score y merge de casos ──
@@ -402,21 +476,41 @@ export async function GET() {
       },
     }
 
+    // ── Casos indemnizables detallados (query 28) ──────────────────────────
+    const casosIndemnizablesDetalle = ((returnedDetailRes.data ?? []) as OrderAudit[])
+      .map(order => {
+        const { score, level, signals } = calcRiskScore(order)
+        const { isFP, reason: fpReason } = detectFalsePositive(order)
+        const iaReason = getIAReason(signals, order)
+        const confidenceScore = calcConfidenceScore(score, isFP)
+        const indemnCat = getIndemnCat(confidenceScore)
+        return { ...order, score, level, signals, iaReason, confidenceScore, isFalsePositive: isFP, falsePositiveReason: fpReason, indemnCat }
+      })
+      .sort((a, b) => b.confidenceScore - a.confidenceScore)
+
     // ── Dinero en riesgo ──
     const devolucionesIndemnizables = sumCod(returnedCodsRes.data as Array<{ cod_amount: number | null }>)
     const pedidosEnRiesgoNovedad    = sumCod(novedadRiskCodsRes.data as Array<{ cod_amount: number | null }>)
     const repartoRetraso72h         = sumCod(repartoRetrasoCodsRes.data as Array<{ cod_amount: number | null }>)
+
+    const altamenteProbables = casosIndemnizablesDetalle.filter(c => c.indemnCat === 'altamente_probable')
+    const posibles           = casosIndemnizablesDetalle.filter(c => c.indemnCat === 'posible')
+    const excluidos          = casosIndemnizablesDetalle.filter(c => c.indemnCat === 'excluido' || c.isFalsePositive)
 
     const dineroRiesgo = {
       devolucionesIndemnizables,
       pedidosEnRiesgoNovedad,
       repartoRetraso72h,
       totalEnRiesgo: devolucionesIndemnizables + pedidosEnRiesgoNovedad + repartoRetraso72h,
+      devolucionesAltamenteProbables: sumCod(altamenteProbables),
+      devolucionesPosibles:           sumCod(posibles),
+      devolucionesExcluidasCount:     excluidos.length,
     }
 
     return NextResponse.json({
       generatedAt: now.toISOString(),
       casosAuditoria,
+      casosIndemnizablesDetalle,
       courier,
       agentes,
       dineroRiesgo,
