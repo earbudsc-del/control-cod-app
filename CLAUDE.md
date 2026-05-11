@@ -4,6 +4,333 @@
 
 ---
 
+## FASE 5 — Módulo Devoluciones + Supervisor IA Operativo (2026-05-10)
+
+### Qué se hizo
+
+Módulo operativo `/devoluciones` completo para análisis, seguimiento, indemnizaciones y acciones en pedidos devueltos. Integrado con el Supervisor IA (nueva sección de métricas de devoluciones) y ciclo completo de alertas. Sin romper ningún módulo anterior.
+
+### Archivos creados/modificados
+
+| Archivo | Cambio |
+|---|---|
+| `supabase/migrations/024_return_review_status.sql` | **NUEVO.** Columna `return_review_status` en tabla `orders`. Valores: `pendiente_revision`, `revisado`, `escalado`, `reclamo_preparado`, `reclamado`, `descartado`. Índice parcial en `normalized_status='returned'`. |
+| `src/middleware.ts` | **MODIFICADO.** Nueva constante `DEVOLUCIONES_PATHS = ['/devoluciones']`. Nueva variable `canSeeDevoluciones` (admin/ia_supervisor/novelty_agent). Bloquea `/devoluciones` para confirmation_agent, delivery_agent y roles menores — redirige a `/my-tasks`. |
+| `src/components/layout/sidebar.tsx` | **MODIFICADO.** Icono `RotateCcw` importado. `/devoluciones` añadido a: `admin` (después de Novedades), `ia_supervisor` (después de Dashboard), `novelty_agent` (al final). Alert color `red` en los tres roles. |
+| `src/app/api/devoluciones/route.ts` | **NUEVO.** `GET /api/devoluciones`. Roles: admin/ia_supervisor/novelty_agent. 7 queries paralelas de KPIs + query paginada de pedidos devueltos. Motor de scoring de indemnización determinístico (`calcCompensationScore`). Responde `{ data, kpis, montoReclamable, page, limit, generatedAt }`. `cod_amount` y `montoReclamable` solo visibles para admin/ia_supervisor. |
+| `src/app/api/devoluciones/[id]/status/route.ts` | **NUEVO.** `PATCH /api/devoluciones/[id]/status`. Roles: admin/ia_supervisor/novelty_agent. Actualiza `return_review_status` + crea nota interna en tabla `notes`. |
+| `src/app/api/devoluciones/[id]/note/route.ts` | **NUEVO.** `POST /api/devoluciones/[id]/note`. Roles: admin/ia_supervisor/novelty_agent. Inserta nota con timestamp RD + nombre del agente en tabla `notes`. |
+| `src/app/(app)/devoluciones/page.tsx` | **NUEVO.** Módulo completo `/devoluciones`. Client Component. 10 tabs, 10 KPI cards, filtros avanzados, tabla desktop + cards mobile, modal de notas, selector de estado de revisión inline. |
+| `src/app/(app)/supervisor-ia/page.tsx` | **MODIFICADO.** Importa `RotateCcw`. Nueva sección "Devoluciones" antes de Pagos Admin, con 4 cards de métricas + alerta de alta probabilidad de indemnización. |
+
+### Módulo `/devoluciones`
+
+**Ruta:** `/devoluciones`
+
+**Visibilidad por rol:**
+
+| Rol | Acceso |
+|---|---|
+| `admin` | ✅ Ve todo, incluyendo montos COD y monto reclamable |
+| `ia_supervisor` | ✅ Ve todo, incluyendo montos COD y monto reclamable |
+| `novelty_agent` | ✅ Ve devoluciones pero SIN montos COD ni monto reclamable |
+| `confirmation_agent` | ❌ Redirigido a /my-tasks |
+| `delivery_agent` | ❌ Redirigido a /my-tasks |
+
+### KPIs (10 cards)
+
+| Card | Dato |
+|---|---|
+| Devueltas hoy | `returned` actualizadas en el día RD |
+| Devueltas ayer | `returned` actualizadas ayer en RD |
+| Posible indem. | confidenceScore ≥ 30% |
+| Alta prob. indem. | confidenceScore ≥ 65% |
+| 3+ intentos | delivery_attempts ≥ 3 |
+| SLA vencido +72h | status_since < now - 72h |
+| Courier sospechoso | courierFlag = sospechoso \| posiblemente_falló |
+| Reclamadas | return_review_status = reclamado |
+| Pend. revisar | return_review_status IS NULL |
+| Monto reclamable | SUM cod_amount de alta prob. (solo admin/ia_supervisor) |
+
+Cada KPI card es clickeable y activa el tab correspondiente.
+
+### Tabs (10 filtros)
+
+| Tab key | Filtro |
+|---|---|
+| `todas` | Sin filtro adicional |
+| `2-intentos` | delivery_attempts = 2 |
+| `3mas-intentos` | delivery_attempts ≥ 3 |
+| `posible-indemnizacion` | confidenceScore 30–64% (post-scoring) |
+| `alta-indemnizacion` | confidenceScore ≥ 65% (post-scoring) |
+| `devueltas-hoy` | updated_at en rango de hoy RD |
+| `devueltas-ayer` | updated_at en rango de ayer RD |
+| `courier-sospechoso` | courierFlag = sospechoso \| posiblemente_falló |
+| `sla-vencido` | status_since < now - 72h |
+| `reclamadas` | return_review_status = reclamado |
+
+### Filtros adicionales
+
+- Búsqueda: tracking_number, order_number, customer_name, customer_phone (ilike)
+- Ciudad, Provincia (ilike)
+- Fecha desde/hasta (created_at range)
+- Intentos: 2 ó 3+
+
+### Motor de scoring de indemnización (`calcCompensationScore`)
+
+Calcula `confidenceScore` (0–95%) para cada devolución. No es IA externa — es determinístico.
+
+**Puntos positivos:**
+
+| Condición | Puntos | Señales |
+|---|---|---|
+| delivery_attempts ≥ 3 | +35 | 3+ intentos fallidos · Posible intento falso · Cliente prob. quería recibir |
+| delivery_attempts = 2 | +25 | 2 intentos sin entrega · Cliente prob. quería recibir |
+| delivery_attempts = 0 | +30 | Devuelto sin intento · Courier no intentó entrega |
+| delivery_attempts = 1 | +10 | — |
+| Días desde generación > 10 | +15 | Devolución tardía +10d |
+| Días desde generación > 7 | +10 | Devolución tardía +7d |
+| Devolución < 24h desde reparto | +15 | Devolución muy rápida |
+| last_attempt_reason contiene cobertura/zona | +20 | Cobertura dudosa · Courier posiblemente falló |
+| last_attempt_reason contiene direcci/domicil | +15 | Dirección como excusa |
+| Sin razón registrada + 2+ intentos | +10 | Sin razón documentada |
+| hoursInStatus > 72h | +10 | SLA roto |
+| confirmation_status = no_coverage | +5 | Fuera cobertura en confirmación |
+
+**Falsos positivos — excluir si:**
+
+| Condición | Motivo |
+|---|---|
+| last_attempt_reason contiene cancel+cliente | Cliente canceló explícitamente |
+| last_attempt_reason contiene rechaz/no quiso/no quería | Cliente rechazó |
+| last_attempt_reason contiene tel/número + incorr/equivoc/erron | Teléfono incorrecto |
+| last_attempt_reason contiene pide/solicit/pidió + devoluci/retorno | Cliente solicitó devolución |
+| confirmation_status=no_coverage + razón vacía | Fuera de cobertura confirmado |
+
+Si `isFP=true` → score=0, confidence=0, `possibleCompensation=false`.
+
+**`compensationPriority`:**
+- critical: confidence ≥ 80%
+- high: 65–79%
+- medium: 45–64%
+- low: < 45%
+
+**`courierFlag`:**
+- `sospechoso`: delivery_attempts=0 ó cobertura dudosa
+- `posiblemente_falló`: 3+ intentos + posible intento falso
+- `sla_roto`: SLA roto +72h
+- `sin_señales`: sin señales detectadas
+
+### Estados de revisión (`return_review_status`)
+
+| Valor | Label UI |
+|---|---|
+| `pendiente_revision` | Pendiente |
+| `revisado` | Revisado |
+| `escalado` | Escalado |
+| `reclamo_preparado` | Reclamo listo |
+| `reclamado` | Reclamado |
+| `descartado` | Descartado |
+
+Seleccionables inline con `<select>` en cada fila (tabla desktop y card mobile).
+
+### Acciones operativas por devolución
+
+| Acción | Cómo |
+|---|---|
+| Ver pedido | Link a `/orders/[id]` |
+| Contactar por WA | Link `wa.me/` con mensaje pre-llenado |
+| Agregar nota interna | Modal → `POST /api/devoluciones/[id]/note` |
+| Cambiar estado de revisión | Select inline → `PATCH /api/devoluciones/[id]/status` |
+
+### APIs
+
+#### `GET /api/devoluciones`
+
+**Auth:** 401 sin sesión · 403 para roles no permitidos
+
+**Params:** `?page=N&filter=key&search=texto&city=&province=&from=ISO&to=ISO&intentos=2|3`
+
+**Response:**
+```typescript
+{
+  data: DevolucionItem[]           // máx. 50 por página
+  kpis: {
+    totalDevueltas, devueltasHoy, devueltasAyer,
+    posiblesIndemnizaciones, altaProbabilidad,
+    tresMasIntentos, slaVencido72h, courierSospechoso,
+    reclamadas, pendientesRevisar
+  }
+  montoReclamable: number | null   // solo admin/ia_supervisor
+  page: number
+  limit: number
+  generatedAt: string
+}
+```
+
+Cada `DevolucionItem` incluye:
+- Todos los campos de `orders` relevantes
+- `score`, `signals`, `possibleCompensation`, `compensationReason`, `compensationPriority`
+- `confidenceScore`, `lifecycleRisk`, `courierFlag`
+- `cod_amount` solo si admin/ia_supervisor (undefined para novelty_agent)
+
+#### `PATCH /api/devoluciones/[id]/status`
+
+Body: `{ status: 'pendiente_revision' | 'revisado' | 'escalado' | 'reclamo_preparado' | 'reclamado' | 'descartado' }`
+
+Crea nota interna automáticamente con el cambio de estado.
+
+#### `POST /api/devoluciones/[id]/note`
+
+Body: `{ note: string }`
+
+Inserta en tabla `notes` con timestamp RD y nombre del agente.
+
+### Sección Devoluciones en `/supervisor-ia`
+
+Nueva sección antes de Pagos Admin, visible si `auditoriaData` existe (requiere ser admin o ia_supervisor para ver montos):
+
+- 4 cards: Total devueltas · Alta prob. indem. (con monto si admin) · Posible indem. · 3+ intentos
+- Alerta prominente cuando `altaProb > 0`: "N devoluciones con alta probabilidad de indemnización. Revisar antes de cerrar el caso." con link a `/devoluciones?filter=alta-indemnizacion`
+- Todas las cards son `<Link>` que navegan a `/devoluciones` con el filtro correspondiente
+
+### Seguridad
+
+- `cod_amount` y `montoReclamable` NO se envían a novelty_agent (undefined en response)
+- Middleware bloquea `/devoluciones` para confirmation_agent, delivery_agent, viewer, agent
+- API endpoints verifican rol antes de procesar
+- novelty_agent puede trabajar devoluciones (revisar, escalar, preparar reclamo, agregar notas) pero NO ve montos
+
+### Performance
+
+- Paginación: máximo 50 registros por página
+- KPIs calculados con 7 queries paralelas `Promise.all`
+- Query principal con filtros DB-side para reducir transferencia
+- Scoring calculado en runtime (no persiste en DB — permite retroalimentación inmediata)
+
+### Migración requerida
+
+```sql
+-- Ejecutar en Supabase SQL Editor:
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS return_review_status text DEFAULT NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_return_review_status ON orders(return_review_status) WHERE normalized_status = 'returned';
+```
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como **admin** → `/devoluciones` → ver sidebar con "Devoluciones" (icono RotateCcw rojo)
+3. Verificar KPIs cargados: Devueltas hoy, Alta prob. indem., 3+ intentos, etc.
+4. Verificar que cards son clickeables y activan el tab correspondiente
+5. Click tab "3+ intentos" → filtro activado, solo muestra devoluciones con 3+ intentos
+6. Click tab "Alta prob. indem." → muestra casos con confidence ≥ 65%
+7. En cada fila: verificar razón IA, priority badge, confidence %, COD amount (si admin)
+8. Cambiar estado de revisión con el select → cambia inmediatamente, nota creada
+9. Click "Nota" → modal → escribir nota → guardar → nota guardada
+10. Click "WA" → abre WhatsApp con mensaje pre-llenado
+11. Click "Ver" → navega a `/orders/[id]`
+12. Login como **ia_supervisor** → `/devoluciones` → ver módulo (con montos)
+13. Login como **novelty_agent** → `/devoluciones` → ver módulo SIN montos (cod_amount: undefined)
+14. Confirmar: novelty_agent NO ve "Monto reclamable" KPI card
+15. Login como **confirmation_agent** → sidebar NO muestra Devoluciones
+16. Navegar `/devoluciones` directamente como confirmation_agent → redirige a `/my-tasks`
+17. Login como **delivery_agent** → mismo resultado que confirmation_agent
+18. Login como **admin** → `/supervisor-ia` → scroll → nueva sección "Devoluciones" visible
+19. Sección muestra 4 cards + alerta si hay alta probabilidad
+20. Click en card "Alta prob. indem." → navega a `/devoluciones?filter=alta-indemnizacion`
+21. `npx tsc --noEmit` → sin errores
+
+---
+
+## FASE 4 — Vista admin: Rendimiento y pagos sugeridos en `/supervisor-ia` (2026-05-10)
+
+### Qué se hizo
+
+Nueva sección "Rendimiento y pagos sugeridos" en `/supervisor-ia`, visible **solo para admin** (invisible para agentes e ia_supervisor). Consume el endpoint `GET /api/admin/agent-payments` y muestra análisis completo de pagos, scoring y recomendaciones por agente.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/supervisor-ia/page.tsx` | **MODIFICADO.** Nuevos tipos: `PaymentBreakdownItem`, `AgentPaymentData`, `AgentPaymentsResponse`. Nuevos icons: `Users`, `Award`, `X`, `TrendingDown`, `Banknote`. Nuevos helpers: `RECOM_META`, `PAY_LEVEL_STYLE`, `ROL_LABEL`, `agentMetrics()`, `generatePaymentInsights()`. Nuevo estado: `paymentsData`, `paymentsLoading`, `isAdmin`, `selectedAgent`, `payFiltroRol`, `payFiltroNivel`. Nuevo callback `fetchPayments`. Nueva sección JSX con cards, filtros, tabla, drawer de detalle e insights. |
+
+### Sección "Rendimiento y pagos sugeridos"
+
+**Visibilidad:** Se detecta automáticamente — si `GET /api/admin/agent-payments` devuelve 200, se muestra; si devuelve 403, no se muestra. No requiere pasar el rol como prop.
+
+**Cards resumen (8):**
+| Card | Dato |
+|---|---|
+| Pago total sugerido | `totalPago` del endpoint |
+| Agentes activos | `agents.length` |
+| Mejor score | `max(agents.score)` |
+| Agentes en riesgo | count de nivel Riesgo + Deficiente |
+| Entregas atribuidas | sum de breakdown con resultado entregado |
+| Recuperaciones | sum de breakdown con resultado recuperado |
+| Devoluciones atribuidas | sum de breakdown con resultado devuelto |
+| Costo/entrega | totalPago ÷ totalEntregas |
+
+**Filtros:**
+- Por rol: Todos / confirmation_agent / novelty_agent / delivery_agent
+- Por nivel: Todos / Excelente / Bueno / Riesgo / Deficiente
+
+**Tabla principal (desktop) / Cards (mobile) — columnas:**
+Agente · Rol · Score · Nivel · Entregados · Recuperados · Devueltos · F.Cob/Crít. · Pago sugerido · Recomendación IA · "Ver detalle →"
+
+**Recomendaciones IA (badges coloreados):**
+| Código | Label UI | Color |
+|---|---|---|
+| `pagar_completo` | Pagar completo | Verde |
+| `pagar_con_bono` | Pagar con bono | Esmeralda |
+| `revisar` | Revisar antes de pagar | Ámbar |
+| `posible_sobrepago` | Posible sobrepago | Rojo |
+
+**Drawer de detalle por agente:**
+- Score + nivel + pago sugerido
+- Métricas: entregados, recuperados, devueltos, F.Cob/Crít.
+- Explicación humanizada del pago
+- Coaching IA (reglas determinísticas según nivel + métricas)
+- Breakdown monetario privado con link a cada pedido (`/orders/[id]`)
+
+**Insights del Supervisor IA — Pagos (`generatePaymentInsights`):**
+Función determinística que genera hasta 5 insights basados en:
+- Agente con mejor score
+- Agentes con alta recuperación → sugerencia de bono
+- Agentes en Riesgo/Deficiente → coaching recomendado
+- Tasa de devoluciones > 15% → alerta rentabilidad
+- Agentes en posible_sobrepago → alerta de revisión
+- Agentes sin actividad pagable
+
+### Privacidad y seguridad
+
+| Rol | `/api/admin/agent-payments` | Sección UI |
+|---|---|---|
+| `admin` | ✅ 200 — ve todo | ✅ Visible |
+| `ia_supervisor` | ❌ 403 | ❌ No visible |
+| `confirmation_agent` | ❌ 403 | ❌ No visible |
+| `novelty_agent` | ❌ 403 | ❌ No visible |
+| `delivery_agent` | ❌ 403 | ❌ No visible |
+
+Los agentes **NO** ven montos, scores de pago ni breakdown monetario. La sección nunca aparece en `/mi-rendimiento`.
+
+### Cómo probar permisos
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como **admin** → `/supervisor-ia` → scroll al final → aparece sección "Rendimiento y pagos sugeridos"
+3. Login como **ia_supervisor** → `/supervisor-ia` → sección **NO aparece**
+4. Login como **confirmation_agent** / **novelty_agent** / **delivery_agent**:
+   - Redirige a `/my-tasks` (middleware) → sección nunca se ve
+   - Llamar `GET /api/admin/agent-payments` directamente → 403
+5. Login como **admin** → sección muestra agentes, cards resumen y tabla
+6. Filtrar por rol (Confirmación/Novedad/Reparto) → tabla se actualiza
+7. Filtrar por nivel (Excelente/Bueno/Riesgo/Deficiente) → tabla se actualiza
+8. Click "Ver detalle →" → drawer desde la derecha con breakdown monetario
+9. Click en `ExternalLink` en el drawer → navega a `/orders/[id]`
+10. Verificar que `/mi-rendimiento` no muestra ningún monto ni pago
+11. `npx tsc --noEmit` → sin errores
+
+---
+
 ## FASE 3 — Separación rendimiento vs. pagos: agentes no ven dinero (2026-05-10)
 
 ### Decisión estratégica

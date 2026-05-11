@@ -8,6 +8,7 @@ import {
   LayoutDashboard, Package, Upload, BarChart2,
   Settings, LogOut, Truck, Bike, AlertCircle, ClipboardList,
   ListTodo, TrendingUp, Box, CheckCircle2, X, ShoppingCart, Brain,
+  RotateCcw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
@@ -31,6 +32,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/reparto',                label: 'En Reparto',           icon: Bike,            alert: 'amber'  },
     { href: '/novedad',                label: 'Novedades',            icon: AlertCircle,     alert: 'red'    },
     { href: '/transito',               label: 'Tránsito',             icon: Box,             alert: null     },
+    { href: '/devoluciones',           label: 'Devoluciones',         icon: RotateCcw,       alert: 'red'    },
     { href: '/confirmacion',           label: 'Confirmación',         icon: ClipboardList,   alert: 'indigo' },
     { href: '/confirmados',            label: 'Confirmados',          icon: CheckCircle2,    alert: 'green'  },
     { href: '/despachados',            label: 'Despachados',          icon: Truck,           alert: null     },
@@ -42,11 +44,12 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
   ],
 
   ia_supervisor: [
-    { href: '/supervisor-ia', label: 'Supervisor IA', icon: Brain,           alert: null },
-    { href: '/dashboard',     label: 'Dashboard',     icon: LayoutDashboard, alert: null },
-    { href: '/my-tasks',      label: 'Mis tareas',    icon: ListTodo,        alert: null },
-    { href: '/transito',      label: 'Tránsito',      icon: Box,             alert: null },
-    { href: '/orders',        label: 'Pedidos',       icon: Package,         alert: null },
+    { href: '/supervisor-ia',  label: 'Supervisor IA', icon: Brain,           alert: null },
+    { href: '/dashboard',      label: 'Dashboard',     icon: LayoutDashboard, alert: null },
+    { href: '/devoluciones',   label: 'Devoluciones',  icon: RotateCcw,       alert: 'red' },
+    { href: '/my-tasks',       label: 'Mis tareas',    icon: ListTodo,        alert: null },
+    { href: '/transito',       label: 'Tránsito',      icon: Box,             alert: null },
+    { href: '/orders',         label: 'Pedidos',       icon: Package,         alert: null },
   ],
 
   confirmation_agent: [
@@ -60,6 +63,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/novedad',        label: 'Novedades',      icon: AlertCircle, alert: 'red'    },
     { href: '/reparto',        label: 'En Reparto',     icon: Bike,        alert: 'amber'  },
     { href: '/transito',       label: 'Tránsito',       icon: Box,         alert: null     },
+    { href: '/devoluciones',   label: 'Devoluciones',   icon: RotateCcw,   alert: 'red'    },
   ],
 
   delivery_agent: [

@@ -7,6 +7,9 @@ const ADMIN_ONLY_PATHS = ['/dashboard', '/performance']
 // Rutas que requieren admin o ia_supervisor
 const SUPERVISOR_PATHS = ['/supervisor-ia']
 
+// Rutas visibles para admin, ia_supervisor y novelty_agent — NO para confirmation_agent ni delivery_agent
+const DEVOLUCIONES_PATHS = ['/devoluciones']
+
 async function getUserRole(supabase: ReturnType<typeof createServerClient>, userId: string) {
   const { data } = await supabase
     .from('profiles')
@@ -55,13 +58,15 @@ export async function middleware(request: NextRequest) {
     path === '/' ||
     path.startsWith('/login') ||
     ADMIN_ONLY_PATHS.some(p => path.startsWith(p)) ||
-    SUPERVISOR_PATHS.some(p => path.startsWith(p))
+    SUPERVISOR_PATHS.some(p => path.startsWith(p)) ||
+    DEVOLUCIONES_PATHS.some(p => path.startsWith(p))
 
   if (!needsRoleCheck) return response
 
   const role = await getUserRole(supabase, user.id)
-  const isAdmin      = role === 'admin'
-  const isSupervisor = role === 'admin' || role === 'ia_supervisor'
+  const isAdmin           = role === 'admin'
+  const isSupervisor      = role === 'admin' || role === 'ia_supervisor'
+  const canSeeDevoluciones = role === 'admin' || role === 'ia_supervisor' || role === 'novelty_agent'
   const home = isAdmin ? '/dashboard' : '/my-tasks'
 
   // Si ya está logueado, redirigir desde login a su home según rol
@@ -81,6 +86,11 @@ export async function middleware(request: NextRequest) {
 
   // Bloquear rutas de supervisor para roles sin permisos
   if (!isSupervisor && SUPERVISOR_PATHS.some(p => path.startsWith(p))) {
+    return NextResponse.redirect(new URL('/my-tasks', request.url))
+  }
+
+  // Bloquear /devoluciones para confirmation_agent, delivery_agent y roles menores
+  if (!canSeeDevoluciones && DEVOLUCIONES_PATHS.some(p => path.startsWith(p))) {
     return NextResponse.redirect(new URL('/my-tasks', request.url))
   }
 

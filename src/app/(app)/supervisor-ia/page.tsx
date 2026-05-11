@@ -9,6 +9,7 @@ import {
   ClipboardList, FileWarning, CircleDollarSign, ArrowRight,
   ShieldAlert, BarChart3, DollarSign, Star, Info,
   Check, XCircle, Filter, AlertOctagon,
+  Users, Award, X, TrendingDown, Banknote, RotateCcw,
 } from 'lucide-react'
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────
@@ -205,6 +206,36 @@ interface AuditoriaData {
   courier: CourierMetrics
   agentes: AgentesMetrics
   dineroRiesgo: DineroRiesgo
+}
+
+// ─── Tipos Pagos Admin ───────────────────────────────────────────────────────
+
+interface PaymentBreakdownItem {
+  orderId:      string
+  orderNumber:  string | null
+  customerName: string | null
+  resultado:    string
+  pago:         number
+  reason:       string
+}
+
+interface AgentPaymentData {
+  agentId:         string
+  agentName:       string | null
+  role:            string
+  score:           number
+  level:           'Excelente' | 'Bueno' | 'Riesgo' | 'Deficiente'
+  paymentEstimate: number
+  breakdown:       PaymentBreakdownItem[]
+  recomendacion:   'pagar_completo' | 'pagar_con_bono' | 'revisar' | 'posible_sobrepago'
+  explicacion:     string
+}
+
+interface AgentPaymentsResponse {
+  generatedAt: string
+  totalPago:   number
+  agents:      AgentPaymentData[]
+  nota:        string
 }
 
 // ─── Motor de recomendaciones ────────────────────────────────────────────────
@@ -636,6 +667,83 @@ function generarRecomendacionesV2(m: MetricsData, auditoria: AuditoriaData | nul
   return recom.sort((a, b) => PRIO_ORDER[a.prioridad] - PRIO_ORDER[b.prioridad])
 }
 
+// ─── Helpers de pagos admin ──────────────────────────────────────────────────
+
+const RECOM_META: Record<string, { label: string; color: string }> = {
+  pagar_completo:    { label: 'Pagar completo',           color: 'bg-green-100 text-green-700 border-green-200' },
+  pagar_con_bono:    { label: 'Pagar con bono',           color: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
+  revisar:           { label: 'Revisar antes de pagar',   color: 'bg-amber-100 text-amber-700 border-amber-200' },
+  posible_sobrepago: { label: 'Posible sobrepago',        color: 'bg-red-100 text-red-700 border-red-200' },
+}
+
+const PAY_LEVEL_STYLE: Record<string, string> = {
+  Excelente:  'bg-green-100 text-green-700',
+  Bueno:      'bg-blue-100 text-blue-700',
+  Riesgo:     'bg-amber-100 text-amber-700',
+  Deficiente: 'bg-red-100 text-red-700',
+}
+
+const ROL_LABEL: Record<string, string> = {
+  confirmation_agent: 'Confirmación',
+  novelty_agent:      'Novedad',
+  delivery_agent:     'Reparto',
+}
+
+function agentMetrics(agent: AgentPaymentData) {
+  const entregados   = agent.breakdown.filter(b => b.resultado === 'Entregado' || b.resultado === 'Recuperado + entregado').length
+  const recuperados  = agent.breakdown.filter(b => b.resultado.includes('Recuperado')).length
+  const devueltos    = agent.breakdown.filter(b => b.resultado.includes('Devuelto')).length
+  const sinCobertura = agent.breakdown.filter(b => b.resultado === 'Fuera cobertura' || b.resultado === 'Cancelado').length
+  const criticos     = agent.breakdown.filter(b => b.resultado === 'Sin respuesta al courier' || b.resultado === '2+ intentos trabajados').length
+  return { entregados, recuperados, devueltos, sinCobertura, criticos }
+}
+
+function generatePaymentInsights(agents: AgentPaymentData[]): string[] {
+  if (agents.length === 0) return ['No hay agentes activos con datos de pago esta semana.']
+  const insights: string[] = []
+
+  const best = agents.reduce((a, b) => a.score > b.score ? a : b)
+  if (best.score >= 90) {
+    insights.push(`${best.agentName ?? 'El agente top'} lidera con score ${best.score} — rendimiento excelente esta semana.`)
+  } else if (best.score >= 75) {
+    insights.push(`${best.agentName ?? 'El agente top'} tiene el mejor score (${best.score}). Semana operativa positiva.`)
+  }
+
+  const conBono = agents.filter(a => a.recomendacion === 'pagar_con_bono')
+  if (conBono.length > 0) {
+    const nombres = conBono.map(a => a.agentName ?? a.role).join(', ')
+    insights.push(`${nombres} ${conBono.length === 1 ? 'tiene' : 'tienen'} alta recuperación — considera bono por desempeño.`)
+  }
+
+  const riesgo = agents.filter(a => a.level === 'Riesgo' || a.level === 'Deficiente')
+  if (riesgo.length > 0) {
+    const nombres = riesgo.map(a => a.agentName ?? a.role).join(', ')
+    insights.push(`${nombres} ${riesgo.length === 1 ? 'requiere' : 'requieren'} coaching antes de escalar pago.`)
+  }
+
+  const totalDev = agents.reduce((s, a) => s + a.breakdown.filter(b => b.resultado.includes('Devuelto')).length, 0)
+  const totalEnt = agents.reduce((s, a) => s + a.breakdown.filter(b => b.resultado === 'Entregado' || b.resultado === 'Recuperado + entregado').length, 0)
+  if (totalEnt + totalDev > 0 && (totalDev / (totalEnt + totalDev)) > 0.15) {
+    insights.push(`La tasa de devoluciones (${Math.round((totalDev / (totalEnt + totalDev)) * 100)}%) está afectando la rentabilidad. Revisar gestión por agente.`)
+  }
+
+  const sobrepago = agents.filter(a => a.recomendacion === 'posible_sobrepago')
+  if (sobrepago.length > 0) {
+    insights.push(`Riesgo de sobrepago detectado en ${sobrepago.map(a => a.agentName ?? a.role).join(', ')}. Revisar antes de procesar pago.`)
+  }
+
+  const sinActividad = agents.filter(a => a.breakdown.every(b => b.pago === 0))
+  if (sinActividad.length > 0) {
+    insights.push(`${sinActividad.map(a => a.agentName ?? a.role).join(', ')} ${sinActividad.length === 1 ? 'no registra' : 'no registran'} actividad pagable esta semana.`)
+  }
+
+  if (insights.length === 0) {
+    insights.push('Todos los agentes tienen rendimiento aceptable esta semana.')
+  }
+
+  return insights.slice(0, 5)
+}
+
 // ─── Helpers de color ────────────────────────────────────────────────────────
 
 const PRIO_STYLE: Record<RecomPriority, string> = {
@@ -792,6 +900,14 @@ export default function SupervisorIAPage() {
   const [auditoriaLoading, setAuditoriaLoading] = useState(true)
   const [showAuditoria, setShowAuditoria]     = useState(false)
   const [auditFiltroNivel, setAuditFiltroNivel] = useState<string>('all')
+  // Pagos admin
+  const [paymentsData, setPaymentsData]       = useState<AgentPaymentsResponse | null>(null)
+  const [paymentsLoading, setPaymentsLoading] = useState(true)
+  const [isAdmin, setIsAdmin]                 = useState<boolean | null>(null)
+  const [selectedAgent, setSelectedAgent]     = useState<AgentPaymentData | null>(null)
+  const [payFiltroRol, setPayFiltroRol]       = useState<string>('all')
+  const [payFiltroNivel, setPayFiltroNivel]   = useState<string>('all')
+
   // Indemnizables detalle
   const [showIndemnDetalle, setShowIndemnDetalle] = useState(false)
   const [indemnFiltroNivel, setIndemnFiltroNivel] = useState<string>('all')
@@ -817,6 +933,22 @@ export default function SupervisorIAPage() {
     }
   }, [])
 
+  const fetchPayments = useCallback(async () => {
+    try {
+      setPaymentsLoading(true)
+      const res = await fetch('/api/admin/agent-payments')
+      if (res.status === 403) { setIsAdmin(false); return }
+      if (!res.ok) return
+      const json = await res.json()
+      setPaymentsData(json)
+      setIsAdmin(true)
+    } catch {
+      // silencioso — sección simplemente no aparece
+    } finally {
+      setPaymentsLoading(false)
+    }
+  }, [])
+
   const fetchAuditoria = useCallback(async () => {
     try {
       setAuditoriaLoading(true)
@@ -834,12 +966,14 @@ export default function SupervisorIAPage() {
   useEffect(() => {
     fetchData()
     fetchAuditoria()
+    fetchPayments()
     const interval = setInterval(() => {
       fetchData()
       fetchAuditoria()
+      fetchPayments()
     }, 5 * 60 * 1000)
     return () => clearInterval(interval)
-  }, [fetchData, fetchAuditoria])
+  }, [fetchData, fetchAuditoria, fetchPayments])
 
   if (loading && !data) {
     return (
@@ -1959,6 +2093,491 @@ export default function SupervisorIAPage() {
 
         </div>
       </section>
+
+      {/* ══════════════════════════════════════════════════════════ */}
+      {/* ── DEVOLUCIONES: Métricas operativas ────────────────────── */}
+      {/* ══════════════════════════════════════════════════════════ */}
+
+      {auditoriaData && (() => {
+        const totalDev = auditoriaData.courier.devueltos
+        const indemnizables = (auditoriaData.casosIndemnizablesDetalle ?? []).filter(c => !c.isFalsePositive)
+        const altaProb = indemnizables.filter(c => c.indemnCat === 'altamente_probable').length
+        const posible  = indemnizables.filter(c => c.indemnCat === 'posible').length
+        const montoAlta = indemnizables.filter(c => c.indemnCat === 'altamente_probable')
+          .reduce((s, c) => s + (c.cod_amount ?? 0), 0)
+
+        return (
+          <section id="devoluciones-supervisor">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center gap-2">
+              <RotateCcw className="w-4 h-4 text-red-500" />
+              Devoluciones
+              {altaProb > 0 && (
+                <span className="text-xs font-bold bg-red-100 text-red-700 px-2 py-0.5 rounded-full normal-case tracking-normal">
+                  {altaProb} alta prob.
+                </span>
+              )}
+            </h2>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+              <Link href="/devoluciones" className="bg-white border border-gray-200 rounded-xl p-4 hover:shadow-sm hover:border-red-300 transition-all block">
+                <p className="text-xs text-gray-500 mb-1">Total devueltas</p>
+                <p className="text-xl font-bold text-gray-900">{totalDev}</p>
+                <p className="text-xs text-gray-400 mt-0.5">Ver todas →</p>
+              </Link>
+              <Link href="/devoluciones?filter=alta-indemnizacion" className={`rounded-xl p-4 hover:shadow-sm transition-all block ${altaProb > 0 ? 'bg-red-50 border border-red-200 hover:border-red-400' : 'bg-white border border-gray-200'}`}>
+                <p className={`text-xs mb-1 font-medium ${altaProb > 0 ? 'text-red-600' : 'text-gray-500'}`}>Alta prob. indem.</p>
+                <p className={`text-xl font-bold ${altaProb > 0 ? 'text-red-800' : 'text-gray-700'}`}>{altaProb}</p>
+                {isAdmin === true && montoAlta > 0 && (
+                  <p className="text-xs text-red-500 mt-0.5 font-medium">{fmtDOP(montoAlta)}</p>
+                )}
+              </Link>
+              <Link href="/devoluciones?filter=posible-indemnizacion" className="bg-amber-50 border border-amber-200 rounded-xl p-4 hover:shadow-sm hover:border-amber-400 transition-all block">
+                <p className="text-xs text-amber-600 font-medium mb-1">Posible indem.</p>
+                <p className="text-xl font-bold text-amber-800">{posible}</p>
+                <p className="text-xs text-amber-400 mt-0.5">Requiere revisión</p>
+              </Link>
+              <Link href="/devoluciones?filter=3mas-intentos" className="bg-orange-50 border border-orange-200 rounded-xl p-4 hover:shadow-sm hover:border-orange-400 transition-all block">
+                <p className="text-xs text-orange-600 font-medium mb-1">3+ intentos</p>
+                <p className="text-xl font-bold text-orange-800">
+                  {indemnizables.filter(c => c.delivery_attempts >= 3).length}
+                </p>
+                <p className="text-xs text-orange-400 mt-0.5">Ver en Devoluciones →</p>
+              </Link>
+            </div>
+            {altaProb > 0 && (
+              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm">
+                <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-red-800">
+                    {altaProb} devolución{altaProb !== 1 ? 'es' : ''} con alta probabilidad de indemnización.
+                  </span>
+                  <span className="text-red-600"> Revisar antes de cerrar el caso.</span>
+                  <Link href="/devoluciones?filter=alta-indemnizacion" className="ml-2 text-red-700 font-medium underline hover:text-red-900">
+                    Ver casos →
+                  </Link>
+                </div>
+              </div>
+            )}
+          </section>
+        )
+      })()}
+
+      {/* ══════════════════════════════════════════════════════════ */}
+      {/* ── PAGOS ADMIN: Rendimiento y pagos sugeridos ───────────── */}
+      {/* ══════════════════════════════════════════════════════════ */}
+
+      {isAdmin === true && (() => {
+        const agents = paymentsData?.agents ?? []
+        const filteredAgents = agents.filter(a => {
+          if (payFiltroRol !== 'all' && a.role !== payFiltroRol) return false
+          if (payFiltroNivel !== 'all' && a.level !== payFiltroNivel) return false
+          return true
+        })
+
+        const totalPago      = paymentsData?.totalPago ?? 0
+        const agentesActivos = agents.length
+        const mejorScore     = agents.length > 0 ? Math.max(...agents.map(a => a.score)) : 0
+        const enRiesgo       = agents.filter(a => a.level === 'Riesgo' || a.level === 'Deficiente').length
+        const totalEntregas  = agents.reduce((s, a) => s + agentMetrics(a).entregados, 0)
+        const totalRecup     = agents.reduce((s, a) => s + agentMetrics(a).recuperados, 0)
+        const totalDevueltos = agents.reduce((s, a) => s + agentMetrics(a).devueltos, 0)
+        const costoPorResult = totalEntregas > 0 ? Math.round(totalPago / totalEntregas) : 0
+        const insights       = generatePaymentInsights(agents)
+
+        return (
+          <>
+            {/* ── Sección header ─────────────────────────────────── */}
+            <section id="pagos-agentes">
+              <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center gap-2">
+                <Banknote className="w-4 h-4 text-green-600" />
+                Rendimiento y pagos sugeridos
+                <span className="text-xs font-normal text-gray-400 normal-case tracking-normal">(solo admin — semana actual)</span>
+              </h2>
+
+              {paymentsLoading && !paymentsData ? (
+                <div className="flex items-center gap-2 px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-gray-400 text-sm">
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  Calculando pagos…
+                </div>
+              ) : (
+                <>
+                  {/* ── Cards resumen ───────────────────────────────── */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                      <p className="text-xs text-green-600 font-medium mb-1">Pago total sugerido</p>
+                      <p className="text-xl font-bold text-green-800">{fmtDOP(totalPago)}</p>
+                      <p className="text-xs text-green-500 mt-0.5">semana actual</p>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                      <p className="text-xs text-blue-600 font-medium mb-1">Agentes activos</p>
+                      <p className="text-xl font-bold text-blue-800">{agentesActivos}</p>
+                      <p className="text-xs text-blue-500 mt-0.5">con actividad</p>
+                    </div>
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+                      <p className="text-xs text-indigo-600 font-medium mb-1">Mejor score</p>
+                      <p className="text-xl font-bold text-indigo-800">{mejorScore}</p>
+                      <p className="text-xs text-indigo-500 mt-0.5">de 100 pts</p>
+                    </div>
+                    <div className={`border rounded-xl p-4 ${enRiesgo > 0 ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-200'}`}>
+                      <p className={`text-xs font-medium mb-1 ${enRiesgo > 0 ? 'text-amber-600' : 'text-gray-500'}`}>Agentes en riesgo</p>
+                      <p className={`text-xl font-bold ${enRiesgo > 0 ? 'text-amber-800' : 'text-gray-700'}`}>{enRiesgo}</p>
+                      <p className={`text-xs mt-0.5 ${enRiesgo > 0 ? 'text-amber-500' : 'text-gray-400'}`}>Riesgo + Deficiente</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4">
+                      <p className="text-xs text-gray-500 font-medium mb-1">Entregas atribuidas</p>
+                      <p className="text-xl font-bold text-gray-800">{totalEntregas}</p>
+                      <p className="text-xs text-gray-400 mt-0.5">confirmadas por courier</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4">
+                      <p className="text-xs text-gray-500 font-medium mb-1">Recuperaciones</p>
+                      <p className="text-xl font-bold text-gray-800">{totalRecup}</p>
+                      <p className="text-xs text-gray-400 mt-0.5">carritos recuperados</p>
+                    </div>
+                    <div className={`border rounded-xl p-4 ${totalDevueltos > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200'}`}>
+                      <p className={`text-xs font-medium mb-1 ${totalDevueltos > 0 ? 'text-red-600' : 'text-gray-500'}`}>Devoluciones atribuidas</p>
+                      <p className={`text-xl font-bold ${totalDevueltos > 0 ? 'text-red-700' : 'text-gray-700'}`}>{totalDevueltos}</p>
+                      <p className={`text-xs mt-0.5 ${totalDevueltos > 0 ? 'text-red-400' : 'text-gray-400'}`}>impacto en rentabilidad</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4">
+                      <p className="text-xs text-gray-500 font-medium mb-1">Costo/entrega</p>
+                      <p className="text-xl font-bold text-gray-800">{costoPorResult > 0 ? fmtDOP(costoPorResult) : '—'}</p>
+                      <p className="text-xs text-gray-400 mt-0.5">pago ÷ entregas</p>
+                    </div>
+                  </div>
+
+                  {/* ── Filtros ─────────────────────────────────────── */}
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    <div className="flex items-center gap-1 text-xs text-gray-500 font-medium">
+                      <Filter className="w-3.5 h-3.5" /> Rol:
+                    </div>
+                    {(['all', 'confirmation_agent', 'novelty_agent', 'delivery_agent'] as const).map(r => (
+                      <button
+                        key={r}
+                        onClick={() => setPayFiltroRol(r)}
+                        className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${payFiltroRol === r ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-200 hover:border-indigo-300'}`}
+                      >
+                        {r === 'all' ? 'Todos' : ROL_LABEL[r]}
+                      </button>
+                    ))}
+                    <span className="mx-1 text-gray-200">|</span>
+                    <div className="flex items-center gap-1 text-xs text-gray-500 font-medium">
+                      Nivel:
+                    </div>
+                    {(['all', 'Excelente', 'Bueno', 'Riesgo', 'Deficiente'] as const).map(n => (
+                      <button
+                        key={n}
+                        onClick={() => setPayFiltroNivel(n)}
+                        className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${payFiltroNivel === n ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-200 hover:border-indigo-300'}`}
+                      >
+                        {n === 'all' ? 'Todos' : n}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* ── Tabla principal por agente ──────────────────── */}
+                  {filteredAgents.length === 0 ? (
+                    <div className="flex items-center gap-2 px-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-400 text-sm">
+                      <Users className="w-4 h-4 shrink-0" />
+                      Sin agentes con los filtros seleccionados.
+                    </div>
+                  ) : (
+                    <>
+                      {/* Desktop table */}
+                      <div className="hidden md:block bg-white rounded-xl border border-gray-200 overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-50 border-b border-gray-100">
+                            <tr>
+                              <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Agente</th>
+                              <th className="text-left px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Rol</th>
+                              <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Score</th>
+                              <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Nivel</th>
+                              <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Entregados</th>
+                              <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Recuperados</th>
+                              <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Devueltos</th>
+                              <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">F.Cob/Crít.</th>
+                              <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Pago sugerido</th>
+                              <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Recomendación IA</th>
+                              <th className="px-4 py-3"></th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {filteredAgents.map(agent => {
+                              const m = agentMetrics(agent)
+                              const rec = RECOM_META[agent.recomendacion]
+                              return (
+                                <tr key={agent.agentId} className="hover:bg-gray-50 transition-colors">
+                                  <td className="px-4 py-3">
+                                    <span className="font-medium text-gray-800">{agent.agentName ?? '—'}</span>
+                                  </td>
+                                  <td className="px-3 py-3 text-gray-500 text-xs">{ROL_LABEL[agent.role] ?? agent.role}</td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className="font-bold text-gray-800">{agent.score}</span>
+                                  </td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PAY_LEVEL_STYLE[agent.level]}`}>
+                                      {agent.level}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-3 text-center font-medium text-gray-700">{m.entregados}</td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className={m.recuperados > 0 ? 'font-semibold text-emerald-700' : 'text-gray-400'}>{m.recuperados}</span>
+                                  </td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className={m.devueltos > 0 ? 'font-semibold text-red-600' : 'text-gray-400'}>{m.devueltos}</span>
+                                  </td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className={m.sinCobertura + m.criticos > 0 ? 'font-semibold text-amber-600' : 'text-gray-400'}>{m.sinCobertura + m.criticos}</span>
+                                  </td>
+                                  <td className="px-4 py-3 text-right">
+                                    <span className="font-bold text-gray-900">{fmtDOP(agent.paymentEstimate)}</span>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${rec?.color ?? ''}`}>
+                                      {rec?.label ?? agent.recomendacion}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <button
+                                      onClick={() => setSelectedAgent(agent)}
+                                      className="text-xs text-indigo-600 hover:text-indigo-800 font-medium hover:underline whitespace-nowrap"
+                                    >
+                                      Ver detalle →
+                                    </button>
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Mobile cards */}
+                      <div className="md:hidden space-y-3">
+                        {filteredAgents.map(agent => {
+                          const m = agentMetrics(agent)
+                          const rec = RECOM_META[agent.recomendacion]
+                          return (
+                            <div key={agent.agentId} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                              <div className="px-4 py-3 flex items-center justify-between border-b border-gray-100">
+                                <div>
+                                  <p className="font-semibold text-gray-800 text-sm">{agent.agentName ?? '—'}</p>
+                                  <p className="text-xs text-gray-400">{ROL_LABEL[agent.role] ?? agent.role}</p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PAY_LEVEL_STYLE[agent.level]}`}>{agent.level}</span>
+                                  <span className="text-sm font-bold text-gray-700">{agent.score} pts</span>
+                                </div>
+                              </div>
+                              <div className="px-4 py-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                                <div className="flex justify-between"><span className="text-gray-500 text-xs">Entregados</span><span className="font-medium">{m.entregados}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-500 text-xs">Recuperados</span><span className={`font-medium ${m.recuperados > 0 ? 'text-emerald-700' : 'text-gray-400'}`}>{m.recuperados}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-500 text-xs">Devueltos</span><span className={`font-medium ${m.devueltos > 0 ? 'text-red-600' : 'text-gray-400'}`}>{m.devueltos}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-500 text-xs">F.Cob/Crít.</span><span className={`font-medium ${m.sinCobertura + m.criticos > 0 ? 'text-amber-600' : 'text-gray-400'}`}>{m.sinCobertura + m.criticos}</span></div>
+                              </div>
+                              <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-xs text-gray-400 mb-0.5">Pago sugerido</p>
+                                  <p className="font-bold text-gray-900 text-base">{fmtDOP(agent.paymentEstimate)}</p>
+                                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded-full border ${rec?.color ?? ''}`}>{rec?.label ?? agent.recomendacion}</span>
+                                </div>
+                                <button
+                                  onClick={() => setSelectedAgent(agent)}
+                                  className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold border border-indigo-200 rounded-lg px-3 py-1.5 hover:bg-indigo-50 transition-colors"
+                                >
+                                  Ver detalle →
+                                </button>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </>
+                  )}
+
+                  {/* ── Nota experimental ──────────────────────────── */}
+                  {paymentsData?.nota && (
+                    <p className="mt-3 text-xs text-gray-400 flex items-start gap-1">
+                      <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      {paymentsData.nota}
+                    </p>
+                  )}
+                </>
+              )}
+            </section>
+
+            {/* ── Insights IA admin ───────────────────────────────── */}
+            {agents.length > 0 && (
+              <section>
+                <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center gap-2">
+                  <Brain className="w-4 h-4 text-indigo-500" />
+                  Insights del Supervisor IA — Pagos
+                </h2>
+                <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-5 py-4 space-y-2">
+                  {insights.map((insight, i) => (
+                    <div key={i} className="flex items-start gap-2 text-sm text-indigo-900">
+                      <span className="flex-shrink-0 w-5 h-5 bg-indigo-200 text-indigo-800 rounded-full text-xs font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
+                      <span>{insight}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* ── Drawer detalle por agente ───────────────────────── */}
+            {selectedAgent && (() => {
+              const agent = selectedAgent
+              const rec = RECOM_META[agent.recomendacion]
+              const m = agentMetrics(agent)
+              return (
+                <div className="fixed inset-0 z-50 flex items-start justify-end">
+                  <div className="absolute inset-0 bg-black/40" onClick={() => setSelectedAgent(null)} />
+                  <div className="relative z-10 bg-white h-full w-full max-w-lg shadow-2xl overflow-y-auto flex flex-col">
+                    {/* Header */}
+                    <div className="sticky top-0 bg-white border-b border-gray-200 px-5 py-4 flex items-center justify-between">
+                      <div>
+                        <p className="font-bold text-gray-900">{agent.agentName ?? '—'}</p>
+                        <p className="text-xs text-gray-400">{ROL_LABEL[agent.role] ?? agent.role} · Detalle de pago</p>
+                      </div>
+                      <button
+                        onClick={() => setSelectedAgent(null)}
+                        className="p-2 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <div className="p-5 space-y-5 pb-10">
+                      {/* Métricas principales */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-gray-50 rounded-lg p-3 text-center">
+                          <p className="text-xs text-gray-400 mb-1">Score</p>
+                          <p className="text-2xl font-bold text-gray-900">{agent.score}</p>
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PAY_LEVEL_STYLE[agent.level]}`}>{agent.level}</span>
+                        </div>
+                        <div className="bg-green-50 rounded-lg p-3 text-center">
+                          <p className="text-xs text-green-500 mb-1">Pago sugerido</p>
+                          <p className="text-2xl font-bold text-green-800">{fmtDOP(agent.paymentEstimate)}</p>
+                          <span className={`text-xs font-medium px-1.5 py-0.5 rounded-full border ${rec?.color ?? ''}`}>{rec?.label}</span>
+                        </div>
+                        <div className="bg-white border border-gray-200 rounded-lg p-3 text-center">
+                          <p className="text-xs text-gray-400 mb-1">Entregas</p>
+                          <p className="text-xl font-bold text-gray-800">{m.entregados}</p>
+                        </div>
+                        <div className="bg-white border border-gray-200 rounded-lg p-3 text-center">
+                          <p className="text-xs text-gray-400 mb-1">Recuperaciones</p>
+                          <p className={`text-xl font-bold ${m.recuperados > 0 ? 'text-emerald-700' : 'text-gray-400'}`}>{m.recuperados}</p>
+                        </div>
+                        <div className="bg-white border border-gray-200 rounded-lg p-3 text-center">
+                          <p className="text-xs text-gray-400 mb-1">Devueltos</p>
+                          <p className={`text-xl font-bold ${m.devueltos > 0 ? 'text-red-600' : 'text-gray-400'}`}>{m.devueltos}</p>
+                        </div>
+                        <div className="bg-white border border-gray-200 rounded-lg p-3 text-center">
+                          <p className="text-xs text-gray-400 mb-1">F.Cob / Críticos</p>
+                          <p className={`text-xl font-bold ${m.sinCobertura + m.criticos > 0 ? 'text-amber-600' : 'text-gray-400'}`}>{m.sinCobertura + m.criticos}</p>
+                        </div>
+                      </div>
+
+                      {/* Explicación pago */}
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
+                        <p className="text-xs text-blue-600 font-semibold mb-1 uppercase tracking-wide">Explicación del pago sugerido</p>
+                        <p className="text-sm text-blue-900">{agent.explicacion}</p>
+                      </div>
+
+                      {/* Coaching IA */}
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Coaching IA</p>
+                        <div className="space-y-1.5">
+                          {agent.level === 'Excelente' && agent.recomendacion === 'pagar_con_bono' && (
+                            <p className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                              Rendimiento sobresaliente. Considera un bono para mantener la motivación.
+                            </p>
+                          )}
+                          {agent.level === 'Excelente' && agent.recomendacion === 'pagar_completo' && (
+                            <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+                              Excelente desempeño. Pago completo recomendado sin ajustes.
+                            </p>
+                          )}
+                          {agent.level === 'Bueno' && (
+                            <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                              Buen rendimiento general. Hay margen para mejorar la tasa de entrega.
+                            </p>
+                          )}
+                          {agent.level === 'Riesgo' && (
+                            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                              Rendimiento en zona de riesgo. Revisar calidad de gestión antes de procesar pago.
+                            </p>
+                          )}
+                          {agent.level === 'Deficiente' && (
+                            <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                              Rendimiento bajo. Conversación de coaching recomendada antes de procesar pago.
+                            </p>
+                          )}
+                          {m.devueltos > 3 && (
+                            <p className="text-sm text-orange-700 bg-orange-50 border border-orange-200 rounded-lg px-3 py-2">
+                              Alta tasa de devoluciones ({m.devueltos}). Evaluar si hay patrones repetibles.
+                            </p>
+                          )}
+                          {m.recuperados > 2 && (
+                            <p className="text-sm text-teal-700 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
+                              Buena recuperación de carritos ({m.recuperados}). Habilidad operativa destacada.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Breakdown monetario */}
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                          Pedidos trabajados — breakdown monetario ({agent.breakdown.length})
+                        </p>
+                        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+                          <table className="w-full text-xs">
+                            <thead className="bg-gray-50 border-b border-gray-100">
+                              <tr>
+                                <th className="text-left px-3 py-2 font-semibold text-gray-500">Pedido</th>
+                                <th className="text-left px-3 py-2 font-semibold text-gray-500">Resultado</th>
+                                <th className="text-right px-3 py-2 font-semibold text-gray-500">Pago</th>
+                                <th className="px-3 py-2"></th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-50">
+                              {agent.breakdown.map(b => (
+                                <tr key={b.orderId} className="hover:bg-gray-50">
+                                  <td className="px-3 py-2">
+                                    <p className="font-medium text-gray-700">{b.orderNumber ?? '—'}</p>
+                                    <p className="text-gray-400 truncate max-w-[110px]">{b.customerName ?? ''}</p>
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <p className="text-gray-600">{b.resultado}</p>
+                                    <p className="text-gray-400 text-[10px]">{b.reason}</p>
+                                  </td>
+                                  <td className="px-3 py-2 text-right">
+                                    <span className={`font-bold ${b.pago > 0 ? 'text-green-700' : 'text-gray-400'}`}>
+                                      {b.pago > 0 ? `RD$${b.pago}` : '—'}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <Link
+                                      href={`/orders/${b.orderId}`}
+                                      className="text-indigo-500 hover:text-indigo-700"
+                                      onClick={() => setSelectedAgent(null)}
+                                    >
+                                      <ExternalLink className="w-3.5 h-3.5" />
+                                    </Link>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+          </>
+        )
+      })()}
 
     </div>
   )
