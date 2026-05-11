@@ -2814,3 +2814,295 @@ Necesidades:
 - Diferenciar: devuelto por courier / confirmado en sistema / recibido físicamente
 - Historial de movimientos: salida, entrega, devolución en tránsito, devolución recibida, ajuste manual
 - Comparación inventario interno vs reporte EFI
+
+---
+
+## FASE 3 — MI RENDIMIENTO INDIVIDUAL (2026-05-10)
+
+Dashboard de rendimiento personal con score, desglose auditado por orden, estimación de pago (experimental) y coaching. Disponible para los tres roles: agente de confirmación, agente de novedad, agente de reparto.
+
+**Principio:** Todo es determinista y auditado. No hay IA externa. El agente puede verificar cada punto del score revisando el desglose por orden.
+
+---
+
+### Endpoint: `GET /api/my-performance/score`
+
+**Archivo:** `src/app/api/my-performance/score/route.ts`
+
+Requiere sesión autenticada. Detecta el rol del usuario y retorna un objeto `ScoreData`.
+
+#### Parámetros de respuesta
+
+```typescript
+interface BreakdownItem {
+  orderId: string
+  orderNumber: string | null
+  customerName: string | null
+  resultado: string        // Entregado / Recuperado + entregado / Devuelto / Sin respuesta al courier / Fuera cobertura / Cancelado / Pendiente
+  pago: number             // RD$ estimado (experimental)
+  reason: string           // Por qué se clasificó así
+}
+
+interface ScoreData {
+  role: 'confirmation_agent' | 'novelty_agent' | 'delivery_agent'
+  score: number            // 0-100
+  level: 'Excelente' | 'Bueno' | 'Riesgo' | 'Deficiente'
+  paymentEstimate: number  // Total RD$ sumando todos los BreakdownItems
+  metrics: Record<string, number | null>   // KPIs por rol
+  breakdown: BreakdownItem[]
+  coaching: string[]       // Mensajes automáticos basados en métricas
+  trends: {
+    confirmacionesDelta: number | null
+    entregasDelta: number | null
+    devolucionesDelta: number | null
+    scoreDelta: number | null
+    thisPeriod: { confirmaciones: number; entregas: number; devoluciones: number; score: number }
+    lastPeriod: { confirmaciones: number; entregas: number; devoluciones: number; score: number }
+  }
+}
+```
+
+#### Manejo de fechas (zona RD)
+
+RD usa `America/Santo_Domingo` = UTC-4 fijo (sin DST). La frontera del día en UTC son las 04:00:00Z.
+
+```typescript
+function rdDayISO(offsetDays = 0): string {
+  const rdStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Santo_Domingo',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date())
+  const [y, m, d] = rdStr.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d + offsetDays, 4, 0, 0, 0)).toISOString()
+}
+// month30 = rdDayISO(-30)  → hace 30 días en RD
+// week1   = rdDayISO(-7)   → hace 7 días (divide esta semana / semana anterior)
+// week2   = rdDayISO(-14)  → hace 14 días (inicio semana anterior)
+```
+
+---
+
+### Niveles de score
+
+| Score | Nivel | Color UI |
+|-------|-------|----------|
+| 90-100 | Excelente | Verde |
+| 75-89  | Bueno     | Azul  |
+| 60-74  | Riesgo    | Naranja |
+| 0-59   | Deficiente | Rojo |
+
+---
+
+### Fórmula de score — Agente de Confirmación
+
+**Ventana:** últimos 30 días (sistema-wide — no hay agent_id en confirmaciones).
+
+```
+base            = 40
+deliveryScore   = (deliveryRate / 100) x 36        // máx +36 — deliveryRate = entregas / confirmados
+recoveryBonus   = min(recuperados / 5, 1) x 12     // máx +12 — 5+ recuperados = bonus completo
+devPenalty      = (devueltos / confirmados) x 20    // máx -20 — proporcional a tasa devolución
+coberPenalty    = min((fueraCobertura / confirmados) x 10, 4)  // máx -4
+score           = clamp(0, round(base + deliveryScore + recoveryBonus - devPenalty - coberPenalty), 100)
+```
+
+**Métricas expuestas:**
+- `confirmados`: pedidos con `confirmation_status IN ('confirmed','no_coverage','cancelled','unreachable')` en 30d
+- `entregados`: de los confirmados, `normalized_status = 'delivered'`
+- `devueltos`: `normalized_status = 'returned'` + `confirmation_status = 'confirmed'`
+- `fueraCobertura`: `confirmation_status = 'no_coverage'`
+- `recuperados`: pedidos cuyo `shopify_order_id` aparece en `abandoned_carts.recovered_order_id`
+- `deliveryRate`: `(entregados / confirmados) x 100` — porcentaje
+
+---
+
+### Fórmula de score — Agente de Novedad
+
+**Ventana:** agent_actions del agente autenticado en últimos 30 días.
+
+```
+base            = 40
+tasaRecScore    = (tasaRec / 100) x 36             // máx +36 — tasaRec = recuperadas / trabajados
+volumenBonus    = min(trabajados / 10, 1) x 12     // máx +12 — 10+ trabajados = bonus completo
+intentosBonus   = dosIntentos === 0 ? 8 : max(0, 8 - dosIntentos x 2)  // máx +8
+vencidasPenalty = min(vencidas x 2, 20)            // máx -20
+score           = clamp(0, round(base + tasaRecScore + volumenBonus + intentosBonus - vencidasPenalty), 100)
+```
+
+**Métricas expuestas:**
+- `trabajados`: órdenes con acción del agente en agent_actions (action_type IN ('assigned','updated','resolved'))
+- `recuperadas`: de los trabajados con `normalized_status IN ('in_transit', 'delivered')`
+- `dosIntentos`: órdenes con `delivery_attempts >= 2` en estado novedad
+- `tasaRec`: `(recuperadas / trabajados) x 100`
+- `vencidas`: órdenes en novedad creadas hace más de 7 días sin resolución
+
+---
+
+### Fórmula de score — Agente de Reparto
+
+**Ventana:** agent_actions del agente autenticado en últimos 30 días.
+
+```
+base             = 40
+tasaEntregaScore = (tasaEntrega / 100) x 36        // máx +36 — tasaEntrega = entregados / contactados
+seguimientoBonus = min(contactados / 10, 1) x 12   // máx +12 — 10+ contactados = bonus completo
+criticosBonus    = criticos === 0 ? 8 : 0           // +8 si cero críticos
+criticosPenalty  = min(criticos x 3, 20)            // máx -20
+score            = clamp(0, round(base + tasaEntregaScore + seguimientoBonus + criticosBonus - criticosPenalty), 100)
+```
+
+**Métricas expuestas:**
+- `contactados`: órdenes con acción del agente en agent_actions
+- `entregados`: de los contactados con `normalized_status = 'delivered'`
+- `criticos`: órdenes en en_reparto con `updated_at < hace 48h` (sin actualización reciente)
+- `tasaEntrega`: `(entregados / contactados) x 100`
+
+---
+
+### Sistema de pago estimado (experimental)
+
+**IMPORTANTE:** Estos cálculos son experimentales. No representan el pago real. Solo sirven para que el agente estime su rendimiento. Pueden cambiar en cualquier momento.
+
+#### Clasificación por orden — Agente de Confirmación
+
+| Condición | Resultado | Pago RD$ |
+|-----------|-----------|----------|
+| `recovered = true` AND `normalized_status = 'delivered'` | Recuperado + entregado | 35 |
+| `normalized_status = 'delivered'` | Entregado | 25 |
+| `normalized_status = 'returned'` AND `confirmation_status = 'confirmed'` | Devuelto | 5 |
+| `confirmation_status = 'no_coverage'` | Fuera cobertura | 0 |
+| `confirmation_status = 'cancelled'` | Cancelado | 0 |
+| `confirmation_status = 'confirmed'` AND `normalized_status IN ('en_reparto','novedad','in_transit')` AND `delivery_attempts >= 1` | Sin respuesta al courier | 10 |
+| otro | Pendiente | 0 |
+
+#### Clasificación por orden — Agente de Novedad
+
+| Condición | Resultado | Pago RD$ |
+|-----------|-----------|----------|
+| `normalized_status IN ('in_transit','delivered')` | Recuperado | 35 |
+| `normalized_status = 'returned'` | Devuelto confirmado | 5 |
+| `delivery_attempts >= 2` | 2+ intentos (sin entrega) | 10 |
+| otro | Sin definir | 0 |
+
+#### Clasificación por orden — Agente de Reparto
+
+| Condición | Resultado | Pago RD$ |
+|-----------|-----------|----------|
+| `normalized_status = 'delivered'` | Entregado | 25 |
+| `normalized_status = 'returned'` | Devuelto | 5 |
+| crítico (>48h sin update) | Crítico activo | 0 |
+| otro | En proceso | 0 |
+
+---
+
+### Detección de pedidos recuperados de carrito
+
+No hay FK directa. La detección se hace con un reverse JOIN en TypeScript:
+
+```typescript
+// 1. Obtener IDs de Shopify de las órdenes del breakdown
+const shopifyIds = orders.map(o => o.shopify_order_id).filter(Boolean)
+
+// 2. Buscar en abandoned_carts cuáles tienen recovered_order_id en esa lista
+const { data: recCarts } = await supabase
+  .from('abandoned_carts')
+  .select('recovered_order_id')
+  .in('recovered_order_id', shopifyIds)
+  .eq('recovery_status', 'recovered')
+
+// 3. Construir Set para lookup O(1)
+const recoveredSet = new Set(recCarts?.map(c => c.recovered_order_id) ?? [])
+
+// 4. En classifyConfirm: isRecovered = recoveredSet.has(order.shopify_order_id)
+```
+
+---
+
+### Nota: Sin agent_id en confirmaciones
+
+El endpoint `/api/orders/[id]/confirmation` actualiza directamente la tabla `orders` sin insertar en `agent_actions`. Por esto, no es posible filtrar confirmaciones por agente individual.
+
+**Consecuencia:** El breakdown y las métricas de `confirmation_agent` son sistema-wide (todos los pedidos confirmados en los últimos 30 días), no filtradas por agente. Si en el futuro se agrega tracking en agent_actions para confirmaciones, la lógica de query debe actualizarse.
+
+---
+
+### Tendencias semanales
+
+Se divide el período de 30 días en:
+- **Esta semana:** `week1ISO` (-7d) hasta ahora
+- **Semana anterior:** `week2ISO` (-14d) hasta `week1ISO`
+
+Para cada período se calcula: confirmaciones, entregas, devoluciones, score.
+Los deltas (`confirmacionesDelta`, `entregasDelta`, etc.) son `thisPeriod - lastPeriod`.
+
+---
+
+### Coaching automático
+
+Los mensajes se generan en el servidor (deterministas, sin IA). Ejemplos:
+
+**Confirmación:**
+- `deliveryRate < 40` → "Tu tasa de entrega está muy baja. Revisa si hay pedidos en espera de gestión."
+- `fueraCobertura > confirmados * 0.2` → "Más del 20% de los pedidos están fuera de cobertura. Considera escalar al supervisor."
+- `devueltos > confirmados * 0.3` → "Alta tasa de devolución. Coordina con el equipo de reparto."
+- `recuperados >= 3` → "¡Excelente recuperación de carritos! Sigue así."
+- `deliveryRate >= 80` → "Tasa de entrega excelente. ¡Mantén el ritmo!"
+
+**Novedad:**
+- `vencidas > 3` → "Tienes N casos vencidos +7 días. Requieren atención inmediata."
+- `dosIntentos > 2` → "Varios pedidos con 2+ intentos sin entrega. Coordina nuevas ventanas de entrega."
+- `tasaRec >= 70` → "¡Tasa de recuperación excelente! Estás gestionando muy bien las novedades."
+
+**Reparto:**
+- `criticos > 0` → "Tienes N pedido(s) crítico(s) con más de 48h sin actualización."
+- `tasaEntrega < 50` → "Tu tasa de entrega está por debajo del 50%. Revisa los casos pendientes."
+- `tasaEntrega >= 80` → "Excelente tasa de entrega. ¡Sigue así!"
+
+---
+
+### Archivos del módulo
+
+| Archivo | Descripción |
+|---------|-------------|
+| `src/app/api/my-performance/score/route.ts` | **NUEVO.** GET endpoint principal. Detecta rol, calcula score, métricas, breakdown, coaching, trends. |
+| `src/components/rendimiento/RendimientoConfirmacion.tsx` | **REESCRITO.** Dashboard premium para confirmation_agent. Usa `/api/my-performance/score`. |
+| `src/components/rendimiento/RendimientoNovedad.tsx` | **REESCRITO.** Dashboard premium para novelty_agent. Tema rojo. |
+| `src/components/rendimiento/RendimientoReparto.tsx` | **REESCRITO.** Dashboard premium para delivery_agent. Tema ámbar. |
+| `src/app/(app)/mi-rendimiento/page.tsx` | Sin cambios — sigue enrutando por rol a los componentes anteriores. |
+
+**Endpoints anteriores no modificados** (siguen activos para supervisor-ia):
+- `src/app/api/confirmacion/performance/route.ts`
+- `src/app/api/novedad/performance/route.ts`
+- `src/app/api/reparto/performance/route.ts`
+
+---
+
+### Cómo probar
+
+1. **Login como agente de confirmación** → ir a `/mi-rendimiento`
+   - Debe mostrar score circle, estimación de pago, 6 tarjetas KPI, barra de tasa de entrega, tabla de desglose, tendencias, coaching.
+   - Verificar que el score cambia si hay órdenes entregadas vs devueltas.
+
+2. **Login como agente de novedad** → ir a `/mi-rendimiento`
+   - Score círculo rojo. 5 KPIs: Trabajados, Recuperadas, 2+ intentos, Tasa recup., Vencidas +7d.
+   - Desglose muestra las órdenes en que el agente tuvo acción.
+
+3. **Login como agente de reparto** → ir a `/mi-rendimiento`
+   - Score círculo ámbar. Banner de alerta si hay críticos > 0.
+   - Desglose muestra las órdenes del agente.
+
+4. **Verificar auditabilidad:** expandir el desglose y comparar cada fila con la orden real en el módulo correspondiente.
+
+5. **Verificar TypeScript:** `npx tsc --noEmit` debe pasar sin errores.
+
+6. **Probar con datos vacíos:** agente sin acciones → score = 40 (base), paymentEstimate = 0, breakdown vacío, coaching básico.
+
+---
+
+### Restricciones
+
+- No se conecta a APIs externas ni a IA
+- No ejecuta pagos reales — es solo estimación visual
+- La fórmula de pago puede cambiar — siempre se muestra el disclaimer "Sistema experimental"
+- No se modificaron migraciones de DB para esta fase
+- `npx tsc --noEmit` limpio confirmado (2026-05-10)
