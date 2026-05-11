@@ -5,8 +5,8 @@ import Link from 'next/link'
 import { Spinner } from '@/components/ui/spinner'
 import {
   RefreshCw, ArrowRight, TrendingUp, TrendingDown, Minus,
-  CheckCircle2, Phone, AlertOctagon, Truck, Gift,
-  DollarSign, Bot, Sparkles, ExternalLink, ChevronDown, ChevronUp,
+  CheckCircle2, Phone, AlertOctagon, Truck,
+  Activity, Bot, Sparkles, ExternalLink, ChevronDown, ChevronUp, Target,
 } from 'lucide-react'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -16,15 +16,13 @@ interface BreakdownItem {
   orderNumber:  string | null
   customerName: string | null
   resultado:    string
-  pago:         number
   reason:       string
 }
 
 interface ScoreData {
-  role:            string
-  score:           number
-  level:           'Excelente' | 'Bueno' | 'Riesgo' | 'Deficiente'
-  paymentEstimate: number
+  role:  string
+  score: number
+  level: 'Excelente' | 'Bueno' | 'Riesgo' | 'Deficiente'
   metrics: {
     entregadosSemana?:  number | null
     contactadosSemana?: number | null
@@ -55,6 +53,13 @@ const LEVEL: Record<ScoreData['level'], {
   Deficiente:{ text: 'text-red-700',    border: 'border-red-400',    bg: 'bg-red-50',    badge: 'bg-red-100 text-red-800',    bar: 'bg-red-500'   },
 }
 
+const LEVEL_THRESHOLDS: Record<ScoreData['level'], { min: number; max: number; next: string | null }> = {
+  Deficiente: { min: 0,  max: 60, next: 'Riesgo'    },
+  Riesgo:     { min: 60, max: 75, next: 'Bueno'     },
+  Bueno:      { min: 75, max: 90, next: 'Excelente' },
+  Excelente:  { min: 90, max: 100, next: null       },
+}
+
 function resultadoBadge(resultado: string): string {
   if (resultado === 'Entregado')            return 'bg-green-100 text-green-700'
   if (resultado === 'Recuperado + entregado') return 'bg-teal-100 text-teal-700'
@@ -81,14 +86,14 @@ function Delta({ value, invert = false }: { value: number | null; invert?: boole
 //   base = 40
 //   + (tasaEntrega/100) × 36        → max 36 pts
 //   + min(contactados/10, 1) × 12   → max 12 pts
-//   + (criticos==0 ? 8 : 0)         → max 8 pts (sin críticos)
-//   − min(criticos×3, 20)           → max −20 pts penalización
+//   + (criticos==0 ? 8 : 0)         → max 8 pts
+//   − min(criticos×3, 20)           → max −20 pts
 
 function ScoreBars({ lc, metrics }: {
   lc: typeof LEVEL[ScoreData['level']]
   metrics: ScoreData['metrics']
 }) {
-  const tasa       = metrics.tasaEntrega      ?? 0
+  const tasa        = metrics.tasaEntrega      ?? 0
   const contactados = metrics.contactadosSemana ?? 0
   const criticos    = metrics.criticosActivos   ?? 0
 
@@ -126,6 +131,93 @@ function ScoreBars({ lc, metrics }: {
   )
 }
 
+// ── Level progress + achievements card ───────────────────────────────────────
+
+function LevelProgressCard({
+  score, level, lc, metrics, trends,
+}: {
+  score:   number
+  level:   ScoreData['level']
+  lc:      typeof LEVEL[ScoreData['level']]
+  metrics: ScoreData['metrics']
+  trends:  ScoreData['trends']
+}) {
+  const t   = LEVEL_THRESHOLDS[level]
+  const pct = level === 'Excelente'
+    ? 100
+    : Math.max(0, Math.min(100, Math.round(((score - t.min) / (t.max - t.min)) * 100)))
+  const ptsToNext = t.max - score
+
+  const achievements: { label: string; cls: string }[] = []
+  if ((metrics.criticosActivos  ?? 0) === 0) achievements.push({ label: 'Sin críticos',    cls: 'bg-green-100 text-green-700'   })
+  if ((metrics.tasaEntrega      ?? 0) >= 70) achievements.push({ label: 'Alta entrega',    cls: 'bg-teal-100 text-teal-700'    })
+  if ((metrics.contactadosSemana ?? 0) >= 10) achievements.push({ label: 'Buen seguimiento', cls: 'bg-blue-100 text-blue-700'  })
+  if ((trends.scoreDelta         ?? 0) > 0)  achievements.push({ label: 'Mejorando',       cls: 'bg-indigo-100 text-indigo-700' })
+  if ((metrics.entregadosSemana  ?? 0) >= 10) achievements.push({ label: 'Alto volumen',   cls: 'bg-purple-100 text-purple-700' })
+
+  const goals: string[] = []
+  if ((metrics.criticosActivos  ?? 0) > 0)  goals.push('Meta: cero pedidos críticos +48h en reparto')
+  if ((metrics.tasaEntrega      ?? 0) < 70) goals.push('Meta: superar 70% de tasa de entrega')
+  if ((metrics.contactadosSemana ?? 0) < 10) goals.push('Meta: registrar todos los contactos con clientes')
+
+  return (
+    <div className="bg-white rounded-2xl border-2 border-gray-200 p-6 flex flex-col gap-4 shadow-sm">
+
+      {/* Progress bar */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Progreso al siguiente nivel</span>
+          {t.next
+            ? <span className="text-xs text-gray-500"><span className={`font-black ${lc.text}`}>{ptsToNext} pts</span> para <span className="font-semibold">{t.next}</span></span>
+            : <span className="text-xs font-bold text-green-600">Nivel máximo alcanzado</span>
+          }
+        </div>
+        <div className="w-full h-3 rounded-full bg-gray-100 overflow-hidden">
+          <div className={`h-full rounded-full transition-all duration-700 ${lc.bar}`} style={{ width: `${pct}%` }} />
+        </div>
+        <div className="flex justify-between mt-1 text-[10px] text-gray-400">
+          <span>{level}</span>
+          {t.next && <span>{t.next}</span>}
+        </div>
+      </div>
+
+      {/* Achievements */}
+      {achievements.length > 0 && (
+        <div>
+          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Logros esta semana</p>
+          <div className="flex flex-wrap gap-1.5">
+            {achievements.map(a => (
+              <span key={a.label} className={`text-xs font-semibold px-2.5 py-1 rounded-full ${a.cls}`}>{a.label}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Goals */}
+      {goals.length > 0 && (
+        <div>
+          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Metas operativas</p>
+          <ul className="space-y-1.5">
+            {goals.map(g => (
+              <li key={g} className="flex items-start gap-2 text-xs text-gray-600">
+                <span className={`mt-0.5 font-bold ${lc.text}`}>→</span>
+                {g}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {achievements.length === 0 && goals.length === 0 && (
+        <div className="flex items-center gap-2 text-sm text-gray-500">
+          <Target className="w-4 h-4 text-amber-400 shrink-0" />
+          Alcanza logros mejorando tu tasa de entrega y seguimiento.
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── KPI Cards ─────────────────────────────────────────────────────────────────
 
 function KpiCards({ metrics }: { metrics: ScoreData['metrics'] }) {
@@ -158,14 +250,13 @@ function BreakdownTable({ breakdown }: { breakdown: BreakdownItem[] }) {
   const [expanded, setExpanded] = useState(false)
   const PAGE = 10
   const visible = expanded ? breakdown : breakdown.slice(0, PAGE)
-  const totalPago = breakdown.reduce((s, b) => s + b.pago, 0)
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="flex items-center gap-3 px-5 py-3.5 bg-gray-50 border-b border-gray-100">
-        <DollarSign className="w-4 h-4 text-green-600" />
-        <h2 className="text-sm font-bold text-gray-800">Breakdown auditable</h2>
-        <span className="ml-auto text-xs text-gray-500">{breakdown.length} pedidos · RD${totalPago.toLocaleString()} total</span>
+        <Activity className="w-4 h-4 text-amber-500" />
+        <h2 className="text-sm font-bold text-gray-800">Historial operativo</h2>
+        <span className="ml-auto text-xs text-gray-500">{breakdown.length} pedidos</span>
       </div>
 
       {breakdown.length === 0 ? (
@@ -181,8 +272,7 @@ function BreakdownTable({ breakdown }: { breakdown: BreakdownItem[] }) {
                   <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500">Pedido</th>
                   <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500">Cliente</th>
                   <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500">Resultado</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500">Razón</th>
-                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-500">Pago</th>
+                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500">Razón operativa</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
@@ -201,11 +291,6 @@ function BreakdownTable({ breakdown }: { breakdown: BreakdownItem[] }) {
                       </span>
                     </td>
                     <td className="px-4 py-2.5 text-gray-500 text-xs">{item.reason}</td>
-                    <td className="px-4 py-2.5 text-right">
-                      <span className={`font-black tabular-nums text-sm ${item.pago > 0 ? 'text-green-700' : 'text-gray-400'}`}>
-                        {item.pago > 0 ? `+RD$${item.pago}` : '—'}
-                      </span>
-                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -228,9 +313,6 @@ function BreakdownTable({ breakdown }: { breakdown: BreakdownItem[] }) {
                   <p className="text-xs text-gray-600 truncate">{item.customerName ?? '—'}</p>
                   <p className="text-[10px] text-gray-400 mt-0.5">{item.reason}</p>
                 </div>
-                <span className={`font-black tabular-nums text-sm shrink-0 ${item.pago > 0 ? 'text-green-700' : 'text-gray-400'}`}>
-                  {item.pago > 0 ? `+RD$${item.pago}` : '—'}
-                </span>
               </div>
             ))}
           </div>
@@ -324,8 +406,8 @@ function CoachingSection({ coaching }: { coaching: string[] }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function RendimientoReparto() {
-  const [data, setData]             = useState<ScoreData | null>(null)
-  const [loading, setLoading]       = useState(true)
+  const [data, setData]               = useState<ScoreData | null>(null)
+  const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
 
   const fetchData = useCallback(async () => {
@@ -395,7 +477,7 @@ export function RendimientoReparto() {
         </div>
       )}
 
-      {/* ── Score + Payment ── */}
+      {/* ── Score + Level Progress ── */}
       <div className="grid md:grid-cols-2 gap-4">
 
         {/* Score */}
@@ -409,28 +491,14 @@ export function RendimientoReparto() {
           <ScoreBars lc={lc} metrics={data.metrics} />
         </div>
 
-        {/* Payment */}
-        <div className="bg-white rounded-2xl border-2 border-green-300 p-6 flex flex-col items-center justify-center gap-4 shadow-sm">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Pago estimado</p>
-          <div className="flex items-start gap-1">
-            <span className="text-2xl font-bold text-green-700 mt-1.5">RD$</span>
-            <span className="text-6xl font-black text-green-700 tabular-nums leading-none">
-              {data.paymentEstimate.toLocaleString()}
-            </span>
-          </div>
-          <p className="text-xs text-gray-500 text-center leading-relaxed">
-            Calculado sobre {data.metrics.entregadosSemana ?? 0} entregas en los últimos 30 días
-          </p>
-          <div className="flex flex-col gap-1.5 w-full text-[11px] text-gray-500">
-            <div className="flex justify-between"><span>Entrega exitosa:</span><span className="font-bold text-green-600">+RD$25</span></div>
-            <div className="flex justify-between"><span>Recuperado + entregado:</span><span className="font-bold text-teal-600">+RD$35</span></div>
-            <div className="flex justify-between"><span>Seguimiento activo (contactado):</span><span className="font-bold text-amber-600">+RD$10</span></div>
-            <div className="flex justify-between"><span>Devuelto:</span><span className="font-bold text-gray-600">+RD$5</span></div>
-          </div>
-          <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-full font-medium text-center">
-            Sistema experimental — no refleja pago real
-          </span>
-        </div>
+        {/* Level progress + achievements + goals */}
+        <LevelProgressCard
+          score={data.score}
+          level={data.level}
+          lc={lc}
+          metrics={data.metrics}
+          trends={data.trends}
+        />
       </div>
 
       {/* ── KPI Cards ── */}

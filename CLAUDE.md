@@ -4,6 +4,141 @@
 
 ---
 
+## FASE 3 — Separación rendimiento vs. pagos: agentes no ven dinero (2026-05-10)
+
+### Decisión estratégica
+
+Los agentes **NO deben ver** montos en RD$, fórmula de pago, pago estimado, ni breakdown monetario.
+El objetivo es mantenerlos enfocados en rendimiento, score, calidad y progreso — sin ansiedad ni desmotivación por montos diarios.
+
+El admin **SÍ tiene acceso privado** a pagos estimados, breakdown monetario, fórmula, rentabilidad y recomendación de pago.
+
+### Qué se hizo
+
+1. Eliminados de `/mi-rendimiento` (los 3 componentes de agentes): tarjeta "Pago estimado", columna "Pago", textos RD$, reglas de pago visibles, "Sistema experimental".
+2. El endpoint público `/api/my-performance/score` ya **no expone** `paymentEstimate` ni `pago` en los items de breakdown. El cálculo interno se conserva pero no se envía al cliente.
+3. Agregada sección motivacional a los 3 componentes: barra de progreso al siguiente nivel, logros semanales, metas operativas.
+4. Creado endpoint admin `GET /api/admin/agent-payments` — solo accesible para `admin` (403 para agentes e ia_supervisor).
+5. Las reglas monetarias quedan privadas en la lógica interna del servidor.
+6. `npx tsc --noEmit` → sin errores.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/my-performance/score/route.ts` | `BreakdownItem` ya no tiene `pago`. `ScoreData` ya no tiene `paymentEstimate`. Se exporta `BreakdownItemInternal` (con `pago`) para uso del admin endpoint. Coaching sin menciones de RD$. |
+| `src/components/rendimiento/RendimientoConfirmacion.tsx` | Eliminadas: tarjeta "Pago estimado", columna Pago, DollarSign, totalPago. Agregado: `LevelProgressCard` con barra de progreso, logros y metas. BreakdownTable → "Historial operativo" sin columna de pago. |
+| `src/components/rendimiento/RendimientoNovedad.tsx` | Igual que Confirmacion, adaptado a métricas de novedad. |
+| `src/components/rendimiento/RendimientoReparto.tsx` | Igual que Confirmacion, adaptado a métricas de reparto. |
+| `src/app/api/admin/agent-payments/route.ts` | **NUEVO.** `GET /api/admin/agent-payments`. Solo admin (403 para otros). Calcula paymentEstimate + breakdown con pago + score + recomendación por agente. |
+
+### Endpoint `/api/my-performance/score` — response agente (sin dinero)
+
+```typescript
+{
+  role:      'confirmation_agent' | 'novelty_agent' | 'delivery_agent'
+  score:     number          // 0–100
+  level:     'Excelente' | 'Bueno' | 'Riesgo' | 'Deficiente'
+  metrics:   Record<string, number | null>
+  breakdown: Array<{
+    orderId: string, orderNumber: string | null, customerName: string | null,
+    resultado: string, reason: string    // SIN pago
+  }>
+  coaching:  string[]
+  trends:    { ... }
+}
+```
+
+### Endpoint `/api/admin/agent-payments` — solo admin
+
+**Auth:** 401 sin sesión · 403 para roles que no sean `admin`
+
+```typescript
+{
+  generatedAt: string
+  totalPago:   number           // RD$ total estimado de todos los agentes
+  nota:        string           // disclaimer experimental
+  agents: Array<{
+    agentId: string, agentName: string | null, role: string
+    score: number, level: string
+    paymentEstimate: number     // RD$ total estimado para este agente
+    breakdown: Array<{
+      orderId, orderNumber, customerName, resultado,
+      pago: number,             // RD$ por pedido
+      reason: string
+    }>
+    recomendacion: 'pagar_completo' | 'pagar_con_bono' | 'revisar' | 'posible_sobrepago'
+    explicacion: string         // "Pago de RD$X sugerido por: N entregas, N recuperaciones..."
+  }>
+}
+```
+
+**Lógica de recomendación:**
+| Level | paymentEstimate | Recomendación |
+|---|---|---|
+| Excelente | > RD$500 | pagar_con_bono |
+| Excelente | ≤ RD$500 | pagar_completo |
+| Bueno | cualquiera | pagar_completo |
+| Riesgo | cualquiera | revisar |
+| Deficiente | cualquiera | posible_sobrepago |
+
+**Limitación conocida:** Las órdenes de `confirmation_agent` no tienen `agent_id` en la tabla `orders`, por lo que el pago de confirmación se computa como pool global. Si hay múltiples confirmation_agents, todos muestran el mismo total.
+
+### Reglas monetarias privadas (solo servidor)
+
+#### confirmation_agent
+| Resultado | Pago |
+|---|---|
+| Entregado | +RD$25 |
+| Recuperado + entregado | +RD$35 |
+| Confirmado pero devuelto | +RD$5 |
+| Sin respuesta al courier | +RD$10 |
+| Fuera cobertura / Cancelado | RD$0 |
+
+#### novelty_agent
+| Resultado | Pago |
+|---|---|
+| Entregado | +RD$25 |
+| Recuperado + entregado | +RD$35 |
+| 2+ intentos trabajados | +RD$10 |
+| Devuelto trabajado | +RD$5 |
+
+#### delivery_agent
+| Resultado | Pago |
+|---|---|
+| Entregado | +RD$25 |
+| Recuperado + entregado | +RD$35 |
+| Seguimiento activo (contactado) | +RD$10 |
+| Devuelto | +RD$5 |
+
+### Sección motivacional en `/mi-rendimiento`
+
+Reemplaza la tarjeta "Pago estimado". Muestra:
+- **Barra de progreso** al siguiente nivel (Deficiente→Riesgo→Bueno→Excelente con thresholds 60/75/90)
+- **"X pts para nivel Y"** — cuánto falta para subir
+- **Logros semanales** — badges dinámicos según métricas (Alta entrega, Sin devoluciones, Alta recuperación, Mejorando, etc.)
+- **Metas operativas** — objetivos adaptados al nivel actual y métricas débiles
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `confirmation_agent` → `/mi-rendimiento`
+   - **NO aparece** tarjeta "Pago estimado"
+   - **NO aparece** columna "Pago" en historial
+   - **NO aparece** ningún texto "RD$"
+   - **SÍ aparece** barra de progreso al siguiente nivel
+   - **SÍ aparece** logros semanales (si los hay)
+   - **SÍ aparece** metas operativas (si aplican)
+3. Repetir con `novelty_agent` y `delivery_agent` → misma validación
+4. Login como `admin` → llamar `GET /api/admin/agent-payments`
+   - Respuesta 200 con `agents[]`, `paymentEstimate`, `breakdown` con pago, `recomendacion`
+5. Login como `confirmation_agent` → llamar `GET /api/admin/agent-payments`
+   - Respuesta 403 "Solo admins pueden ver pagos de agentes"
+6. Repetir 403 con `novelty_agent` y `delivery_agent`
+7. `npx tsc --noEmit` → sin errores
+
+---
+
 ## SUPERVISOR IA — Comunicación directa con agentes: SupervisorFloatingAssistant (2026-05-10)
 
 ### Qué se hizo

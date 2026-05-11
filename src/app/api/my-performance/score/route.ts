@@ -4,25 +4,23 @@ import { NextResponse } from 'next/server'
 type Supabase = Awaited<ReturnType<typeof createClient>>
 type Level = 'Excelente' | 'Bueno' | 'Riesgo' | 'Deficiente'
 
-// ── Shared types (re-used by UI components) ───────────────────────────────────
+// ── Public types (sent to agents — NO money fields) ───────────────────────────
 
 export interface BreakdownItem {
   orderId:      string
   orderNumber:  string | null
   customerName: string | null
   resultado:    string
-  pago:         number
   reason:       string
 }
 
 export interface ScoreData {
-  role:            'confirmation_agent' | 'novelty_agent' | 'delivery_agent'
-  score:           number
-  level:           Level
-  paymentEstimate: number
-  metrics:         Record<string, number | null>
-  breakdown:       BreakdownItem[]
-  coaching:        string[]
+  role:      'confirmation_agent' | 'novelty_agent' | 'delivery_agent'
+  score:     number
+  level:     Level
+  metrics:   Record<string, number | null>
+  breakdown: BreakdownItem[]
+  coaching:  string[]
   trends: {
     confirmacionesDelta: number | null
     entregasDelta:       number | null
@@ -31,6 +29,12 @@ export interface ScoreData {
     thisPeriod:          Record<string, number>
     lastPeriod:          Record<string, number>
   }
+}
+
+// ── Internal type (payment kept private — for admin endpoint) ─────────────────
+
+export interface BreakdownItemInternal extends BreakdownItem {
+  pago: number
 }
 
 // ── Date helpers (RD timezone = UTC-4, sin DST) ───────────────────────────────
@@ -58,12 +62,10 @@ function deltaPct(current: number, prev: number): number | null {
   return Math.round(((current - prev) / prev) * 100)
 }
 
-// ── Payment rules ─────────────────────────────────────────────────────────────
-// Entrega exitosa:             +RD$25
-// Recuperación carrito entregada: +RD$35
-// Confirmado pero devuelto:   +RD$5
-// Sin respuesta al courier:   +RD$10   (pedido confirmado + en_reparto/novedad + delivery_attempts >= 1)
-// Fuera cobertura / cancelado: $0
+// ── Payment rules (private — not sent to agents) ──────────────────────────────
+// Confirmation:  Entregado +25 · Recuperado+entregado +35 · Devuelto +5 · Sin resp. courier +10
+// Novelty:       Entregado +25 · Recuperado+entregado +35 · 2+ intentos +10 · Devuelto +5
+// Delivery:      Entregado +25 · Recuperado+entregado +35 · Seguimiento activo +10 · Devuelto +5
 
 // ── Confirmation Agent ────────────────────────────────────────────────────────
 
@@ -77,7 +79,7 @@ type ConfirmOrder = {
   last_confirmation_attempt: string | null
 }
 
-function classifyConfirm(o: ConfirmOrder, isRecovered: boolean): BreakdownItem {
+function classifyConfirm(o: ConfirmOrder, isRecovered: boolean): BreakdownItemInternal {
   const ns = o.normalized_status ?? 'pending'
   const cs = o.confirmation_status ?? ''
 
@@ -86,15 +88,15 @@ function classifyConfirm(o: ConfirmOrder, isRecovered: boolean): BreakdownItem {
   if (ns === 'delivered')
     return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Entregado', pago: 25, reason: 'Entrega exitosa confirmada por courier' }
   if (ns === 'returned' && cs === 'confirmed')
-    return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Devuelto', pago: 5, reason: 'Confirmado pero devuelto — pago parcial' }
+    return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Devuelto', pago: 5, reason: 'Confirmado pero devuelto' }
   if (cs === 'no_coverage')
-    return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Fuera cobertura', pago: 0, reason: 'Zona sin cobertura — sin pago' }
+    return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Fuera cobertura', pago: 0, reason: 'Zona sin cobertura' }
   if (cs === 'cancelled')
-    return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Cancelado', pago: 0, reason: 'Cancelado por el cliente — sin pago' }
+    return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Cancelado', pago: 0, reason: 'Cancelado por el cliente' }
   if (cs === 'confirmed' && ['en_reparto', 'novedad', 'in_transit'].includes(ns) && (o.delivery_attempts ?? 0) >= 1)
     return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Sin respuesta al courier', pago: 10, reason: 'Cliente confirmó pero no atendió al courier' }
 
-  return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Pendiente', pago: 0, reason: 'En proceso de entrega — pago se calculará al finalizar' }
+  return { orderId: o.id, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'Pendiente', pago: 0, reason: 'En proceso de entrega' }
 }
 
 function calcConfirmScore(params: {
@@ -114,8 +116,8 @@ function calcConfirmScore(params: {
 }
 
 async function getConfirmacionScore(supabase: Supabase): Promise<ScoreData> {
-  const week1  = rdDayISO(-7)
-  const week2  = rdDayISO(-14)
+  const week1   = rdDayISO(-7)
+  const week2   = rdDayISO(-14)
   const month30 = rdDayISO(-30)
 
   const { data: rawOrders } = await supabase
@@ -128,7 +130,6 @@ async function getConfirmacionScore(supabase: Supabase): Promise<ScoreData> {
 
   const orders: ConfirmOrder[] = rawOrders ?? []
 
-  // Which orders came from cart recovery
   let recoveredSet = new Set<string>()
   if (orders.length > 0) {
     const { data: carts } = await supabase
@@ -140,9 +141,8 @@ async function getConfirmacionScore(supabase: Supabase): Promise<ScoreData> {
     )
   }
 
-  const breakdown = orders.map(o => classifyConfirm(o, recoveredSet.has(o.id)))
+  const fullBreakdown: BreakdownItemInternal[] = orders.map(o => classifyConfirm(o, recoveredSet.has(o.id)))
 
-  // Metrics helper
   function metricsFor(list: ConfirmOrder[]) {
     const confirmados    = list.filter(o => o.confirmation_status === 'confirmed').length
     const entregados     = list.filter(o => o.normalized_status === 'delivered').length
@@ -162,26 +162,25 @@ async function getConfirmacionScore(supabase: Supabase): Promise<ScoreData> {
 
   const scoreThis = calcConfirmScore(m)
   const scoreLast = calcConfirmScore(ml)
+  const entDelta  = deltaPct(m.entregados, ml.entregados)
+  const devDelta  = deltaPct(m.devueltos, ml.devueltos)
 
-  const paymentEstimate = breakdown.reduce((s, b) => s + b.pago, 0)
-  const entDelta        = deltaPct(m.entregados, ml.entregados)
-  const devDelta        = deltaPct(m.devueltos, ml.devueltos)
-
-  // Coaching
   const coaching: string[] = []
   if (entDelta !== null && entDelta > 5)      coaching.push(`Tu delivery rate mejoró ${entDelta}% esta semana. ¡Excelente progreso!`)
   if (devDelta !== null && devDelta < -10)    coaching.push(`Las devoluciones bajaron ${Math.abs(devDelta)}% vs la semana pasada.`)
-  if (m.recuperados > 0)                      coaching.push(`Tus ${m.recuperados} recuperaciones esta semana generaron RD$${m.recuperados * 35} adicionales.`)
+  if (m.recuperados > 0)                      coaching.push(`¡Buen trabajo! ${m.recuperados} recuperaciones de carrito esta semana — priorizarlas mejora el delivery rate.`)
   if (m.confirmados > 0 && m.devueltos / m.confirmados > 0.2) coaching.push('Las confirmaciones con llamada tienen mejor conversión. Intenta llamar antes de WhatsApp.')
   if (m.fueraCobertura > 3)                   coaching.push(`Tienes ${m.fueraCobertura} pedidos fuera de cobertura esta semana. Verifica las zonas antes de confirmar.`)
   if (m.entregados >= 15)                     coaching.push(`¡Buen trabajo! ${m.entregados} pedidos entregados esta semana.`)
-  if (coaching.length === 0)                   coaching.push('Continúa confirmando pedidos con calidad. Cada confirmación impacta tu score y tu pago.')
+  if (coaching.length === 0)                   coaching.push('Continúa confirmando pedidos con calidad. Cada confirmación impacta tu score y el rendimiento del equipo.')
+
+  // Strip pago before sending to agent
+  const breakdown: BreakdownItem[] = fullBreakdown.map(({ pago: _p, ...rest }) => rest).slice(0, 50)
 
   return {
     role: 'confirmation_agent',
     score: scoreThis,
     level: levelFromScore(scoreThis),
-    paymentEstimate,
     metrics: {
       confirmadosSemana:    m.confirmados,
       entregadosSemana:     m.entregados,
@@ -191,7 +190,7 @@ async function getConfirmacionScore(supabase: Supabase): Promise<ScoreData> {
       canceladosSemana:     m.cancelados,
       deliveryRate:         m.deliveryRate,
     },
-    breakdown: breakdown.slice(0, 50),
+    breakdown,
     coaching: coaching.slice(0, 4),
     trends: {
       confirmacionesDelta: deltaPct(m.confirmados, ml.confirmados),
@@ -243,14 +242,12 @@ async function getNovedadScore(supabase: Supabase, agentId: string): Promise<Sco
     )
   }
 
-  // Active overdue novedades (for score penalty)
   const { count: novedadesVencidas } = await supabase
     .from('orders')
     .select('*', { count: 'exact', head: true })
     .eq('normalized_status', 'novedad')
     .lt('updated_at', rdDayISO(-7))
 
-  // Latest action per order
   const latestPerOrder: Record<string, AgentAction> = {}
   for (const a of actions) {
     if (!latestPerOrder[a.order_id] || a.created_at > latestPerOrder[a.order_id].created_at) {
@@ -258,7 +255,7 @@ async function getNovedadScore(supabase: Supabase, agentId: string): Promise<Sco
     }
   }
 
-  function classifyNovedad(orderId: string): BreakdownItem {
+  function classifyNovedad(orderId: string): BreakdownItemInternal {
     const o = ordersMap[orderId]
     const isRec = recoveredSet.has(orderId)
     if (!o) return { orderId, orderNumber: null, customerName: null, resultado: 'Desconocido', pago: 0, reason: 'Sin datos disponibles' }
@@ -275,7 +272,7 @@ async function getNovedadScore(supabase: Supabase, agentId: string): Promise<Sco
     return { orderId, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'En gestión', pago: 0, reason: 'Novedad en proceso de resolución' }
   }
 
-  const breakdown = Object.keys(latestPerOrder).map(classifyNovedad)
+  const fullBreakdown: BreakdownItemInternal[] = Object.keys(latestPerOrder).map(classifyNovedad)
 
   function metricsFor(acts: AgentAction[]) {
     const oids      = new Set(acts.map(a => a.order_id))
@@ -304,22 +301,22 @@ async function getNovedadScore(supabase: Supabase, agentId: string): Promise<Sco
     40 + (ml.tasaRec / 100) * 36 + Math.min(ml.trabajados / 10, 1) * 12
   )))
 
-  const paymentEstimate = breakdown.reduce((s, b) => s + b.pago, 0)
   const recDelta  = deltaPct(m.recuperadas, ml.recuperadas)
   const trabDelta = deltaPct(m.trabajados,  ml.trabajados)
 
   const coaching: string[] = []
   if (recDelta !== null && recDelta > 0)         coaching.push(`Tus recuperaciones aumentaron ${recDelta}% vs la semana pasada. ¡Sigue así!`)
-  if (m.dosIntentos > 5)                         coaching.push(`Tienes ${m.dosIntentos} novedades con 2+ intentos. Priorízalas hoy.`)
+  if (m.dosIntentos > 5)                         coaching.push(`Tienes ${m.dosIntentos} novedades con 2+ intentos. Priorízalas hoy — cada una mejora tu tasa de recuperación.`)
   if (vencidas > 3)                              coaching.push(`${vencidas} novedades con más de 7 días sin resolver. Escala las críticas al supervisor.`)
-  if (m.recuperadas >= 5)                        coaching.push(`¡Buen trabajo! ${m.recuperadas} novedades recuperadas esta semana.`)
+  if (m.recuperadas >= 5)                        coaching.push(`¡Excelente! ${m.recuperadas} novedades recuperadas esta semana.`)
   if (coaching.length === 0)                     coaching.push('Sigue trabajando las novedades. Cada caso resuelto mejora el delivery rate global.')
+
+  const breakdown: BreakdownItem[] = fullBreakdown.map(({ pago: _p, ...rest }) => rest).slice(0, 50)
 
   return {
     role: 'novelty_agent',
     score: scoreThis,
     level: levelFromScore(scoreThis),
-    paymentEstimate,
     metrics: {
       trabajadosSemana:   m.trabajados,
       recuperadasSemana:  m.recuperadas,
@@ -327,7 +324,7 @@ async function getNovedadScore(supabase: Supabase, agentId: string): Promise<Sco
       tasaRecuperacion:   m.tasaRec,
       novedadesVencidas:  vencidas,
     },
-    breakdown: breakdown.slice(0, 50),
+    breakdown,
     coaching: coaching.slice(0, 4),
     trends: {
       confirmacionesDelta: trabDelta,
@@ -377,7 +374,6 @@ async function getRepartoScore(supabase: Supabase, agentId: string): Promise<Sco
     )
   }
 
-  // Active critical en_reparto orders (for score penalty)
   const { count: criticosActivos } = await supabase
     .from('orders')
     .select('*', { count: 'exact', head: true })
@@ -391,7 +387,7 @@ async function getRepartoScore(supabase: Supabase, agentId: string): Promise<Sco
     }
   }
 
-  function classifyReparto(orderId: string, action: AgentAction): BreakdownItem {
+  function classifyReparto(orderId: string, action: AgentAction): BreakdownItemInternal {
     const o = ordersMap[orderId]
     const isRec = recoveredSet.has(orderId)
     if (!o) return { orderId, orderNumber: null, customerName: null, resultado: 'Desconocido', pago: 0, reason: 'Sin datos disponibles' }
@@ -408,7 +404,7 @@ async function getRepartoScore(supabase: Supabase, agentId: string): Promise<Sco
     return { orderId, orderNumber: o.order_number, customerName: o.customer_name, resultado: 'En proceso', pago: 0, reason: 'En gestión de reparto' }
   }
 
-  const breakdown = Object.entries(latestPerOrder).map(([oid, action]) => classifyReparto(oid, action))
+  const fullBreakdown: BreakdownItemInternal[] = Object.entries(latestPerOrder).map(([oid, action]) => classifyReparto(oid, action))
 
   function metricsFor(acts: AgentAction[]) {
     const oids       = new Set(acts.map(a => a.order_id))
@@ -436,7 +432,6 @@ async function getRepartoScore(supabase: Supabase, agentId: string): Promise<Sco
     40 + (ml.tasaEntrega / 100) * 36 + Math.min(ml.contactados / 10, 1) * 12
   )))
 
-  const paymentEstimate = breakdown.reduce((s, b) => s + b.pago, 0)
   const entDelta = deltaPct(m.entregados, ml.entregados)
 
   const coaching: string[] = []
@@ -446,18 +441,19 @@ async function getRepartoScore(supabase: Supabase, agentId: string): Promise<Sco
   if (criticos === 0 && m.entregados > 0)          coaching.push('Sin pedidos críticos. Excelente seguimiento operativo.')
   if (coaching.length === 0)                       coaching.push('Registra cada contacto con el cliente para mejorar tu score de seguimiento.')
 
+  const breakdown: BreakdownItem[] = fullBreakdown.map(({ pago: _p, ...rest }) => rest).slice(0, 50)
+
   return {
     role: 'delivery_agent',
     score: scoreThis,
     level: levelFromScore(scoreThis),
-    paymentEstimate,
     metrics: {
       entregadosSemana:  m.entregados,
       contactadosSemana: m.contactados,
       criticosActivos:   criticos,
       tasaEntrega:       m.tasaEntrega,
     },
-    breakdown: breakdown.slice(0, 50),
+    breakdown,
     coaching: coaching.slice(0, 4),
     trends: {
       confirmacionesDelta: null,
