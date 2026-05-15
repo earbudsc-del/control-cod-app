@@ -1,16 +1,24 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import {
-  RotateCcw, AlertTriangle, Package, Phone, MapPin, Clock, ExternalLink,
+  RotateCcw, Phone, MapPin, ExternalLink,
   Search, X, Filter, ChevronDown, ChevronUp, MessageCircle, FileText,
-  CheckCircle, ArrowUp, Flag, Ban, RefreshCw, Shield,
-  TrendingUp, AlertOctagon,
+  CheckCircle, RefreshCw, Bot,
 } from 'lucide-react'
 
 // ─── Tipos ─────────────────────────────────────────────────────────────────
+
+interface SupervisorAnalysis {
+  resumen: string
+  senalesAFavor: string[]
+  senalesEnContra: string[]
+  razonamiento: string
+  recomendacion: string
+  checklistEvidencia: string[]
+}
 
 interface DevolucionItem {
   id: string
@@ -31,12 +39,16 @@ interface DevolucionItem {
   return_review_status: string | null
   score: number
   signals: string[]
+  signalsFor: string[]
+  signalsAgainst: string[]
   possibleCompensation: boolean
   compensationReason: string
   compensationPriority: 'low' | 'medium' | 'high' | 'critical'
   confidenceScore: number
   lifecycleRisk: string
   courierFlag: string
+  indemnCat: 'excluido' | 'probablemente_no' | 'revisar_manual' | 'posible' | 'probable'
+  supervisorAnalysis: SupervisorAnalysis
 }
 
 interface Kpis {
@@ -63,16 +75,6 @@ interface ApiResponse {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function relativeTime(iso: string | null): string {
-  if (!iso) return '—'
-  const diff = Date.now() - new Date(iso).getTime()
-  const h = diff / 3600000
-  if (h < 1) return 'Hace menos de 1h'
-  if (h < 24) return `Hace ${Math.floor(h)}h`
-  const d = Math.floor(h / 24)
-  return `Hace ${d}d ${Math.floor(h % 24)}h`
-}
-
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
   return new Intl.DateTimeFormat('es-DO', {
@@ -92,13 +94,25 @@ const PRIORITY_STYLE: Record<string, { label: string; cls: string }> = {
   low:      { label: 'Baja',     cls: 'bg-gray-100 text-gray-700 border border-gray-200' },
 }
 
+const INDEMN_CAT_LABEL: Record<string, { label: string; cls: string }> = {
+  excluido:        { label: 'Excluida', cls: 'bg-gray-100 text-gray-500' },
+  probablemente_no: { label: 'Prob. no indemnizable', cls: 'bg-slate-100 text-slate-600' },
+  revisar_manual:  { label: 'Revisar manualmente', cls: 'bg-amber-50 text-amber-700' },
+  posible:         { label: 'Posible', cls: 'bg-yellow-100 text-yellow-800' },
+  probable:        { label: 'Alta probabilidad', cls: 'bg-orange-100 text-orange-800' },
+}
+
 const REVIEW_STATUS_META: Record<string, { label: string; cls: string }> = {
-  pendiente_revision:  { label: 'Pendiente',       cls: 'bg-gray-100 text-gray-700' },
-  revisado:            { label: 'Revisado',         cls: 'bg-blue-100 text-blue-700' },
-  escalado:            { label: 'Escalado',         cls: 'bg-purple-100 text-purple-700' },
-  reclamo_preparado:   { label: 'Reclamo listo',   cls: 'bg-amber-100 text-amber-700' },
-  reclamado:           { label: 'Reclamado',        cls: 'bg-green-100 text-green-700' },
-  descartado:          { label: 'Descartado',       cls: 'bg-gray-100 text-gray-400 line-through' },
+  pendiente_revision:  { label: 'Pendiente',          cls: 'bg-gray-100 text-gray-700' },
+  revisado:            { label: 'Revisado',            cls: 'bg-blue-100 text-blue-700' },
+  escalado:            { label: 'Escalado',            cls: 'bg-purple-100 text-purple-700' },
+  reclamo_preparado:   { label: 'Reclamo listo',      cls: 'bg-amber-100 text-amber-700' },
+  reclamado:           { label: 'Reclamado',           cls: 'bg-green-100 text-green-700' },
+  descartado:          { label: 'Descartado',          cls: 'bg-gray-100 text-gray-400 line-through' },
+  no_indemnizable:     { label: 'No indemnizable',     cls: 'bg-red-50 text-red-600' },
+  posible_reclamo:     { label: 'Posible reclamo',     cls: 'bg-yellow-100 text-yellow-700' },
+  rechazado_courier:   { label: 'Rechazado courier',   cls: 'bg-red-100 text-red-700' },
+  aprobado_courier:    { label: 'Aprobado courier',    cls: 'bg-emerald-100 text-emerald-700' },
 }
 
 function formatDOP(v?: number) {
@@ -106,7 +120,7 @@ function formatDOP(v?: number) {
   return new Intl.NumberFormat('es-DO', { style: 'currency', currency: 'DOP', maximumFractionDigits: 0 }).format(v)
 }
 
-// ─── Sub-componentes ───────────────────────────────────────────────────────
+// ─── KpiCard ───────────────────────────────────────────────────────────────
 
 function KpiCard({ label, value, sub, color, onClick, active }: {
   label: string; value: number | string; sub?: string
@@ -122,6 +136,8 @@ function KpiCard({ label, value, sub, color, onClick, active }: {
     </div>
   )
 }
+
+// ─── NoteModal ─────────────────────────────────────────────────────────────
 
 function NoteModal({ orderId, onClose }: { orderId: string; onClose: () => void }) {
   const [note, setNote] = useState('')
@@ -176,6 +192,119 @@ function NoteModal({ orderId, onClose }: { orderId: string; onClose: () => void 
   )
 }
 
+// ─── SupervisorModal ───────────────────────────────────────────────────────
+
+function SupervisorModal({ order, onClose }: { order: DevolucionItem; onClose: () => void }) {
+  const sa = order.supervisorAnalysis
+  const catMeta = INDEMN_CAT_LABEL[order.indemnCat] ?? INDEMN_CAT_LABEL['revisar_manual']
+  const priorMeta = PRIORITY_STYLE[order.compensationPriority]
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        {/* Header */}
+        <div className="flex items-center justify-between p-5 border-b border-gray-100 sticky top-0 bg-white rounded-t-xl">
+          <div className="flex items-center gap-2">
+            <Bot className="w-5 h-5 text-purple-600" />
+            <h3 className="font-semibold text-gray-900">Supervisor IA — Análisis del caso</h3>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {/* Resumen */}
+          <div className="bg-gray-50 rounded-lg p-3 text-sm text-gray-700 leading-relaxed">
+            {sa.resumen}
+          </div>
+
+          {/* Confianza + categoría */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-xs px-3 py-1 rounded-full font-medium ${priorMeta.cls}`}>
+              {order.confidenceScore}% confianza IA
+            </span>
+            <span className={`text-xs px-3 py-1 rounded-full font-medium ${catMeta.cls}`}>
+              {catMeta.label}
+            </span>
+            <span className="text-xs text-gray-400">{order.delivery_attempts} intento(s)</span>
+          </div>
+
+          {/* Señales a favor */}
+          {sa.senalesAFavor.length > 0 && (
+            <div>
+              <div className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">
+                Por qué podría indemnizar
+              </div>
+              <ul className="space-y-1.5">
+                {sa.senalesAFavor.map((s, i) => (
+                  <li key={i} className="text-xs text-gray-700 flex items-start gap-2">
+                    <span className="text-green-500 mt-0.5 shrink-0">✓</span>
+                    <span>{s}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Señales en contra */}
+          {sa.senalesEnContra.length > 0 && (
+            <div>
+              <div className="text-xs font-semibold text-red-700 mb-2 uppercase tracking-wide">
+                Por qué podría NO indemnizar
+              </div>
+              <ul className="space-y-1.5">
+                {sa.senalesEnContra.map((s, i) => (
+                  <li key={i} className="text-xs text-gray-700 flex items-start gap-2">
+                    <span className="text-red-500 mt-0.5 shrink-0">✗</span>
+                    <span>{s}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Razonamiento */}
+          <div className="bg-blue-50 rounded-lg p-3 border border-blue-100">
+            <div className="text-xs font-semibold text-blue-700 mb-1.5">Razonamiento</div>
+            <p className="text-xs text-blue-800 leading-relaxed">{sa.razonamiento}</p>
+          </div>
+
+          {/* Recomendación */}
+          <div className="bg-amber-50 rounded-lg p-3 border border-amber-100">
+            <div className="text-xs font-semibold text-amber-700 mb-1">Recomendación final</div>
+            <p className="text-xs text-amber-800 font-medium">{sa.recomendacion}</p>
+          </div>
+
+          {/* Checklist */}
+          <div>
+            <div className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">
+              Evidencia pendiente de revisar
+            </div>
+            <ul className="space-y-2">
+              {sa.checklistEvidencia.map((item, i) => (
+                <li key={i} className="text-xs text-gray-600 flex items-start gap-2">
+                  <span className="text-gray-300 mt-0.5 shrink-0 text-base leading-none">☐</span>
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        <div className="px-5 pb-5 flex justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+          >
+            Cerrar
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Página principal ──────────────────────────────────────────────────────
 
 const TABS = [
@@ -204,6 +333,7 @@ export default function DevolucionesPage() {
   const [search, setSearch]           = useState('')
   const [showFilters, setShowFilters] = useState(false)
   const [noteTarget, setNoteTarget]   = useState<string | null>(null)
+  const [supervisorTarget, setSupervisorTarget] = useState<DevolucionItem | null>(null)
 
   // Filtros adicionales
   const [cityFilter, setCity]       = useState('')
@@ -212,7 +342,7 @@ export default function DevolucionesPage() {
   const [dateTo, setDateTo]         = useState('')
   const [intentosFilt, setIntentos] = useState('')
 
-  // Estados de acción locales (no requieren refetch)
+  // Estados de acción locales
   const [actionStatus, setActionStatus] = useState<Record<string, string>>({})
   const [actionBusy, setActionBusy]     = useState<Record<string, boolean>>({})
 
@@ -251,16 +381,64 @@ export default function DevolucionesPage() {
       body: JSON.stringify({ status }),
     })
     setActionBusy(b => ({ ...b, [orderId]: false }))
-    if (res.ok) {
-      setActionStatus(s => ({ ...s, [orderId]: status }))
-    }
+    if (res.ok) setActionStatus(s => ({ ...s, [orderId]: status }))
   }
 
   function getReviewStatus(order: DevolucionItem): string {
     return actionStatus[order.id] ?? order.return_review_status ?? 'pendiente_revision'
   }
 
-  const displayData = data
+  // ── Render indemnización cell ──────────────────────────────────────────
+
+  function IndemnCell({ order }: { order: DevolucionItem }) {
+    const catMeta = INDEMN_CAT_LABEL[order.indemnCat] ?? INDEMN_CAT_LABEL['revisar_manual']
+    const priorMeta = PRIORITY_STYLE[order.compensationPriority]
+
+    if (order.indemnCat === 'excluido') {
+      return (
+        <div>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">
+            Excluida
+          </span>
+          <div className="text-xs text-gray-400 mt-0.5 truncate max-w-[150px]" title={order.compensationReason}>
+            {order.compensationReason}
+          </div>
+        </div>
+      )
+    }
+
+    if (!order.possibleCompensation) {
+      return (
+        <div>
+          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${catMeta.cls}`}>
+            {catMeta.label}
+          </span>
+          {order.signalsAgainst.length > 0 && (
+            <div className="text-xs text-gray-400 mt-0.5 truncate max-w-[150px]" title={order.signalsAgainst[0]}>
+              {order.signalsAgainst[0]}
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    return (
+      <div>
+        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${priorMeta.cls}`}>
+          {catMeta.label} · {order.confidenceScore}%
+        </span>
+        <div className="text-xs text-gray-500 mt-0.5 truncate max-w-[150px]" title={order.compensationReason}>
+          {order.compensationReason}
+        </div>
+        {order.cod_amount != null && (
+          <div className="text-xs font-medium text-emerald-700 mt-0.5">
+            {formatDOP(order.cod_amount)}
+            <span className="text-gray-400 font-normal ml-1">(ref.)</span>
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-5 pt-14 md:pt-0 px-4 py-4 md:p-6 max-w-screen-xl mx-auto">
@@ -285,24 +463,31 @@ export default function DevolucionesPage() {
       {/* KPI Cards */}
       {kpis && (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
-          <KpiCard label="Devueltas hoy"     value={kpis.devueltasHoy}           color="bg-white border-gray-200"   onClick={() => { setActiveTab('devueltas-hoy'); fetchData(1) }} active={activeTab === 'devueltas-hoy'} />
-          <KpiCard label="Devueltas ayer"    value={kpis.devueltasAyer}          color="bg-white border-gray-200"   onClick={() => { setActiveTab('devueltas-ayer'); fetchData(1) }} active={activeTab === 'devueltas-ayer'} />
-          <KpiCard label="Posible indem."    value={kpis.posiblesIndemnizaciones} color="bg-amber-50 border-amber-200" onClick={() => { setActiveTab('posible-indemnizacion'); fetchData(1) }} active={activeTab === 'posible-indemnizacion'} />
-          <KpiCard label="Alta prob. indem." value={kpis.altaProbabilidad}       color="bg-red-50 border-red-200"   onClick={() => { setActiveTab('alta-indemnizacion'); fetchData(1) }} active={activeTab === 'alta-indemnizacion'} />
-          <KpiCard label="3+ intentos"       value={kpis.tresMasIntentos}        color="bg-orange-50 border-orange-200" onClick={() => { setActiveTab('3mas-intentos'); fetchData(1) }} active={activeTab === '3mas-intentos'} />
-          <KpiCard label="SLA vencido +72h"  value={kpis.slaVencido72h}          color="bg-white border-gray-200"   onClick={() => { setActiveTab('sla-vencido'); fetchData(1) }} active={activeTab === 'sla-vencido'} />
-          <KpiCard label="Courier sospechoso" value={kpis.courierSospechoso}     color="bg-purple-50 border-purple-200" onClick={() => { setActiveTab('courier-sospechoso'); fetchData(1) }} active={activeTab === 'courier-sospechoso'} />
-          <KpiCard label="Reclamadas"        value={kpis.reclamadas}             color="bg-green-50 border-green-200" onClick={() => { setActiveTab('reclamadas'); fetchData(1) }} active={activeTab === 'reclamadas'} />
-          <KpiCard label="Pend. revisar"     value={kpis.pendientesRevisar}      color="bg-gray-50 border-gray-200" />
+          <KpiCard label="Devueltas hoy"      value={kpis.devueltasHoy}            color="bg-white border-gray-200"       onClick={() => { setActiveTab('devueltas-hoy'); fetchData(1) }}        active={activeTab === 'devueltas-hoy'} />
+          <KpiCard label="Devueltas ayer"     value={kpis.devueltasAyer}           color="bg-white border-gray-200"       onClick={() => { setActiveTab('devueltas-ayer'); fetchData(1) }}       active={activeTab === 'devueltas-ayer'} />
+          <KpiCard label="Posible indem."     value={kpis.posiblesIndemnizaciones} color="bg-amber-50 border-amber-200"   onClick={() => { setActiveTab('posible-indemnizacion'); fetchData(1) }} active={activeTab === 'posible-indemnizacion'} />
+          <KpiCard label="Alta prob. indem."  value={kpis.altaProbabilidad}        color="bg-red-50 border-red-200"       onClick={() => { setActiveTab('alta-indemnizacion'); fetchData(1) }}   active={activeTab === 'alta-indemnizacion'} />
+          <KpiCard label="3+ intentos"        value={kpis.tresMasIntentos}         color="bg-orange-50 border-orange-200" onClick={() => { setActiveTab('3mas-intentos'); fetchData(1) }}        active={activeTab === '3mas-intentos'} />
+          <KpiCard label="SLA vencido +72h"   value={kpis.slaVencido72h}           color="bg-white border-gray-200"       onClick={() => { setActiveTab('sla-vencido'); fetchData(1) }}          active={activeTab === 'sla-vencido'} />
+          <KpiCard label="Courier sospechoso" value={kpis.courierSospechoso}       color="bg-purple-50 border-purple-200" onClick={() => { setActiveTab('courier-sospechoso'); fetchData(1) }}   active={activeTab === 'courier-sospechoso'} />
+          <KpiCard label="Reclamadas"         value={kpis.reclamadas}              color="bg-green-50 border-green-200"   onClick={() => { setActiveTab('reclamadas'); fetchData(1) }}            active={activeTab === 'reclamadas'} />
+          <KpiCard label="Pend. revisar"      value={kpis.pendientesRevisar}       color="bg-gray-50 border-gray-200" />
           {montoReclamable != null && (
             <KpiCard
-              label="Monto reclamable"
+              label="Monto potencial"
               value={formatDOP(montoReclamable) ?? '—'}
-              sub="Alta probabilidad"
+              sub="Alta prob. · referencia estimada"
               color="bg-emerald-50 border-emerald-200"
             />
           )}
         </div>
+      )}
+
+      {/* Disclaimer monto potencial */}
+      {montoReclamable != null && montoReclamable > 0 && (
+        <p className="text-xs text-gray-400 -mt-2">
+          * El monto potencial es referencia operativa — no garantiza aprobación del reclamo por parte del courier.
+        </p>
       )}
 
       {/* Tabs */}
@@ -394,7 +579,7 @@ export default function DevolucionesPage() {
         <div className="flex items-center justify-center py-20 text-gray-400">
           <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Cargando devoluciones...
         </div>
-      ) : displayData.length === 0 ? (
+      ) : data.length === 0 ? (
         <div className="text-center py-16 text-gray-500">
           <RotateCcw className="w-8 h-8 mx-auto mb-2 text-gray-300" />
           <p className="font-medium">Sin devoluciones en este filtro</p>
@@ -407,17 +592,16 @@ export default function DevolucionesPage() {
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
-                  {['Guía / Orden', 'Cliente', 'Ciudad', 'Motivo', 'Intentos', 'Días', 'Indemnización IA', 'Estado revisión', 'Acciones'].map(h => (
+                  {['Guía / Orden', 'Cliente', 'Ciudad', 'Motivo', 'Intentos', 'Días', 'Análisis IA', 'Estado revisión', 'Acciones'].map(h => (
                     <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {displayData.map(order => {
+                {data.map(order => {
                   const reviewStatus = getReviewStatus(order)
                   const busy = actionBusy[order.id] ?? false
                   const dias = Math.floor(horasTotales(order.created_at) / 24)
-                  const priorMeta = PRIORITY_STYLE[order.compensationPriority]
                   const revMeta = REVIEW_STATUS_META[reviewStatus] ?? REVIEW_STATUS_META['pendiente_revision']
 
                   return (
@@ -456,8 +640,8 @@ export default function DevolucionesPage() {
                       <td className="px-3 py-2.5 text-center">
                         <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold ${
                           order.delivery_attempts === 0 ? 'bg-gray-100 text-gray-500' :
-                          order.delivery_attempts === 1 ? 'bg-yellow-100 text-yellow-700' :
-                          order.delivery_attempts === 2 ? 'bg-orange-100 text-orange-700' :
+                          order.delivery_attempts <= 2  ? 'bg-yellow-100 text-yellow-700' :
+                          order.delivery_attempts === 3 ? 'bg-orange-100 text-orange-700' :
                           'bg-red-100 text-red-700'
                         }`}>
                           {order.delivery_attempts}
@@ -469,25 +653,9 @@ export default function DevolucionesPage() {
                           {dias}d
                         </span>
                       </td>
-                      {/* Indemnización */}
+                      {/* Análisis IA */}
                       <td className="px-3 py-2.5">
-                        {order.possibleCompensation ? (
-                          <div>
-                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${priorMeta.cls}`}>
-                              {priorMeta.label} · {order.confidenceScore}%
-                            </span>
-                            <div className="text-xs text-gray-500 mt-0.5 truncate max-w-[150px]" title={order.compensationReason}>
-                              {order.compensationReason}
-                            </div>
-                            {order.cod_amount != null && (
-                              <div className="text-xs font-medium text-emerald-700 mt-0.5">
-                                {formatDOP(order.cod_amount)}
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-400">Sin señales</span>
-                        )}
+                        <IndemnCell order={order} />
                       </td>
                       {/* Estado revisión */}
                       <td className="px-3 py-2.5">
@@ -527,6 +695,12 @@ export default function DevolucionesPage() {
                           >
                             <FileText className="w-3 h-3" /> Nota
                           </button>
+                          <button
+                            onClick={() => setSupervisorTarget(order)}
+                            className="text-xs text-purple-600 hover:text-purple-800 flex items-center gap-0.5 whitespace-nowrap"
+                          >
+                            <Bot className="w-3 h-3" /> Supervisor IA
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -538,10 +712,11 @@ export default function DevolucionesPage() {
 
           {/* Cards mobile */}
           <div className="md:hidden space-y-3">
-            {displayData.map(order => {
+            {data.map(order => {
               const reviewStatus = getReviewStatus(order)
               const busy = actionBusy[order.id] ?? false
               const dias = Math.floor(horasTotales(order.created_at) / 24)
+              const catMeta = INDEMN_CAT_LABEL[order.indemnCat] ?? INDEMN_CAT_LABEL['revisar_manual']
               const priorMeta = PRIORITY_STYLE[order.compensationPriority]
               const revMeta = REVIEW_STATUS_META[reviewStatus] ?? REVIEW_STATUS_META['pendiente_revision']
 
@@ -550,22 +725,22 @@ export default function DevolucionesPage() {
                   key={order.id}
                   className={`bg-white rounded-xl border border-gray-200 p-4 shadow-sm ${reviewStatus === 'descartado' ? 'opacity-50' : ''}`}
                 >
-                  {/* Header card */}
+                  {/* Header */}
                   <div className="flex items-start justify-between gap-2 mb-2">
                     <div>
                       <div className="font-mono text-xs text-gray-600">{order.tracking_number ?? '—'}</div>
                       <div className="font-semibold text-gray-900">{order.customer_name ?? '—'}</div>
                     </div>
                     <div className="text-right">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                        order.delivery_attempts >= 3 ? 'bg-red-100 text-red-700' :
-                        order.delivery_attempts === 2 ? 'bg-orange-100 text-orange-700' :
-                        order.delivery_attempts === 0 ? 'bg-gray-100 text-gray-600' :
-                        'bg-yellow-100 text-yellow-700'
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                        order.delivery_attempts === 0 ? 'bg-gray-100 text-gray-500' :
+                        order.delivery_attempts <= 2  ? 'bg-yellow-100 text-yellow-700' :
+                        order.delivery_attempts === 3 ? 'bg-orange-100 text-orange-700' :
+                        'bg-red-100 text-red-700'
                       }`}>
                         {order.delivery_attempts} int.
                       </span>
-                      <div className="text-xs text-gray-400 mt-0.5">{dias}d</div>
+                      <div className="text-xs text-gray-400 mt-0.5">{dias}d · {formatDate(order.created_at)}</div>
                     </div>
                   </div>
 
@@ -577,16 +752,24 @@ export default function DevolucionesPage() {
                     {order.last_attempt_reason && <div className="text-gray-400 truncate">Motivo: {order.last_attempt_reason}</div>}
                   </div>
 
-                  {/* Indemnización */}
-                  {order.possibleCompensation && (
-                    <div className={`text-xs rounded-lg px-2 py-1.5 mb-2 ${priorMeta.cls}`}>
-                      <div className="font-medium">{priorMeta.label} · {order.confidenceScore}%</div>
-                      <div className="mt-0.5">{order.compensationReason}</div>
-                      {order.cod_amount != null && (
-                        <div className="font-bold text-emerald-700 mt-0.5">{formatDOP(order.cod_amount)}</div>
-                      )}
+                  {/* Análisis IA */}
+                  <div className={`text-xs rounded-lg px-2 py-1.5 mb-2 ${
+                    order.indemnCat === 'excluido' ? 'bg-gray-50 border border-gray-200' :
+                    order.possibleCompensation ? priorMeta.cls : catMeta.cls
+                  }`}>
+                    <div className="font-medium">
+                      {order.indemnCat === 'excluido' ? 'Excluida' :
+                       order.possibleCompensation ? `${catMeta.label} · ${order.confidenceScore}%` :
+                       catMeta.label}
                     </div>
-                  )}
+                    <div className="mt-0.5 text-gray-600">{order.compensationReason}</div>
+                    {order.cod_amount != null && order.possibleCompensation && (
+                      <div className="font-bold text-emerald-700 mt-0.5">
+                        {formatDOP(order.cod_amount)}
+                        <span className="text-xs font-normal text-gray-500 ml-1">(ref. estimada)</span>
+                      </div>
+                    )}
+                  </div>
 
                   {/* Estado revisión */}
                   <div className="mb-3">
@@ -603,7 +786,7 @@ export default function DevolucionesPage() {
                   </div>
 
                   {/* Acciones */}
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 flex-wrap">
                     <Link
                       href={`/orders/${order.id}`}
                       className="flex-1 text-center text-xs bg-indigo-50 text-indigo-700 rounded-lg py-2 hover:bg-indigo-100"
@@ -626,6 +809,12 @@ export default function DevolucionesPage() {
                     >
                       <FileText className="w-4 h-4" />
                     </button>
+                    <button
+                      onClick={() => setSupervisorTarget(order)}
+                      className="text-xs bg-purple-50 text-purple-700 rounded-lg px-3 py-2 hover:bg-purple-100 flex items-center gap-1"
+                    >
+                      <Bot className="w-3.5 h-3.5" /> IA
+                    </button>
                   </div>
                 </div>
               )
@@ -644,7 +833,7 @@ export default function DevolucionesPage() {
             <span className="text-sm text-gray-500">Página {page}</span>
             <button
               onClick={() => { const np = page + 1; setPage(np); fetchData(np) }}
-              disabled={displayData.length < 50 || loading}
+              disabled={data.length < 50 || loading}
               className="text-sm text-gray-600 border border-gray-300 rounded-lg px-4 py-1.5 hover:bg-gray-50 disabled:opacity-40"
             >
               Siguiente →
@@ -653,9 +842,12 @@ export default function DevolucionesPage() {
         </>
       )}
 
-      {/* Modal nota */}
+      {/* Modales */}
       {noteTarget && (
         <NoteModal orderId={noteTarget} onClose={() => setNoteTarget(null)} />
+      )}
+      {supervisorTarget && (
+        <SupervisorModal order={supervisorTarget} onClose={() => setSupervisorTarget(null)} />
       )}
     </div>
   )

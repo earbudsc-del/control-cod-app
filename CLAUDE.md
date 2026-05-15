@@ -76,63 +76,127 @@ Cada KPI card es clickeable y activa el tab correspondiente.
 - Fecha desde/hasta (created_at range)
 - Intentos: 2 ó 3+
 
-### Motor de scoring de indemnización (`calcCompensationScore`)
+### Motor de scoring conservador (`calcCompensationScore`) — v2
 
-Calcula `confidenceScore` (0–95%) para cada devolución. No es IA externa — es determinístico.
+Calcula `confidenceScore` (0–95%) para cada devolución. Determinístico, sin IA externa.
 
-**Puntos positivos:**
+**Principio clave:** Alta probabilidad requiere ≥ 2 señales fuertes. 3+ intentos por sí solos NO son alta probabilidad. 4+ intentos indican buena gestión del courier y bajan el score.
 
-| Condición | Puntos | Señales |
-|---|---|---|
-| delivery_attempts ≥ 3 | +35 | 3+ intentos fallidos · Posible intento falso · Cliente prob. quería recibir |
-| delivery_attempts = 2 | +25 | 2 intentos sin entrega · Cliente prob. quería recibir |
-| delivery_attempts = 0 | +30 | Devuelto sin intento · Courier no intentó entrega |
-| delivery_attempts = 1 | +10 | — |
-| Días desde generación > 10 | +15 | Devolución tardía +10d |
-| Días desde generación > 7 | +10 | Devolución tardía +7d |
-| Devolución < 24h desde reparto | +15 | Devolución muy rápida |
-| last_attempt_reason contiene cobertura/zona | +20 | Cobertura dudosa · Courier posiblemente falló |
-| last_attempt_reason contiene direcci/domicil | +15 | Dirección como excusa |
-| Sin razón registrada + 2+ intentos | +10 | Sin razón documentada |
-| hoursInStatus > 72h | +10 | SLA roto |
-| confirmation_status = no_coverage | +5 | Fuera cobertura en confirmación |
+#### Exclusiones (score=0, possibleCompensation=false, indemnCat='excluido')
 
-**Falsos positivos — excluir si:**
-
-| Condición | Motivo |
+| Condición detectada | Categoría |
 |---|---|
-| last_attempt_reason contiene cancel+cliente | Cliente canceló explícitamente |
-| last_attempt_reason contiene rechaz/no quiso/no quería | Cliente rechazó |
-| last_attempt_reason contiene tel/número + incorr/equivoc/erron | Teléfono incorrecto |
-| last_attempt_reason contiene pide/solicit/pidió + devoluci/retorno | Cliente solicitó devolución |
-| confirmation_status=no_coverage + razón vacía | Fuera de cobertura confirmado |
+| last_attempt_reason contiene cancel+cliente | `cliente_cancelo` |
+| last_attempt_reason contiene rechaz/no quiso/no quería/no desea | `cliente_rechazo` |
+| last_attempt_reason contiene tel/número + incorr/equivoc/erron | `tel_incorrecto` |
+| last_attempt_reason contiene direcci/domicil + incorr/equivoc/erron/no exist | `dir_incorrecta` |
+| last_attempt_reason contiene pide/solicit/pidió + devoluci/retorno | `cliente_solicito` |
+| keyword de cobertura en reason/raw_status **Y** confirmation_status=no_coverage | `fuera_cobertura` |
+| confirmation_status=no_coverage **Y** reason vacía | `fuera_cobertura` |
 
-Si `isFP=true` → score=0, confidence=0, `possibleCompensation=false`.
+#### Señales a favor (positivas)
 
-**`compensationPriority`:**
-- critical: confidence ≥ 80%
-- high: 65–79%
-- medium: 45–64%
-- low: < 45%
+| Condición | Puntos | Tipo |
+|---|---|---|
+| delivery_attempts = 0 | +30 | **Fuerte** |
+| hoursInStatus > 72h (SLA roto) | +25 | **Fuerte** |
+| Devolución < 24h desde reparto (con intentos) | +20 | **Fuerte** |
+| Cobertura dudosa (keyword presente, confirmation_status ≠ no_coverage) | +20 | **Fuerte** |
+| Días desde creación > 10 | +15 | Media |
+| Días desde creación > 7 | +10 | Media |
+| Sin razón + 2+ intentos | +10 | Media |
+| Dirección alegada (no confirmada incorrecta) | +10 | Débil |
+| delivery_attempts = 2 | +8 | Débil |
+| delivery_attempts = 3 | +5 | Débil |
 
-**`courierFlag`:**
+#### Señales en contra (negativas — restan del score)
+
+| Condición | Puntos | Señal |
+|---|---|---|
+| delivery_attempts ≥ 6 | -35 | Gestión muy extendida del courier |
+| delivery_attempts ≥ 4 (y < 6) | -20 | Courier superó obligación estándar (3 intentos) |
+
+#### Lógica de alta probabilidad
+
+- Si `strongSignals < 2` → confidence se capa en 64% (nunca "alta probabilidad" automática)
+- Alta probabilidad (`indemnCat='probable'`) requiere `confidence ≥ 65%` con ≥ 2 señales fuertes
+
+#### `indemnCat` (categoría de indemnización)
+
+| Valor | Condición |
+|---|---|
+| `excluido` | Exclusión detectada |
+| `probable` | confidence ≥ 65% (requiere ≥ 2 señales fuertes) |
+| `posible` | confidence 45–64% |
+| `revisar_manual` | confidence 30–44% |
+| `probablemente_no` | confidence < 30% ó 4+ intentos sin señales fuertes |
+
+#### `compensationPriority`
+
+- `critical`: confidence ≥ 80%
+- `high`: 65–79%
+- `medium`: 45–64%
+- `low`: < 45%
+
+#### `courierFlag`
+
 - `sospechoso`: delivery_attempts=0 ó cobertura dudosa
-- `posiblemente_falló`: 3+ intentos + posible intento falso
+- `posiblemente_falló`: strongSignals ≥ 1 con 2–3 intentos
 - `sla_roto`: SLA roto +72h
 - `sin_señales`: sin señales detectadas
 
+#### `supervisorAnalysis` (análisis por caso)
+
+Objeto generado determinísticamente por `generateSupervisorAnalysis()`:
+
+```typescript
+{
+  resumen: string           // guía + cliente + intentos + ubicación + motivo
+  senalesAFavor: string[]   // señales positivas detectadas
+  senalesEnContra: string[] // señales negativas / exclusiones
+  razonamiento: string      // explicación humanizada del veredicto
+  recomendacion: string     // recomendación operativa final (con emoji)
+  checklistEvidencia: string[] // 5 items de evidencia a revisar
+}
+```
+
+### Botón "Preguntar al Supervisor IA"
+
+Aparece como acción por fila (desktop y mobile). Abre `<SupervisorModal>` con:
+- Resumen de la guía
+- Confianza IA + categoría (badge)
+- "Por qué podría indemnizar" (señales a favor con ✓)
+- "Por qué podría NO indemnizar" (señales en contra con ✗)
+- Razonamiento (en azul)
+- Recomendación final (en ámbar)
+- Checklist de evidencia pendiente
+
+No consume IA externa — análisis 100% determinístico basado en los datos disponibles.
+
 ### Estados de revisión (`return_review_status`)
 
-| Valor | Label UI |
-|---|---|
-| `pendiente_revision` | Pendiente |
-| `revisado` | Revisado |
-| `escalado` | Escalado |
-| `reclamo_preparado` | Reclamo listo |
-| `reclamado` | Reclamado |
-| `descartado` | Descartado |
+| Valor | Label UI | Quién puede asignar |
+|---|---|---|
+| `pendiente_revision` | Pendiente | Todos |
+| `revisado` | Revisado | Todos |
+| `escalado` | Escalado | Todos |
+| `reclamo_preparado` | Reclamo listo | Todos |
+| `reclamado` | Reclamado | Todos |
+| `descartado` | Descartado | Todos |
+| `no_indemnizable` | No indemnizable | Admin/ia_supervisor |
+| `posible_reclamo` | Posible reclamo | Admin/ia_supervisor |
+| `rechazado_courier` | Rechazado courier | Admin/ia_supervisor |
+| `aprobado_courier` | Aprobado courier | Admin/ia_supervisor |
 
 Seleccionables inline con `<select>` en cada fila (tabla desktop y card mobile).
+
+### Monto potencial (no garantizado)
+
+- KPI card: "Monto potencial" con sub "Alta prob. · referencia estimada"
+- En fila: label "(ref.)" junto al monto
+- Disclaimer visible debajo de los KPIs cuando monto > 0:
+  `"* El monto potencial es referencia operativa — no garantiza aprobación del reclamo por parte del courier."`
+- Solo visible para admin/ia_supervisor (novelty_agent nunca ve montos)
 
 ### Acciones operativas por devolución
 
@@ -170,13 +234,13 @@ Seleccionables inline con `<select>` en cada fila (tabla desktop y card mobile).
 
 Cada `DevolucionItem` incluye:
 - Todos los campos de `orders` relevantes
-- `score`, `signals`, `possibleCompensation`, `compensationReason`, `compensationPriority`
-- `confidenceScore`, `lifecycleRisk`, `courierFlag`
+- `score`, `signals`, `signalsFor`, `signalsAgainst`, `possibleCompensation`, `compensationReason`, `compensationPriority`
+- `confidenceScore`, `lifecycleRisk`, `courierFlag`, `indemnCat`, `supervisorAnalysis`
 - `cod_amount` solo si admin/ia_supervisor (undefined para novelty_agent)
 
 #### `PATCH /api/devoluciones/[id]/status`
 
-Body: `{ status: 'pendiente_revision' | 'revisado' | 'escalado' | 'reclamo_preparado' | 'reclamado' | 'descartado' }`
+Body: `{ status: 'pendiente_revision' | 'revisado' | 'escalado' | 'reclamo_preparado' | 'reclamado' | 'descartado' | 'no_indemnizable' | 'posible_reclamo' | 'rechazado_courier' | 'aprobado_courier' }`
 
 Crea nota interna automáticamente con el cambio de estado.
 
@@ -222,22 +286,22 @@ CREATE INDEX IF NOT EXISTS idx_orders_return_review_status ON orders(return_revi
 2. Login como **admin** → `/devoluciones` → ver sidebar con "Devoluciones" (icono RotateCcw rojo)
 3. Verificar KPIs cargados: Devueltas hoy, Alta prob. indem., 3+ intentos, etc.
 4. Verificar que cards son clickeables y activan el tab correspondiente
-5. Click tab "3+ intentos" → filtro activado, solo muestra devoluciones con 3+ intentos
-6. Click tab "Alta prob. indem." → muestra casos con confidence ≥ 65%
-7. En cada fila: verificar razón IA, priority badge, confidence %, COD amount (si admin)
-8. Cambiar estado de revisión con el select → cambia inmediatamente, nota creada
-9. Click "Nota" → modal → escribir nota → guardar → nota guardada
-10. Click "WA" → abre WhatsApp con mensaje pre-llenado
-11. Click "Ver" → navega a `/orders/[id]`
-12. Login como **ia_supervisor** → `/devoluciones` → ver módulo (con montos)
-13. Login como **novelty_agent** → `/devoluciones` → ver módulo SIN montos (cod_amount: undefined)
-14. Confirmar: novelty_agent NO ve "Monto reclamable" KPI card
-15. Login como **confirmation_agent** → sidebar NO muestra Devoluciones
-16. Navegar `/devoluciones` directamente como confirmation_agent → redirige a `/my-tasks`
-17. Login como **delivery_agent** → mismo resultado que confirmation_agent
-18. Login como **admin** → `/supervisor-ia` → scroll → nueva sección "Devoluciones" visible
-19. Sección muestra 4 cards + alerta si hay alta probabilidad
-20. Click en card "Alta prob. indem." → navega a `/devoluciones?filter=alta-indemnizacion`
+5. Click tab "3+ intentos" → ver devoluciones con 3+ intentos — **ninguna con fuera-cobertura confirmado debe aparecer como Alta**
+6. Click tab "Alta prob. indem." → **solo deben aparecer casos con ≥ 2 señales fuertes reales**
+7. Validar caso con 9+ intentos → badge debe ser "Prob. no indemnizable" o "Revisar manualmente", NO "Alta probabilidad"
+8. Validar caso con fuera-de-cobertura confirmado (reason+confirmation_status=no_coverage) → badge "Excluida", confidence=0%
+9. En cada fila: verificar señales a favor/contra, priority badge, confidence %, monto "(ref.)" si admin
+10. Click "Supervisor IA" → modal abre con análisis completo: señales, razonamiento, recomendación, checklist
+11. Cambiar estado de revisión con el select → incluye "No indemnizable", "Rechazado courier", "Aprobado courier"
+12. Click "Nota" → modal → escribir nota → guardar → nota guardada
+13. Click "WA" → abre WhatsApp con mensaje pre-llenado
+14. Click "Ver" → navega a `/orders/[id]`
+15. Verificar KPI "Monto potencial" (antes "Monto reclamable") + disclaimer visible debajo
+16. Login como **ia_supervisor** → `/devoluciones` → ver módulo (con montos + disclaimer)
+17. Login como **novelty_agent** → `/devoluciones` → ver módulo SIN montos (cod_amount: undefined, sin KPI monto)
+18. Login como **confirmation_agent** → sidebar NO muestra Devoluciones → redirige a `/my-tasks`
+19. Login como **delivery_agent** → mismo resultado que confirmation_agent
+20. Login como **admin** → `/supervisor-ia` → scroll → sección "Devoluciones" visible
 21. `npx tsc --noEmit` → sin errores
 
 ---

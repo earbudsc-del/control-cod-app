@@ -40,171 +40,365 @@ interface DevolucionRow {
   return_review_status: string | null
 }
 
-// ─── Lógica de falsos positivos ────────────────────────────────────────────
-
-function detectFalsePositive(order: Pick<DevolucionRow, 'last_attempt_reason' | 'confirmation_status'>): { isFP: boolean; reason: string } {
-  const r = (order.last_attempt_reason ?? '').toLowerCase()
-
-  if ((r.includes('cancel') && (r.includes('cliente') || r.includes('client'))) || r.includes('canceló el pedido'))
-    return { isFP: true, reason: 'Cliente canceló explícitamente' }
-
-  if (r.includes('rechaz') || r.includes('no quiso') || r.includes('no quería') || r.includes('no queria'))
-    return { isFP: true, reason: 'Cliente rechazó o no quiso recibir' }
-
-  if ((r.includes('tel') || r.includes('número') || r.includes('numero')) &&
-      (r.includes('incorr') || r.includes('equivoc') || r.includes('erron')))
-    return { isFP: true, reason: 'Teléfono/número incorrecto' }
-
-  if ((r.includes('pide') || r.includes('solicit') || r.includes('pidió')) &&
-      (r.includes('devoluci') || r.includes('retorno')))
-    return { isFP: true, reason: 'Cliente solicitó devolución' }
-
-  if (order.confirmation_status === 'no_coverage' && !r.includes('cobertura') && !r.includes('zona') && !r.trim())
-    return { isFP: true, reason: 'Fuera de cobertura confirmado en origen' }
-
-  return { isFP: false, reason: '' }
+export interface SupervisorAnalysis {
+  resumen: string
+  senalesAFavor: string[]
+  senalesEnContra: string[]
+  razonamiento: string
+  recomendacion: string
+  checklistEvidencia: string[]
 }
 
-// ─── Motor de scoring de indemnización ────────────────────────────────────
-
-function calcCompensationScore(order: DevolucionRow): {
+interface ScoreResult {
   score: number
   signals: string[]
+  signalsFor: string[]
+  signalsAgainst: string[]
   possibleCompensation: boolean
   compensationReason: string
   compensationPriority: 'low' | 'medium' | 'high' | 'critical'
   confidenceScore: number
   lifecycleRisk: string
   courierFlag: string
-} {
-  let score = 0
-  const signals = new Set<string>()
-  const now = Date.now()
+  indemnCat: 'excluido' | 'probablemente_no' | 'revisar_manual' | 'posible' | 'probable'
+  supervisorAnalysis: SupervisorAnalysis
+}
 
+// ─── Keywords de cobertura ─────────────────────────────────────────────────
+
+const COVERAGE_KEYWORDS = [
+  'fuera de cobertura', 'fuera cobertura', 'zona no cubierta', 'no cubierta',
+  'destino especial', 'cobertura restringida', 'sin cobertura', 'no cubre',
+  'zona no cubierta', 'no está en cobertura', 'no está en zona',
+]
+
+function hasCoverageText(text: string): boolean {
+  return COVERAGE_KEYWORDS.some(kw => text.includes(kw))
+}
+
+// ─── Detección de exclusiones ──────────────────────────────────────────────
+
+function detectExclusion(order: DevolucionRow): { excluded: boolean; reason: string; category: string } {
+  const r = (order.last_attempt_reason ?? '').toLowerCase()
+  const raw = (order.raw_status ?? '').toLowerCase()
+  const combined = r + ' ' + raw
+
+  // Cliente canceló
+  if ((r.includes('cancel') && (r.includes('cliente') || r.includes('client'))) || r.includes('canceló el pedido'))
+    return { excluded: true, reason: 'Cliente canceló explícitamente', category: 'cliente_cancelo' }
+
+  // Cliente rechazó o no quiso
+  if (r.includes('rechaz') || r.includes('no quiso') || r.includes('no quería') || r.includes('no queria') || r.includes('no desea'))
+    return { excluded: true, reason: 'Cliente rechazó o no quiso recibir', category: 'cliente_rechazo' }
+
+  // Teléfono incorrecto
+  if ((r.includes('tel') || r.includes('número') || r.includes('numero')) &&
+      (r.includes('incorr') || r.includes('equivoc') || r.includes('erron')))
+    return { excluded: true, reason: 'Teléfono/número incorrecto', category: 'tel_incorrecto' }
+
+  // Dirección incorrecta confirmada
+  if ((r.includes('direcci') || r.includes('domicil')) &&
+      (r.includes('incorr') || r.includes('equivoc') || r.includes('erron') || r.includes('no exist')))
+    return { excluded: true, reason: 'Dirección incorrecta confirmada', category: 'dir_incorrecta' }
+
+  // Cliente solicitó devolución
+  if ((r.includes('pide') || r.includes('solicit') || r.includes('pidió') || r.includes('pidio')) &&
+      (r.includes('devoluci') || r.includes('retorno')))
+    return { excluded: true, reason: 'Cliente solicitó devolución', category: 'cliente_solicito' }
+
+  // Fuera de cobertura confirmado: keyword presente Y confirmation_status = 'no_coverage'
+  const hasCoverage = hasCoverageText(combined)
+  if (hasCoverage && order.confirmation_status === 'no_coverage')
+    return { excluded: true, reason: 'Fuera de cobertura confirmado', category: 'fuera_cobertura' }
+
+  // Fuera de cobertura confirmado: confirmation_status = 'no_coverage' Y razón vacía (señal en origen)
+  if (order.confirmation_status === 'no_coverage' && !r.trim())
+    return { excluded: true, reason: 'Fuera de cobertura confirmado en origen (sin razón adicional)', category: 'fuera_cobertura' }
+
+  return { excluded: false, reason: '', category: '' }
+}
+
+// ─── Análisis del Supervisor IA ────────────────────────────────────────────
+
+function generateSupervisorAnalysis(
+  order: DevolucionRow,
+  ctx: {
+    signalsFor: string[]
+    signalsAgainst: string[]
+    indemnCat: string
+    confidence: number
+    strongSignals: number
+    hoursTotal: number
+    excluded: boolean
+    exclusionReason: string
+  }
+): SupervisorAnalysis {
+  const { signalsFor, signalsAgainst, indemnCat, confidence, strongSignals } = ctx
+  const location = order.city ?? order.province ?? 'ubicación no registrada'
+
+  const resumen =
+    `Guía #${order.tracking_number ?? 'N/A'} — ` +
+    `${order.customer_name ?? 'Cliente desconocido'} — ` +
+    `${order.delivery_attempts} intento(s) — ` +
+    `${location}` +
+    (order.last_attempt_reason ? ` — Motivo: ${order.last_attempt_reason}` : '')
+
+  let razonamiento: string
+  let recomendacion: string
+
+  if (ctx.excluded) {
+    razonamiento = `La devolución fue excluida del análisis de indemnización: ${ctx.exclusionReason}. Esta condición invalida cualquier señal positiva que pudiera existir.`
+    recomendacion = `❌ No indemnizable: ${ctx.exclusionReason}.`
+  } else if (indemnCat === 'probable') {
+    razonamiento = `Con ${strongSignals} señal(es) fuerte(s) y confianza de ${confidence}%, hay evidencia sólida de posible mala gestión del courier. Se recomienda preparar reclamo con documentación.`
+    recomendacion = '✅ Alta probabilidad: Preparar reclamo. Recopilar capturas del courier y confirmación del cliente.'
+  } else if (indemnCat === 'posible') {
+    razonamiento = `Hay señales moderadas (${signalsFor.length} a favor, ${signalsAgainst.length} en contra) con confianza ${confidence}%. Se recomienda revisar la documentación antes de decidir.`
+    recomendacion = '⚠️ Posible: Revisar documentación del courier y contactar al cliente antes de iniciar reclamo.'
+  } else if (order.delivery_attempts >= 4) {
+    razonamiento = `Con ${order.delivery_attempts} intentos documentados, el courier superó la obligación estándar de 3 intentos. Esto reduce significativamente la probabilidad de indemnización. La transportadora normalmente no está obligada más allá de 3 intentos — si hizo más, difícilmente proceda el reclamo salvo que haya irregularidades adicionales.`
+    recomendacion = `❌ Probablemente no indemnizable: ${order.delivery_attempts} intentos indican gestión extendida del courier. Revisar manualmente si hay irregularidades.`
+  } else if (indemnCat === 'revisar_manual') {
+    razonamiento = `Las señales disponibles son mixtas o débiles. Confianza de ${confidence}%. No se puede determinar automáticamente sin revisar la documentación adicional.`
+    recomendacion = '📋 Revisar manualmente: Recopilar evidencia antes de tomar decisión.'
+  } else {
+    razonamiento = `Las señales disponibles (confianza ${confidence}%) no son suficientes para recomendar un reclamo. Sin evidencia clara de mala gestión del courier.`
+    recomendacion = '❌ Sin señales suficientes para reclamo. Considerar descartar o marcar como revisado.'
+  }
+
+  const checklistEvidencia = [
+    'Revisar historial de WhatsApp con el cliente',
+    'Solicitar captura de pantalla del courier (tracking con intentos)',
+    'Verificar historial completo de tracking en EFI',
+    'Revisar notas internas previas al caso',
+    location !== 'ubicación no registrada'
+      ? `Confirmar que ${location} está en zona de cobertura`
+      : 'Verificar dirección completa y cobertura de la zona',
+  ]
+
+  return {
+    resumen,
+    senalesAFavor: signalsFor,
+    senalesEnContra: signalsAgainst,
+    razonamiento,
+    recomendacion,
+    checklistEvidencia,
+  }
+}
+
+// ─── Motor de scoring conservador ─────────────────────────────────────────
+
+function calcCompensationScore(order: DevolucionRow): ScoreResult {
+  const now = Date.now()
   const sinceTs = order.status_since ?? order.shipment_created_at ?? order.shopify_created_at ?? order.created_at
   const hoursTotal = (now - new Date(order.created_at).getTime()) / (1000 * 3600)
   const hoursInStatus = sinceTs ? (now - new Date(sinceTs).getTime()) / (1000 * 3600) : null
-  const reason = (order.last_attempt_reason ?? '').toLowerCase()
+  const r = (order.last_attempt_reason ?? '').toLowerCase()
+  const raw = (order.raw_status ?? '').toLowerCase()
+  const combined = r + ' ' + raw
 
-  // Intentos
-  if (order.delivery_attempts >= 3) {
-    score += 35
-    signals.add('3+ intentos fallidos')
-    signals.add('Posible intento falso del courier')
-    signals.add('Cliente probablemente quería recibir')
-  } else if (order.delivery_attempts === 2) {
-    score += 25
-    signals.add('2 intentos sin entrega exitosa')
-    signals.add('Cliente probablemente quería recibir')
-  } else if (order.delivery_attempts === 0) {
-    score += 30
-    signals.add('Devuelto sin ningún intento registrado')
-    signals.add('Courier posiblemente no intentó entrega')
-  } else {
-    score += 10
+  const signalsFor: string[] = []
+  const signalsAgainst: string[] = []
+
+  // ── Verificar exclusiones primero ────────────────────────────────────────
+  const exclusion = detectExclusion(order)
+  if (exclusion.excluded) {
+    signalsAgainst.push(exclusion.reason)
+    const analysis = generateSupervisorAnalysis(order, {
+      signalsFor: [],
+      signalsAgainst,
+      indemnCat: 'excluido',
+      confidence: 0,
+      strongSignals: 0,
+      hoursTotal,
+      excluded: true,
+      exclusionReason: exclusion.reason,
+    })
+    return {
+      score: 0,
+      signals: [],
+      signalsFor: [],
+      signalsAgainst,
+      possibleCompensation: false,
+      compensationReason: `Excluida: ${exclusion.reason}`,
+      compensationPriority: 'low',
+      confidenceScore: 0,
+      lifecycleRisk: 'normal',
+      courierFlag: 'sin_señales',
+      indemnCat: 'excluido',
+      supervisorAnalysis: analysis,
+    }
   }
 
-  // Retraso antes de devolución
+  // ── Cobertura dudosa (keyword presente pero NO confirmation_status=no_coverage) ──
+  const coverageDoubtful = hasCoverageText(combined) && order.confirmation_status !== 'no_coverage'
+
+  let score = 0
+  let strongSignals = 0
+
+  // ── SEÑALES A FAVOR ───────────────────────────────────────────────────────
+
+  // Sin intentos: courier nunca intentó (señal fuerte)
+  if (order.delivery_attempts === 0) {
+    score += 30
+    strongSignals++
+    signalsFor.push('Sin intentos registrados — courier posiblemente no intentó la entrega')
+  }
+
+  // SLA roto +72h en reparto antes de devolver (señal fuerte)
+  if (hoursInStatus !== null && hoursInStatus > 72) {
+    score += 25
+    strongSignals++
+    signalsFor.push('SLA roto — más de 72h en reparto antes de devolver')
+  }
+
+  // Devolución sospechosamente rápida: < 24h en reparto (señal fuerte)
+  if (hoursInStatus !== null && hoursInStatus < 24 && order.delivery_attempts > 0) {
+    score += 20
+    strongSignals++
+    signalsFor.push('Devolución sospechosamente rápida — menos de 24h en reparto')
+  }
+
+  // Cobertura dudosa: courier dijo fuera de zona pero NO confirmado en origen (señal fuerte)
+  if (coverageDoubtful) {
+    score += 20
+    strongSignals++
+    signalsFor.push('Fuera de cobertura dudoso — zona posiblemente cubierta, verificar')
+  }
+
+  // Tiempo prolongado desde creación (señales medias)
   if (hoursTotal > 240) { // +10 días
     score += 15
-    signals.add('Devolución tardía — +10 días desde generación')
+    signalsFor.push('Devolución tardía — +10 días desde generación de la guía')
   } else if (hoursTotal > 168) { // +7 días
     score += 10
-    signals.add('Devolución tardía — +7 días desde generación')
+    signalsFor.push('Devolución tardía — +7 días desde generación de la guía')
   }
 
-  // Devolución sospechosamente rápida (menos de 24h desde que salió)
-  if (hoursInStatus !== null && hoursInStatus < 24 && order.delivery_attempts > 0) {
-    score += 15
-    signals.add('Devolución muy rápida — menos de 24h en reparto')
-  }
-
-  // Razón: cobertura / zona (courier dice fuera de cobertura, pero quizás sí cubre)
-  if (reason.includes('cobertura') || reason.includes('zona')) {
-    score += 20
-    signals.add('Cobertura dudosa — zona posiblemente cubierta')
-    signals.add('Courier posiblemente falló')
-  }
-
-  // Razón: dirección / domicilio
-  if (reason.includes('direcci') || reason.includes('domicil')) {
-    score += 15
-    signals.add('Dirección como excusa — verificar si era correcta')
-  }
-
-  // Sin razón de devolución registrada
-  if (!reason.trim() && order.delivery_attempts >= 2) {
+  // Sin razón documentada + múltiples intentos (señal media)
+  if (!r.trim() && order.delivery_attempts >= 2) {
     score += 10
-    signals.add('Sin razón de devolución documentada')
+    signalsFor.push('Sin razón de devolución documentada — courier no registró motivo')
   }
 
-  // SLA roto +72h en reparto antes de devolver
-  if (hoursInStatus !== null && hoursInStatus > 72) {
+  // Dirección alegada pero no confirmada como incorrecta (señal débil)
+  if ((r.includes('direcci') || r.includes('domicil')) &&
+      !r.includes('incorr') && !r.includes('equivoc') && !r.includes('erron') && !r.includes('no exist')) {
     score += 10
-    signals.add('SLA roto — +72h antes de devolución')
+    signalsFor.push('Dirección alegada como motivo — verificar si era correcta')
   }
 
-  // Estado de confirmación
-  if (order.confirmation_status === 'no_coverage') {
+  // 2–3 intentos: señal débil positiva
+  if (order.delivery_attempts === 2) {
+    score += 8
+    signalsFor.push('2 intentos sin entrega exitosa — verificar documentación')
+  } else if (order.delivery_attempts === 3) {
     score += 5
-    signals.add('Fuera de cobertura en confirmación')
+    signalsFor.push('3 intentos sin entrega — courier alcanzó el mínimo requerido')
   }
 
-  const fp = detectFalsePositive(order)
-  if (fp.isFP) score = 0
+  // ── SEÑALES EN CONTRA ─────────────────────────────────────────────────────
 
-  const finalScore = Math.min(100, score)
-  const confidence = fp.isFP ? 0 : Math.min(95, Math.round(finalScore * 0.95 + 5))
+  // 4+ intentos: courier superó su obligación estándar
+  if (order.delivery_attempts >= 6) {
+    score -= 35
+    signalsAgainst.push(`${order.delivery_attempts} intentos documentados — gestión muy extendida del courier`)
+    signalsAgainst.push('La obligación estándar es 3 intentos; este courier la triplicó')
+  } else if (order.delivery_attempts >= 4) {
+    score -= 20
+    signalsAgainst.push(`${order.delivery_attempts} intentos documentados — courier realizó gestión extendida`)
+    signalsAgainst.push('La obligación estándar es 3 intentos; el courier la superó')
+  }
+
+  // confirmation_status = no_coverage sin keyword de cobertura (exclusión parcial ya verificada arriba)
+  // Si llegamos aquí, confirmation_status=no_coverage solo sin razón — pero detectExclusion ya lo captura.
+  // Este caso no debería darse si detectExclusion funciona correctamente.
+
+  // ── Cálculo final ─────────────────────────────────────────────────────────
+
+  const rawScore = Math.max(0, Math.min(100, score))
+
+  // Confianza: alta probabilidad requiere >= 2 señales fuertes
+  let confidence = rawScore > 0 ? Math.min(95, Math.round(rawScore * 0.93 + 5)) : 0
+
+  // Cap: si no hay 2+ señales fuertes, máximo 64% (no puede ser "alta probabilidad")
+  if (strongSignals < 2 && confidence >= 65) {
+    confidence = 64
+  }
+
   const possibleCompensation = confidence >= 30
 
-  let compensationReason = 'Sin señales suficientes'
-  if (fp.isFP) {
-    compensationReason = fp.reason
-  } else if (order.delivery_attempts >= 3 && signals.has('Posible intento falso del courier')) {
-    compensationReason = '3+ intentos con documentación insuficiente del courier'
-  } else if (order.delivery_attempts >= 3) {
-    compensationReason = '3 intentos fallidos sin entrega documentada'
-  } else if (order.delivery_attempts === 0) {
-    compensationReason = 'Devuelto sin ningún intento de entrega registrado'
-  } else if (signals.has('Cobertura dudosa — zona posiblemente cubierta')) {
-    compensationReason = 'Courier alegó falta de cobertura pero zona posiblemente cubierta'
-  } else if (signals.has('Dirección como excusa — verificar si era correcta')) {
-    compensationReason = 'Reprogramación por dirección — verificar si era correcta'
-  } else if (signals.has('Devolución muy rápida — menos de 24h en reparto')) {
-    compensationReason = 'Devolución sospechosamente rápida — menos de 24h en reparto'
-  } else if (order.delivery_attempts === 2) {
-    compensationReason = 'Múltiples intentos sin entrega exitosa'
+  // Categoría de indemnización
+  let indemnCat: ScoreResult['indemnCat']
+  if (confidence >= 65) {
+    indemnCat = 'probable'
+  } else if (confidence >= 45) {
+    indemnCat = 'posible'
+  } else if (order.delivery_attempts >= 4 && strongSignals < 1) {
+    indemnCat = 'probablemente_no'
+  } else if (confidence >= 30) {
+    indemnCat = 'revisar_manual'
+  } else {
+    indemnCat = 'probablemente_no'
   }
 
-  let compensationPriority: 'low' | 'medium' | 'high' | 'critical' = 'low'
+  // Razón legible
+  let compensationReason: string
+  if (order.delivery_attempts >= 4 && indemnCat !== 'probable') {
+    compensationReason = `Revisar manual: ${order.delivery_attempts} intentos indica gestión extendida del courier`
+  } else if (indemnCat === 'probablemente_no') {
+    compensationReason = 'Sin señales suficientes para indemnización'
+  } else if (signalsFor.length > 0) {
+    compensationReason = signalsFor[0]
+  } else {
+    compensationReason = 'Sin señales suficientes'
+  }
+
+  // Prioridad de compensación
+  let compensationPriority: ScoreResult['compensationPriority'] = 'low'
   if (confidence >= 80) compensationPriority = 'critical'
   else if (confidence >= 65) compensationPriority = 'high'
   else if (confidence >= 45) compensationPriority = 'medium'
 
   // Riesgo de ciclo de vida
   let lifecycleRisk = 'normal'
-  if (hoursTotal > 240 || order.delivery_attempts >= 3) lifecycleRisk = 'alto'
+  if (hoursTotal > 240 || (order.delivery_attempts === 0 && hoursTotal > 72)) lifecycleRisk = 'alto'
   else if (hoursTotal > 168 || order.delivery_attempts >= 2) lifecycleRisk = 'medio'
 
   // Flag de gestión courier
   let courierFlag = 'sin_señales'
-  if (order.delivery_attempts === 0 || signals.has('Cobertura dudosa — zona posiblemente cubierta')) {
+  if (order.delivery_attempts === 0 || coverageDoubtful) {
     courierFlag = 'sospechoso'
-  } else if (order.delivery_attempts >= 3 && signals.has('Posible intento falso del courier')) {
+  } else if (strongSignals >= 1 && order.delivery_attempts >= 2 && order.delivery_attempts <= 3) {
     courierFlag = 'posiblemente_falló'
-  } else if (signals.has('SLA roto — +72h antes de devolución')) {
+  } else if (hoursInStatus !== null && hoursInStatus > 72) {
     courierFlag = 'sla_roto'
   }
 
+  const supervisorAnalysis = generateSupervisorAnalysis(order, {
+    signalsFor,
+    signalsAgainst,
+    indemnCat,
+    confidence,
+    strongSignals,
+    hoursTotal,
+    excluded: false,
+    exclusionReason: '',
+  })
+
   return {
-    score: finalScore,
-    signals: Array.from(signals),
+    score: rawScore,
+    signals: signalsFor, // backward compat
+    signalsFor,
+    signalsAgainst,
     possibleCompensation,
     compensationReason,
     compensationPriority,
     confidenceScore: confidence,
     lifecycleRisk,
     courierFlag,
+    indemnCat,
+    supervisorAnalysis,
   }
 }
 
@@ -243,14 +437,14 @@ export async function GET(request: NextRequest) {
   const offset  = (page - 1) * limit
 
   // Filtros
-  const filter       = sp.get('filter')     // tab activo
-  const search       = sp.get('search')     // búsqueda libre
-  const dateFrom     = sp.get('from')       // ISO date
-  const dateTo       = sp.get('to')         // ISO date
+  const filter       = sp.get('filter')
+  const search       = sp.get('search')
+  const dateFrom     = sp.get('from')
+  const dateTo       = sp.get('to')
   const cityFilter   = sp.get('city')
   const provFilter   = sp.get('province')
-  const intentosFilt = sp.get('intentos')   // '2' | '3'
-  const motivoFilt   = sp.get('motivo')     // raw_status substring
+  const intentosFilt = sp.get('intentos')
+  const motivoFilt   = sp.get('motivo')
 
   // ── Bounds de hoy/ayer ─────────────────────────────────────────────────
   const today     = rdDayBounds(0)
@@ -340,7 +534,6 @@ export async function GET(request: NextRequest) {
     const comp = calcCompensationScore(order)
     return {
       ...order,
-      // No exponer cod_amount a novelty_agent
       cod_amount: isAdmin ? order.cod_amount : undefined,
       ...comp,
     }
@@ -356,12 +549,11 @@ export async function GET(request: NextRequest) {
     finalData = enriched.filter(o => o.courierFlag === 'sospechoso' || o.courierFlag === 'posiblemente_falló')
   }
 
-  // KPIs de indemnización (requieren scoring)
+  // KPIs de indemnización (requieren scoring — calcular sobre todos los returned)
   let allForKpis: typeof enriched = enriched
   if (filter && filter !== 'todas') {
-    // Para KPIs globales necesitamos calcular sobre todos los returned
     const { data: allRaw } = await supabase.from('orders')
-      .select('id,delivery_attempts,last_attempt_reason,status_since,shipment_created_at,shopify_created_at,created_at,confirmation_status,normalized_status,cod_amount,return_review_status')
+      .select('id,delivery_attempts,last_attempt_reason,status_since,shipment_created_at,shopify_created_at,created_at,confirmation_status,normalized_status,cod_amount,return_review_status,raw_status')
       .eq('normalized_status', 'returned')
       .not('tracking_number', 'is', null)
       .limit(500)
@@ -385,7 +577,7 @@ export async function GET(request: NextRequest) {
     pendientesRevisar:   pendientesRevisar ?? 0,
   }
 
-  // Monto potencial reclamable (solo admin/ia_supervisor)
+  // Monto potencial (solo admin/ia_supervisor, solo alta probabilidad, con disclaimer)
   let montoReclamable: number | null = null
   if (isAdmin) {
     const altaCandidatos = allForKpis.filter(o => o.confidenceScore >= 65)

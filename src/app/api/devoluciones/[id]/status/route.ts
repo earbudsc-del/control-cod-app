@@ -6,6 +6,7 @@ const ALLOWED_ROLES = ['admin', 'ia_supervisor', 'novelty_agent']
 const VALID_STATUSES = [
   'pendiente_revision', 'revisado', 'escalado',
   'reclamo_preparado', 'reclamado', 'descartado',
+  'no_indemnizable', 'posible_reclamo', 'rechazado_courier', 'aprobado_courier',
 ]
 
 export async function PATCH(
