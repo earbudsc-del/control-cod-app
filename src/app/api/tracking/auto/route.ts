@@ -11,6 +11,12 @@ const FINAL_STATUSES = ['delivered', 'returned', 'cancelled']
 const BATCH_SIZE     = 5
 const BATCH_DELAY_MS = 1_000
 
+// Ventana de revalidación: re-consulta EFI para returned/delivered recientes.
+// Si EFI los reactivó, los sacamos del estado final sin depender de raw_status congelado.
+// Límite conservador para mantener runtime < 300 s (activas ~120 s + revalidación ~30 s).
+const REVALIDATION_DAYS  = 21
+const REVALIDATION_LIMIT = 15
+
 // Campos mínimos — incluimos normalized_status para el guard anti-unknown-overwrite
 const SELECT = 'id, tracking_number, normalized_status, last_tracking_update, store_id'
 
@@ -22,13 +28,16 @@ function sleep(ms: number) {
 
 // ── Lógica de tracking compartida entre GET (Vercel Cron) y POST (script local) ──
 //
-// Estrategia de tres queries (prioridades):
-//   1. Hasta 60 pedidos in_transit      — reclasificación más crítica
-//   2. Hasta 50 pedidos en_reparto      — reparto activo: necesita sync frecuente
-//   3. Hasta 50 pedidos en otros estados no finalizados (novedad, pending, unknown…)
+// Estrategia de cuatro queries (prioridades):
+//   Q1. Hasta 60 pedidos in_transit      — reclasificación más crítica
+//   Q2. Hasta 50 pedidos en_reparto      — reparto activo: necesita sync frecuente
+//   Q3. Hasta 50 pedidos en otros estados no finalizados (novedad, pending, unknown…)
+//   Q4. Hasta 15 returned/delivered de últimos 21 días — revalidación contra EFI
+//       → Si EFI los reactivó (courier reagendó, error de clasificación), los sacamos
+//         del estado final. NO depende de raw_status en DB (que puede estar congelado).
 //
-// Esto garantiza que guías en reparto no sean desplazadas por novedades cuando
-// hay muchos pedidos en espera, y que in_transit siempre tenga prioridad máxima.
+// Q4 corre DESPUÉS de Q1/Q2/Q3 (activas tienen prioridad). Límite conservador para
+// mantener el runtime total dentro de 300 s: ~59 activas × 1.5 s + 15 finals × 1.5 s ≈ 110 s.
 
 async function runTracking(supabase: SB, logPrefix: string): Promise<NextResponse> {
   const [transitRes, repartoRes, otherRes] = await Promise.all([
@@ -86,16 +95,16 @@ async function runTracking(supabase: SB, logPrefix: string): Promise<NextRespons
     `total=${allOrders.length}`,
   )
 
-  if (allOrders.length === 0) {
-    console.log(`${logPrefix} processed=0 updated=0 skipped=0 failed=0`)
-    return NextResponse.json({ processed: 0, updated: 0, skipped: 0, failed: 0 })
-  }
-
   let updated = 0
   let skipped = 0
   let failed  = 0
-  const errors:   Array<{ trackingNumber: string; error: string }> = []
-  const skips:    Array<{ trackingNumber: string; reason: string }> = []
+  const errors: Array<{ trackingNumber: string; error: string }> = []
+  const skips:  Array<{ trackingNumber: string; reason: string }> = []
+
+  // ── Q1/Q2/Q3: procesar órdenes activas ───────────────────────────────────
+  if (allOrders.length === 0) {
+    console.log(`${logPrefix} processed=0 updated=0 skipped=0 failed=0`)
+  }
 
   for (let i = 0; i < allOrders.length; i += BATCH_SIZE) {
     const batch   = allOrders.slice(i, i + BATCH_SIZE)
@@ -136,12 +145,106 @@ async function runTracking(supabase: SB, logPrefix: string): Promise<NextRespons
     if (i + BATCH_SIZE < allOrders.length) await sleep(BATCH_DELAY_MS)
   }
 
-  console.log(
-    `${logPrefix} processed=${allOrders.length} ` +
-    `updated=${updated} skipped=${skipped} failed=${failed}`,
-  )
+  if (allOrders.length > 0) {
+    console.log(
+      `${logPrefix} processed=${allOrders.length} ` +
+      `updated=${updated} skipped=${skipped} failed=${failed}`,
+    )
+  }
 
-  // Confirmation tasks para pedidos importados por Excel (no crean task en import)
+  // ── Q4: revalidación de finalizados recientes ─────────────────────────────
+  //
+  // Re-consulta EFI para returned/delivered de los últimos REVALIDATION_DAYS días.
+  // Detecta órdenes que el courier reagendó o que EFI reclasificó como activas
+  // DESPUÉS de que el cron las marcó como finales.
+  //
+  // Protecciones:
+  //   - Solo returned/delivered (no cancelled — son finalizaciones intencionales)
+  //   - Solo los últimos 21 días (no toca históricos reales antiguos)
+  //   - Límite de 15 por run (runtime budget: ~30 s adicionales)
+  //   - Guard anti-unknown de updateOrderTracking sigue activo
+  //   - Si EFI confirma final → update idempotente, sin efecto operativo
+  //   - Si EFI muestra activo → reactivación + auto-task si corresponde
+
+  let revalidChecked     = 0
+  let revalidReactivated = 0
+  let revalidStayedFinal = 0
+  let revalidErrors      = 0
+
+  const d21ago          = new Date(Date.now() - REVALIDATION_DAYS * 24 * 60 * 60 * 1000).toISOString()
+  const recentFinalsRes = await supabase
+    .from('orders')
+    .select(SELECT)
+    .not('tracking_number', 'is', null)
+    .in('normalized_status', ['returned', 'delivered'])
+    .gte('last_tracking_update', d21ago)
+    .order('last_tracking_update', { ascending: true, nullsFirst: true })
+    .limit(REVALIDATION_LIMIT)
+
+  if (!recentFinalsRes.error && recentFinalsRes.data && recentFinalsRes.data.length > 0) {
+    const recentFinals = recentFinalsRes.data
+
+    console.log(
+      `${logPrefix}[revalidation] queued=${recentFinals.length} window=${REVALIDATION_DAYS}d`,
+    )
+
+    for (let i = 0; i < recentFinals.length; i += BATCH_SIZE) {
+      const batch   = recentFinals.slice(i, i + BATCH_SIZE)
+      const results = await Promise.all(
+        batch.map(o =>
+          // Pasamos el normalized_status actual para que el guard anti-unknown siga activo:
+          // si EFI devuelve unknown, NO sobreescribimos returned/delivered con unknown.
+          updateOrderTracking(o.id, o.tracking_number, supabase, o.normalized_status),
+        ),
+      )
+
+      const taskPromises: Promise<void>[] = []
+
+      for (const [j, r] of results.entries()) {
+        const order = batch[j]
+        revalidChecked++
+
+        if (!r.success) {
+          revalidErrors++
+        } else if (r.skipped) {
+          // EFI devolvió unknown — guard mantuvo el estado final (correcto)
+          revalidStayedFinal++
+        } else if (r.normalized_status && !FINAL_STATUSES.includes(r.normalized_status)) {
+          // EFI muestra estado activo → la orden fue reactivada en DB
+          revalidReactivated++
+          console.log(
+            `${logPrefix}[revalidation] REACTIVATED guia=${order.tracking_number} ` +
+            `old=${order.normalized_status} new=${r.normalized_status}`,
+          )
+          if (order.store_id) {
+            taskPromises.push(
+              resolveAutoTasks(supabase, {
+                orderId:          r.orderId,
+                storeId:          order.store_id,
+                normalizedStatus: r.normalized_status,
+              }).catch(e => console.error('[auto-tasks][revalidation]', r.orderId, e)),
+            )
+          }
+        } else {
+          // EFI confirma estado final → sin cambio operativo (last_tracking_update actualizado)
+          revalidStayedFinal++
+        }
+      }
+
+      await Promise.all(taskPromises)
+
+      if (i + BATCH_SIZE < recentFinals.length) await sleep(BATCH_DELAY_MS)
+    }
+
+    console.log(
+      `${logPrefix}[revalidation] checked=${revalidChecked} ` +
+      `reactivated=${revalidReactivated} stayed_final=${revalidStayedFinal} errors=${revalidErrors}`,
+    )
+  } else {
+    console.log(`${logPrefix}[revalidation] no recent finals in window=${REVALIDATION_DAYS}d`)
+  }
+
+  // ── Confirmation tasks para pedidos importados por Excel ──────────────────
   const { data: pendingOrders } = await supabase
     .from('orders')
     .select('id, store_id')
@@ -167,6 +270,12 @@ async function runTracking(supabase: SB, logPrefix: string): Promise<NextRespons
     updated,
     skipped,
     failed,
+    revalidation: {
+      checked:      revalidChecked,
+      reactivated:  revalidReactivated,
+      stayed_final: revalidStayedFinal,
+      errors:       revalidErrors,
+    },
     ...(errors.length > 0 && { errors: errors.slice(0, 20) }),
     ...(skips.length  > 0 && { skips:  skips.slice(0, 20) }),
   })

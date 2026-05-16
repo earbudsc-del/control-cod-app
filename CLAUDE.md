@@ -4,6 +4,95 @@
 
 ---
 
+## FIX: Revalidación de finalizados recientes — Ronda 3 (2026-05-16)
+
+### Problema confirmado (Escenario A)
+
+`shopify30dReconcile.gap = 1` → webhook NO es el problema. El gap 59 vs 133 se debe a órdenes que EFI reactivó después de que el cron las marcó como `returned`/`delivered`. El cron nunca volvía a procesarlas. `reactivate-tracking` encontraba 0 sospechosas porque compara `raw_status` en DB (congelado al momento del último sync) contra patrones activos — pero si EFI dijo "Devuelto" al momento del sync, `raw_status` dice "Devuelto" y no hay nada que detectar.
+
+### Fix implementado: Q4 Revalidación en el cron
+
+Archivo modificado: `src/app/api/tracking/auto/route.ts`
+
+Nuevo batch **Q4** agregado al final de `runTracking()`, después de Q1/Q2/Q3:
+
+| Parámetro | Valor | Razón |
+|---|---|---|
+| Ventana temporal | 21 días | Captura reagendamientos sin tocar históricos reales |
+| Límite por run | 15 órdenes | Runtime budget: 59 activas × 1.5 s + 15 finals × 1.5 s ≈ 110 s (< 300 s) |
+| Statuses candidatos | `returned`, `delivered` | Solo estos (no `cancelled` — son finalizaciones intencionales) |
+| Ordenamiento | `last_tracking_update ASC` | Más antiguas sin re-check primero |
+| Mecanismo | Re-consulta EFI directamente | NO depende de `raw_status` congelado en DB |
+
+**Flujo de Q4 por orden:**
+1. Consulta EFI → `updateOrderTracking(id, tracking_number, supabase, currentNormalizedStatus)`
+2. Si EFI devuelve `unknown` → guard anti-unknown-overwrite conserva el estado final (sin cambio)
+3. Si EFI confirma final (`returned`/`delivered`) → update idempotente (`last_tracking_update` actualizado, estado sin cambio)
+4. Si EFI devuelve estado activo (`en_reparto`, `novedad`, `in_transit`, etc.) → **reactivación**: `normalized_status` actualizado + auto-task generado si corresponde + log `REACTIVATED`
+
+### Constantes del cron (post-fix)
+
+```typescript
+const FINAL_STATUSES     = ['delivered', 'returned', 'cancelled']
+const BATCH_SIZE         = 5
+const BATCH_DELAY_MS     = 1_000
+const REVALIDATION_DAYS  = 21   // ventana de revalidación
+const REVALIDATION_LIMIT = 15   // máx por run para Q4
+```
+
+### Respuesta del cron (post-fix)
+
+```typescript
+{
+  processed:  N,       // Q1/Q2/Q3 activas procesadas
+  updated:    N,
+  skipped:    N,
+  failed:     N,
+  revalidation: {
+    checked:      N,   // cuántas finalizadas recientes se re-consultaron en EFI
+    reactivated:  N,   // cuántas pasaron de returned/delivered → activo
+    stayed_final: N,   // cuántas EFI confirmó como finales (idempotente)
+    errors:       N,   // fallos de fetch EFI en revalidación
+  }
+}
+```
+
+### Logs de revalidación en Vercel
+
+```
+[vercel-cron][revalidation] queued=15 window=21d
+[vercel-cron][revalidation] REACTIVATED guia=XYZ old=returned new=novedad
+[vercel-cron][revalidation] checked=15 reactivated=3 stayed_final=12 errors=0
+```
+
+### Cómo probar el fix
+
+1. Deploy a Vercel (o correr `POST /api/tracking/auto` con `x-cron-secret`)
+2. En Vercel Logs buscar `[revalidation]`:
+   - `queued=N` → cuántas finalizadas recientes encontró
+   - `REACTIVATED` → reactivaciones detectadas
+   - `checked=N reactivated=N stayed_final=N` → resumen
+3. Verificar respuesta JSON del endpoint: campo `revalidation` presente
+4. Después de 1-2 runs: `GET /api/debug/tracking-health` → `totalActiveOrders` debería aumentar si había guías reactivables
+5. Comparar `GET /api/debug/active-universe` antes y después: `universeBreakdown.active_included_in_cron` debería acercarse a 133
+
+### Protecciones anti-regresión
+
+- `cancelled` nunca incluido en Q4 (finalizaciones intencionales)
+- Órdenes > 21 días nunca tocadas (`.gte('last_tracking_update', d21ago)`)
+- Guard anti-unknown-overwrite sigue activo → EFI returning `unknown` NO sobreescribe `returned`/`delivered`
+- Si EFI confirma estado final → update idempotente, sin impacto operativo
+- Límite 15/run → no hay riesgo de timeout
+
+### Archivos creados/modificados — ronda 3
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/tracking/auto/route.ts` | **MODIFICADO.** Q4 revalidación agregada. Constantes `REVALIDATION_DAYS=21`, `REVALIDATION_LIMIT=15`. Respuesta JSON incluye `revalidation: { checked, reactivated, stayed_final, errors }`. |
+| `src/app/api/debug/active-universe/route.ts` | **NUEVO.** Diagnóstico del universo activo. Ver sección anterior. |
+
+---
+
 ## DIAGNÓSTICO: Universo activo del cron — Ronda 3 (2026-05-16)
 
 ### Problema
