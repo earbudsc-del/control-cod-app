@@ -4,6 +4,149 @@
 
 ---
 
+## DIAGNÓSTICO GUÍA POR GUÍA: compare-efi-guides (2026-05-16)
+
+### Problema actual
+
+EFI dashboard muestra 33 en reparto + 76 en novedad + 10 tránsito + 24 generadas (~143 activas). La app muestra mucho menos. Necesitamos comparar guías reales de EFI contra nuestra DB para entender qué pasa con cada una.
+
+### Endpoint: `POST /api/debug/compare-efi-guides`
+
+Solo admin. Solo lectura — no modifica ningún dato.
+
+**Archivo:** `src/app/api/debug/compare-efi-guides/route.ts`
+
+**Body:**
+```json
+{
+  "guides": ["9000123", "9000456", "..."],
+  "fetch_efi": true
+}
+```
+
+- `guides`: array de tracking numbers copiados del dashboard EFI (máx 50 para lookup DB; máx 20 primeras consultan EFI)
+- `fetch_efi`: si `false`, solo hace lookup en DB sin consultar EFI (más rápido). Default: `true`
+
+**Por cada guía responde:**
+```typescript
+{
+  guide: string,
+  exists_in_db: boolean,
+  db: {
+    id, order_number, tracking_number,
+    normalized_status,   // ej. "returned", "delivered", "novedad"
+    raw_status,          // texto congelado del último sync con EFI
+    last_tracking_update,
+    status_since,
+    source, created_at
+  } | null,
+  cron: {
+    enters_Q1: boolean,   // in_transit → cap 60
+    enters_Q2: boolean,   // en_reparto → cap 50
+    enters_Q3: boolean,   // novedad/pending/unknown → cap 50
+    enters_Q4: boolean,   // returned/delivered < 21 días → cap 15
+    excluded: boolean,
+    exclusion_reason: string | null  // razón exacta si NO entra al cron
+  },
+  efi: {                 // solo si fetch_efi=true y dentro del cap de 20
+    fetch_success: boolean,
+    encontrado: boolean,
+    raw_status_efi: string | null,       // lo que EFI muestra ahora mismo
+    normalized_status_efi: string,       // normalizado por nuestro parser
+    estado_global: string | null,
+    attempts: number,
+    last_attempt_reason: string | null,
+    divergencia: {
+      status_mismatch: boolean,
+      db_status: string | null,
+      efi_status: string,
+      severity: 'none' | 'minor' | 'major',
+      description: string   // descripción legible del problema
+    }
+  }
+}
+```
+
+**Respuesta summary + critical_cases:**
+```typescript
+{
+  generatedAt: string,
+  guides_requested: number,
+  efi_fetched: boolean,
+  summary: {
+    in_db: number,
+    not_in_db: number,                          // CRÍTICO: EFI las tiene, DB no
+    processed_by_cron: number,
+    excluded_from_cron: number,
+    major_divergences_efi_vs_db: number,        // DB=final, EFI=activo (el bug principal)
+    minor_divergences_efi_vs_db: number,
+    not_found_in_efi: number,
+  },
+  critical_cases: [                             // lista compacta de bugs detectados
+    { guide, db_status, efi_status, enters_Q4, description }
+  ],
+  results: [...]
+}
+```
+
+**Severidades de divergencia:**
+| Severity | Condición | Significado |
+|---|---|---|
+| `none` | DB y EFI coinciden | Todo correcto |
+| `minor` | Ambos activos, status diferente | El cron debería sincronizar pronto |
+| `major` | DB=final, EFI=activo | **Bug: orden atrapada permanentemente** |
+| `major` | DB=activo, EFI=final | El cron la actualizará en el próximo run |
+| `major` | No existe en DB | EFI la tiene, nosotros no |
+
+**Análisis Q1/Q2/Q3/Q4 exacto:**
+| Q | Filter | Cron lo procesa |
+|---|---|---|
+| Q1 | `normalized_status = 'in_transit'` | ✅ cap 60 |
+| Q2 | `normalized_status = 'en_reparto'` | ✅ cap 50 |
+| Q3 | NOT IN (in_transit, en_reparto, delivered, returned, cancelled) | ✅ cap 50 — novedad, pending, unknown |
+| Q4 | IN (returned, delivered) + last_tracking_update ≥ 21 días atrás | ✅ cap 15 |
+| EXCLUIDA | cancelled siempre | ❌ nunca procesada |
+| EXCLUIDA | returned/delivered con last_tracking_update < 21 días | ❌ fuera de ventana Q4 |
+| EXCLUIDA | tracking_number IS NULL | ❌ cron no puede consultarla |
+| NO EN DB | la guía no está en nuestra base de datos | ❌ cron no sabe que existe |
+
+### Cómo usar
+
+```bash
+# Con curl (reemplazar con sesión válida de admin)
+curl -X POST https://tu-app.vercel.app/api/debug/compare-efi-guides \
+  -H "Content-Type: application/json" \
+  -H "Cookie: [sesión admin]" \
+  -d '{
+    "guides": ["9001234", "9005678", "9009012"],
+    "fetch_efi": true
+  }'
+
+# Solo DB (sin consultar EFI, más rápido)
+curl -X POST .../api/debug/compare-efi-guides \
+  -d '{ "guides": ["9001234", ...50 más...], "fetch_efi": false }'
+```
+
+**Flujo de diagnóstico:**
+1. Abrir EFI dashboard → copiar 15-20 tracking numbers de "En reparto" y "Novedad"
+2. `POST /api/debug/compare-efi-guides` con `fetch_efi: true`
+3. Revisar `summary.major_divergences_efi_vs_db` → cuántos casos críticos hay
+4. Revisar `critical_cases` → lista compacta con razón exacta por guía
+5. Para cada guía en critical_cases: revisar `cron.exclusion_reason` para entender exactamente por qué no es procesada
+6. Revisar `summary.not_in_db` → si > 0, hay guías que EFI tiene pero nuestra DB no
+
+### Límites y runtime
+
+| Parámetro | Valor |
+|---|---|
+| `maxDuration` | 120 s |
+| Guías para lookup DB | máx 50 |
+| Guías que consultan EFI | máx 20 (primeras del array) |
+| Tiempo estimado (20 guías EFI) | ~30-60 s |
+| EFI timeout por guía | 10 s |
+
+---
+
 ## FIX: Revalidación de finalizados recientes — Ronda 3 (2026-05-16)
 
 ### Problema confirmado (Escenario A)
