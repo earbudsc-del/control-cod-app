@@ -83,7 +83,9 @@ export default function ConfirmadosPage() {
   const [fromDate, setFromDate]       = useState('')
   const [toDate, setToDate]           = useState('')
   const [searchQuery, setSearchQuery] = useState('')
-  const [readyMap, setReadyMap]       = useState<Record<string, boolean>>({})
+  const [trackingInputs, setTrackingInputs] = useState<Record<string, string>>({})
+  const [assigning, setAssigning]           = useState<Record<string, boolean>>({})
+  const [assignErrors, setAssignErrors]     = useState<Record<string, string>>({})
   const [alertFilter, setAlertFilter] = useState<AlertFilter>('todos')
   const [currentPage, setCurrentPage] = useState(1)
 
@@ -177,8 +179,31 @@ export default function ConfirmadosPage() {
   // Reset paginación al cambiar filtros o búsqueda
   useEffect(() => { setCurrentPage(1) }, [activeFilter, searchQuery, alertFilter])
 
-  function markReady(id: string) {
-    setReadyMap(prev => ({ ...prev, [id]: true }))
+  async function assignTracking(orderId: string) {
+    const tracking = (trackingInputs[orderId] ?? '').trim()
+    if (!tracking) {
+      setAssignErrors(prev => ({ ...prev, [orderId]: 'Ingresa el número de guía' }))
+      return
+    }
+    setAssigning(prev => ({ ...prev, [orderId]: true }))
+    setAssignErrors(prev => ({ ...prev, [orderId]: '' }))
+    try {
+      const res = await fetch(`/api/orders/${orderId}/assign-tracking`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tracking_number: tracking }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setAssignErrors(prev => ({ ...prev, [orderId]: data.error ?? 'Error al asignar' }))
+      } else {
+        setOrders(prev => prev.filter(o => o.id !== orderId))
+      }
+    } catch {
+      setAssignErrors(prev => ({ ...prev, [orderId]: 'Error de red' }))
+    } finally {
+      setAssigning(prev => ({ ...prev, [orderId]: false }))
+    }
   }
 
   // Count de recuperados en el filtro actual (para mostrar en el banner cuando aplica)
@@ -564,7 +589,6 @@ export default function ConfirmadosPage() {
               </thead>
               <tbody className="divide-y divide-green-50">
                 {pagedDisplayed.map(order => {
-                  const isReady      = !!readyMap[order.id]
                   const method       = order.confirmation_method
                     ? (METHOD_BADGE[order.confirmation_method] ?? METHOD_BADGE['other'])
                     : null
@@ -661,23 +685,39 @@ export default function ConfirmadosPage() {
 
                       {/* Acción */}
                       <td className="px-3 py-2.5">
-                        {isReady ? (
-                          <span className="inline-flex items-center gap-1 text-xs font-semibold
-                                           px-2.5 py-1 rounded-full bg-green-100 text-green-700">
-                            <CheckCircle2 className="w-3 h-3" />
-                            Marcado
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => markReady(order.id)}
-                            className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700
-                                       text-white text-[11px] font-semibold px-3 py-1.5 rounded-lg
-                                       transition-colors shadow-sm whitespace-nowrap"
-                          >
-                            <Truck className="w-3 h-3 shrink-0" />
-                            Listo para despacho
-                          </button>
-                        )}
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="text"
+                              value={trackingInputs[order.id] ?? ''}
+                              onChange={e => setTrackingInputs(prev => ({ ...prev, [order.id]: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') assignTracking(order.id) }}
+                              placeholder="# Guía EFI"
+                              disabled={assigning[order.id]}
+                              className="w-24 px-2 py-1 text-xs border border-gray-200 rounded-lg
+                                         focus:outline-none focus:ring-1 focus:ring-green-300
+                                         disabled:opacity-50"
+                            />
+                            <button
+                              onClick={() => assignTracking(order.id)}
+                              disabled={assigning[order.id] || !(trackingInputs[order.id] ?? '').trim()}
+                              className="flex items-center gap-1 bg-green-600 hover:bg-green-700
+                                         text-white text-[11px] font-semibold px-2.5 py-1.5 rounded-lg
+                                         transition-colors shadow-sm whitespace-nowrap
+                                         disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              {assigning[order.id]
+                                ? <Spinner className="w-3 h-3" />
+                                : <Truck className="w-3 h-3 shrink-0" />}
+                              {assigning[order.id] ? 'Asignando…' : 'Asignar'}
+                            </button>
+                          </div>
+                          {assignErrors[order.id] && (
+                            <p className="text-[10px] text-red-600 leading-tight max-w-[160px]">
+                              {assignErrors[order.id]}
+                            </p>
+                          )}
+                        </div>
                       </td>
 
                     </tr>

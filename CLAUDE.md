@@ -4,6 +4,171 @@
 
 ---
 
+## DIAGNÓSTICO RAÍZ: Por qué guías activas en EFI no existen en DB (2026-05-16)
+
+### Causa raíz confirmada: el paso de asignación de tracking está roto/ausente
+
+Tras revisión exhaustiva de todos los archivos relevantes, la causa raíz es una **laguna estructural en el flujo de despacho**:
+
+**Flujo actual (roto):**
+```
+Shopify webhook → orders (tracking_number=NULL, status='pending')
+    ↓
+Agente confirma → confirmation_status='confirmed', tracking_number=NULL
+    ↓
+Equipo logístico crea guía en EFI manualmente (fuera del sistema)
+    ↓ ← EL PASO FALTANTE: nadie guarda el número de guía en la app
+Orden queda en DB: confirmed + tracking_number=NULL (para siempre en /confirmados)
+Guía EFI: existe en EFI sin relación a ningún registro de DB
+```
+
+### Evidencia encontrada (todos los paths de escritura de tracking_number)
+
+| Path | Escribe tracking_number | Aplica al caso |
+|---|---|---|
+| `POST /api/webhooks/shopify/orders` | Siempre NULL | No aplica |
+| `PATCH /api/orders/[id]` | **EXCLUIDO explícitamente** | Bloqueado por diseño |
+| `POST /api/orders/[id]/tracking` | **Requiere que ya exista** — error si NULL | No aplica |
+| `POST /api/admin/recover-shopify-orders` | Solo desde `fulfillments[].tracking_number` de Shopify | EFI ≠ fulfillment Shopify |
+| `POST /api/imports` | Crea registros nuevos desde CSV (no vinculados a Shopify) | No aplica para órdenes Shopify |
+| `/confirmados` page | **Sin formulario de asignación** — botón "Listo para despacho" es solo UI local | Ausente |
+
+### Conclusión
+
+Las guías con `exists_in_db: false` en el endpoint `compare-efi-guides` corresponden a:
+1. **Caso principal**: Guías creadas en EFI para órdenes confirmadas, pero sin mecanismo para guardar el número de guía en DB. La orden en DB queda con `tracking_number=NULL` en `/confirmados` indefinidamente.
+2. **Posible caso secundario**: Guías creadas directamente en EFI sin ninguna orden correspondiente en DB (raro).
+
+### Por qué PATCH excluye tracking_number
+
+```typescript
+// src/app/api/orders/[id]/route.ts — solo estos campos son permitidos:
+const ALLOWED_FIELDS = ['classification', 'is_at_risk', 'follow_up_result', 'normalized_status', 'customer_confirmed']
+// tracking_number NO está en esta lista — fue excluido intencionalmente
+```
+
+### Por qué recover-shopify-orders no ayuda
+
+`recover-shopify-orders` extrae `tracking_number` de `order.fulfillments[].tracking_number`. Pero EFI es un carrier externo — el equipo logístico **no crea fulfillments en Shopify**. Solo crean la guía directamente en EFI. Shopify no sabe que existe esa guía, por lo tanto `fulfillments` está vacío para estos pedidos.
+
+### Fix requerido (tres pasos)
+
+**Paso 1 — Endpoint de asignación (CRÍTICO):**
+Crear `PATCH /api/orders/[id]/assign-tracking` (o añadir `tracking_number` al PATCH existente):
+- Solo admin/ia_supervisor
+- Body: `{ tracking_number: string }`
+- Valida que la orden tenga `confirmation_status='confirmed'` y `tracking_number IS NULL`
+- Actualiza `tracking_number` + `normalized_status='in_transit'` en DB
+- El cron lo sincroniza con EFI en el siguiente ciclo
+
+**Paso 2 — UI en /confirmados (CRÍTICO):**
+Añadir a cada fila de `/confirmados` un input de texto + botón "Asignar guía" que llame al endpoint del paso 1. Cuando se asigna, la fila desaparece de `/confirmados` y aparece en `/despachados` en el próximo refresh.
+
+**Paso 3 — Reconciliación retroactiva (IMPORTANTE):**
+Para las guías ya activas en EFI sin match en DB, se puede crear un endpoint de reconciliación que:
+- Acepta `{ guide: string, order_id?: string }` o `{ guide: string, customer_phone?: string }`
+- Si se provee `order_id`: asigna directamente
+- Si se provee `customer_phone`: busca en DB orders con ese teléfono en `confirmed + tracking_number=NULL`
+- Si hay match: asigna el tracking_number y el cron sincroniza
+- Si no hay match: crea un registro mínimo en DB (source='efi_manual') para que el cron lo procese
+
+### Estado
+
+- [x] Paso 1: endpoint assign-tracking — **IMPLEMENTADO** (2026-05-16)
+- [x] Paso 2: UI en /confirmados — **IMPLEMENTADO** (2026-05-16)
+- [ ] Paso 3: reconciliación retroactiva — **PENDIENTE**
+
+---
+
+## FIX: Asignación de guía EFI — Paso 1 y Paso 2 (2026-05-16)
+
+### Qué se hizo
+
+Cerrar la laguna estructural del despacho: antes no existía ningún mecanismo para guardar el número de guía EFI en DB una vez que el equipo la creaba fuera del sistema. Se implementaron dos piezas:
+
+1. **Endpoint `PATCH /api/orders/[id]/assign-tracking`** — Guarda el tracking_number en DB y establece el estado inicial correcto para que el cron empiece a sincronizar.
+2. **UI en `/confirmados`** — Reemplaza el botón cosmético "Listo para despacho" por un input de número de guía + botón "Asignar" real que llama al endpoint.
+
+### Archivos creados/modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/orders/[id]/assign-tracking/route.ts` | **NUEVO.** `PATCH /api/orders/[id]/assign-tracking`. Solo admin. Body: `{ tracking_number }`. Valida orden, estado confirmado, tracking_number NULL, guía sin duplicado. Actualiza tracking_number + normalized_status='in_transit'. |
+| `src/app/(app)/confirmados/page.tsx` | **MODIFICADO.** Reemplaza estado `readyMap`/`markReady` por `trackingInputs`, `assigning`, `assignErrors` + función `assignTracking`. Columna Acción ahora tiene input de guía + botón Asignar con feedback de error inline y auto-remove de la fila al asignar. |
+
+### Endpoint `PATCH /api/orders/[id]/assign-tracking`
+
+**Auth:** 401 sin sesión · 403 para roles que no sean `admin`
+
+**Body:**
+```json
+{ "tracking_number": "9001234" }
+```
+
+**Validaciones (en orden):**
+1. User autenticado → 401
+2. Rol admin → 403
+3. `tracking_number` no vacío → 400
+4. Orden existe → 404
+5. `confirmation_status = 'confirmed'` → 422
+6. `tracking_number IS NULL` en DB → 422
+7. Guía no duplicada en otra orden → 422
+
+**Update:**
+- `tracking_number` = valor del body
+- `normalized_status` = `'in_transit'` (entra a Q1 del cron en el próximo ciclo)
+
+**Response exitosa:**
+```json
+{ "success": true, "order": { "id", "tracking_number", "normalized_status" } }
+```
+
+**Log:**
+```
+[assign-tracking] orderId=UUID tracking=9001234 assignedBy=UUID
+```
+
+### UI en `/confirmados`
+
+- **Input:** campo de texto con placeholder "# Guía EFI". Ancho fijo `w-24`. Acepta Enter para disparar la asignación.
+- **Botón "Asignar":** deshabilitado si el input está vacío o mientras está asignando. Muestra `Spinner` + "Asignando…" durante la llamada.
+- **Error inline:** mensaje en rojo bajo el input si el endpoint devuelve error (ej: guía duplicada, pedido ya tiene guía).
+- **On success:** la fila desaparece del listado (`setOrders(prev => prev.filter(o => o.id !== orderId))`). La orden ya tiene tracking_number y no pertenece a "sin guía".
+
+### Flujo completo post-fix
+
+```
+Shopify webhook → orders (tracking_number=NULL, confirmed)
+    ↓
+Aparece en /confirmados
+    ↓
+Admin ingresa # guía EFI → PATCH /api/orders/[id]/assign-tracking
+    ↓
+DB: tracking_number='9001234', normalized_status='in_transit'
+    ↓
+Fila desaparece de /confirmados
+    ↓
+Cron Q1 la procesa en el próximo ciclo → sincroniza con EFI
+```
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como **admin** → `/confirmados`
+3. Elegir un pedido confirmado sin guía
+4. Escribir el número de guía EFI en el input de la columna "Acción"
+5. Presionar Enter o click "Asignar"
+6. Verificar: la fila desaparece del listado
+7. Verificar en Supabase: `orders` → `tracking_number` guardado, `normalized_status = 'in_transit'`
+8. Esperar el próximo ciclo del cron → la guía debe aparecer en `/despachados` con estado actualizado de EFI
+
+**Prueba de validaciones:**
+- Input vacío → botón deshabilitado, no llama al endpoint
+- Guía ya asignada a otro pedido → error inline: "La guía X ya está asignada al pedido #YYYY"
+- Usuario no-admin → 403 (error inline visible)
+
+---
+
 ## DIAGNÓSTICO GUÍA POR GUÍA: compare-efi-guides (2026-05-16)
 
 ### Problema actual
