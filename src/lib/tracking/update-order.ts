@@ -4,6 +4,11 @@ import { parseEFIDate } from './parse-efi-date'
 
 const EFI_BASE = 'https://effi.com.co/tracking/index'
 
+// Estados que nunca deben ser sobreescritos por 'unknown'.
+// Si EFI devuelve una página pero el parser no puede extraer el estado
+// (HTML cambiado, timeout parcial, etc.), conservamos el estado anterior.
+const REAL_STATUSES = new Set(['in_transit', 'en_reparto', 'novedad', 'delivered', 'returned'])
+
 export interface UpdateResult {
   success:             boolean
   orderId:             string
@@ -11,6 +16,8 @@ export interface UpdateResult {
   normalized_status?:  string
   delivery_attempts?:  number
   last_attempt_reason: string | null
+  skipped?:            boolean
+  skip_reason?:        string
 }
 
 function isValidEstadoText(s: string | null): boolean {
@@ -24,6 +31,7 @@ export async function updateOrderTracking(
   trackingNumber: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   supabase:       SupabaseClient<any>,
+  currentNormalizedStatus?: string,
 ): Promise<UpdateResult> {
   const efiUrl = `${EFI_BASE}/${encodeURIComponent(trackingNumber.trim())}`
 
@@ -40,18 +48,55 @@ export async function updateOrderTracking(
       signal: AbortSignal.timeout(10_000),
     })
     if (!res.ok) {
+      console.warn(`[tracking] guia=${trackingNumber} EFI_HTTP_ERROR=${res.status}`)
       return { success: false, orderId, error: `EFI HTTP ${res.status}`, last_attempt_reason: null }
     }
     html = await res.text()
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Error de red'
+    console.warn(`[tracking] guia=${trackingNumber} FETCH_ERROR="${msg}"`)
     return { success: false, orderId, error: `No se pudo consultar EFI: ${msg}`, last_attempt_reason: null }
   }
 
   const tracking = parseEFITracking(html, trackingNumber)
+
   if (!tracking.encontrado) {
+    console.warn(`[tracking] guia=${trackingNumber} NOT_FOUND selector=${tracking._debug.status_selector_used} body_sample="${tracking._debug.raw_text_sample.slice(0, 80)}"`)
     return { success: false, orderId, error: 'Guía no encontrada en EFI', last_attempt_reason: null }
   }
+
+  // Guardia anti-unknown-overwrite:
+  // Si el parser no pudo extraer un estado real (devuelve 'unknown') pero la orden
+  // ya tiene un estado válido en DB, NO sobreescribimos — probablemente el HTML
+  // de EFI cambió temporalmente o el parser no reconoció el label.
+  if (tracking.normalized_status === 'unknown' && REAL_STATUSES.has(currentNormalizedStatus ?? '')) {
+    console.warn(
+      `[tracking] guia=${trackingNumber} SKIP_UNKNOWN_OVERWRITE ` +
+      `current_db="${currentNormalizedStatus}" ` +
+      `raw_text_sample="${tracking._debug.raw_text_sample.slice(0, 120)}"`,
+    )
+    // Solo actualizamos last_tracking_update para no perder el timestamp de consulta
+    await supabase
+      .from('orders')
+      .update({ last_tracking_update: new Date().toISOString() })
+      .eq('id', orderId)
+    return {
+      success:     true,
+      orderId,
+      skipped:     true,
+      skip_reason: 'unknown_would_overwrite_valid_status',
+      normalized_status: currentNormalizedStatus,
+      last_attempt_reason: null,
+    }
+  }
+
+  console.log(
+    `[tracking] guia=${trackingNumber} ` +
+    `raw="${tracking.estado_actual ?? 'null'}" ` +
+    `normalized="${tracking.normalized_status}" ` +
+    `attempts=${tracking.attempts} ` +
+    `selector=${tracking._debug.status_selector_used}`,
+  )
 
   const updates: Record<string, unknown> = {
     normalized_status:    tracking.normalized_status,
@@ -92,6 +137,7 @@ export async function updateOrderTracking(
     .eq('id', orderId)
 
   if (updateErr) {
+    console.error(`[tracking] guia=${trackingNumber} DB_UPDATE_ERROR="${updateErr.message}"`)
     return { success: false, orderId, error: updateErr.message, last_attempt_reason: null }
   }
 

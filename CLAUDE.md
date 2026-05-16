@@ -4,6 +4,125 @@
 
 ---
 
+## DIAGNÓSTICO Y FIXES: Pipeline EFI → App (2026-05-15)
+
+### Problema reportado
+
+EFI mostraba 24 en tránsito / 28 en reparto / 81 novedad pero la app mostraba números incorrectos. Algunas guías nunca actualizaban. El pipeline se desincronizaba.
+
+### Causas raíz identificadas
+
+#### 1. CRÍTICO — Timeout del cron (causa principal)
+
+`maxDuration = 60` era insuficiente. Con 160 órdenes (80+80), BATCH_SIZE=5, BATCH_DELAY=1500ms, cada ejecución solo procesaba ~40-65 órdenes antes de que Vercel matara la función. Las órdenes al final del lote nunca se sincronizaban. Órdenes recién-actualizadas (ordenadas al final por `last_tracking_update ASC`) quedaban perpetuamente sin procesar.
+
+**Fix:** `maxDuration` subido a `300` (Vercel Pro soporta hasta 300s). BATCH_DELAY reducido a 1000ms.
+
+#### 2. CRÍTICO — `en_reparto` sin prioridad propia
+
+El cron tenía 2 queries: Q1 (in_transit, máx 80) y Q2 (todos los demás, máx 80). Con 80+ órdenes en `novedad`, las órdenes `en_reparto` eran desplazadas por novedades en Q2 y nunca procesadas.
+
+**Fix:** Tres queries separadas: Q1 in_transit (60), Q2 en_reparto (50), Q3 otros (50). `en_reparto` tiene prioridad garantizada.
+
+#### 3. CRÍTICO — `unknown` sobreescribía estado válido
+
+Si EFI cambiaba HTML y el parser no extraía el estado, `normalized_status` se sobreescribía a `'unknown'`, destruyendo el estado anterior (una orden `en_reparto` quedaba como `unknown` y desaparecía de la pantalla de reparto).
+
+**Fix:** Guard en `update-order.ts` — si nuevo status sería `unknown` pero el estado actual en DB es un estado real (`in_transit`, `en_reparto`, `novedad`, `delivered`, `returned`), se salta el update de status pero actualiza `last_tracking_update`.
+
+#### 4. DIAGNÓSTICO — Logging cero
+
+No había log de qué guía se procesó, qué devolvió EFI, qué se guardó en DB. Imposible depurar.
+
+**Fix:** Logs detallados en `update-order.ts`:
+- `[tracking] guia=X raw="..." normalized="..." attempts=N selector=...` (por guía actualizada)
+- `[tracking] guia=X SKIP_UNKNOWN_OVERWRITE current_db="..." body_sample="..."` (guard activado)
+- `[tracking] guia=X FETCH_ERROR="..."` / `EFI_HTTP_ERROR=N` (errores de red)
+- `[tracking] guia=X DB_UPDATE_ERROR="..."` (errores de DB)
+- `[efi-parser] guia=X UNKNOWN_STATUS ...` (parser no clasificó)
+- `[efi-parser] guia=X estado_global="..." ...` (override de anulación)
+- `[vercel-cron] queued: in_transit=N en_reparto=N others=N total=N`
+- `[vercel-cron] processed=N updated=N skipped=N failed=N`
+
+#### 5. Parser EFI — labels no cubiertos
+
+`mapNormalizedStatus` no incluía labels que EFI puede usar actualmente:
+- `en_reparto` faltantes: "Salió a entregar", "Asignado al mensajero", "Listo para entrega", "En distribución", "Con courier"
+- `novedad` faltantes: "No se pudo entregar", "Intento fallido", "Intento de entrega", "Cliente ausente", "Sin receptor", "Fallida"
+- `returned` faltantes: "cancelado"
+- `delivered` faltantes: "Exitosa"
+- `in_transit` faltantes: "En proceso", "Clasificado", "Procesado"
+
+**Fix:** Labels adicionales añadidos a `mapNormalizedStatus` en `efi-parser.ts`.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/tracking/update-order.ts` | Guard anti-unknown-overwrite. Logging por guía (raw, normalized, attempts). Acepta `currentNormalizedStatus` como parámetro opcional. |
+| `src/app/api/tracking/auto/route.ts` | `maxDuration` 60→300. BATCH_DELAY 1500→1000ms. Q2 separada en `en_reparto` (50) + others (50). Deduplicación de resultados. Log del resumen por run. Pasa `normalized_status` actual a `updateOrderTracking`. |
+| `src/lib/tracking/efi-parser.ts` | 15+ labels adicionales en `mapNormalizedStatus`. Log `UNKNOWN_STATUS` cuando parser no puede clasificar. |
+| `src/app/api/debug/tracking-health/route.ts` | **NUEVO.** Endpoint de salud del cron. Solo admin. |
+
+### Endpoint de diagnóstico: `GET /api/debug/tracking-health`
+
+Solo accesible para `admin`. Muestra:
+
+```typescript
+{
+  cron: {
+    health: 'healthy' | 'slow' | 'stalled',  // healthy=actualiz. última hora, slow=6h, stalled=>6h
+    updatedLastHour: number,
+    updatedLast6h: number,
+    totalActiveOrders: number,
+    maxPerCronRun: 160,
+    cappedCapacity: boolean,         // true si totalActive > 160
+    estimatedFullCycleMinutes: number
+  },
+  stale: {
+    stale24h: number,   // activas sin sync en +24h
+    stale48h: number,   // activas sin sync en +48h
+    stale72h: number    // activas sin sync en +72h
+  },
+  parser: {
+    nullRawStatus: number,    // EFI nunca respondió
+    unknownStatus: number,    // parser falló en clasificar
+    unknownSample: [...]      // guías con unknown (con tracking_number y body_sample)
+  },
+  byStatus: [{ status, count }],     // conteo por normalized_status
+  stuckSamples: {
+    in_transit_stuck48h: [...],
+    en_reparto_stuck48h: [...],
+    novedad_stuck48h: [...]
+  }
+}
+```
+
+### Nueva capacidad del cron (post-fix)
+
+| Recurso | Antes | Después |
+|---|---|---|
+| `maxDuration` | 60s | 300s |
+| BATCH_DELAY | 1500ms | 1000ms |
+| Órdenes por run | ~50-65 (timeout) | ~160-200 (completo) |
+| `en_reparto` en cada run | No garantizado | Garantizado (hasta 50) |
+| Tiempo estimado para 160 órdenes | Timeout (60s) | ~130-200s (dentro de 300s) |
+
+### Estrategia de diagnóstico para futuros problemas
+
+1. Revisar `GET /api/debug/tracking-health` — muestra salud del cron, stale counts, unknown counts
+2. Si `cron.health='stalled'` → verificar que Vercel Cron esté activo y CRON_SECRET esté en env vars
+3. Si `parser.unknownStatus > 0` → revisar `parser.unknownSample` para ver body_sample y comparar con EFI real
+4. Si `stale48h > 0` → revisar `stuckSamples` para ver qué guías están atascadas
+5. Revisar logs Vercel para `[tracking] guia=X SKIP_UNKNOWN_OVERWRITE` — indica que el parser no está reconociendo el HTML de EFI
+6. Si `cappedCapacity=true` → considerar reducir límites de batch o aumentar frecuencia del cron
+
+### EFI URL
+
+`https://effi.com.co/tracking/index/{tracking_number}` (con doble 'f' en effi). Verificar si EFI cambia dominio.
+
+---
+
 ## FASE 5 — Módulo Devoluciones + Supervisor IA Operativo (2026-05-10)
 
 ### Qué se hizo

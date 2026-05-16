@@ -57,6 +57,7 @@ export function mapNormalizedStatus(estado: string): string {
     s.includes('regresado') ||
     s.includes('a origen')  ||  // "entregada a origen", "dev. entregada a origen"
     s.includes('cancelada') ||  // "cancelada por transportadora"
+    s.includes('cancelado') ||
     s.includes('anulad')        // "anulada" — guía anulada globalmente en EFI
   ) return 'returned'
 
@@ -64,27 +65,44 @@ export function mapNormalizedStatus(estado: string): string {
     s.includes('entregado')          ||
     s.includes('entregada')          ||
     s.includes('entrega exitosa')    ||
-    s.includes('entrega completada')
+    s.includes('entrega completada') ||
+    s.includes('exitosa')
   ) return 'delivered'
 
   if (
-    s.includes('novedad')           ||
-    s.includes('ausente')           ||
-    s.includes('rechazado')         ||
-    s.includes('rehusado')          ||
-    s.includes('zona peligrosa')    ||
-    s.includes('no encontrad')      ||   // no encontrado / no encontrada
-    s.includes('direccion incorrect')    // dirección/direccion incorrecta (sin tilde post-normalize)
+    s.includes('novedad')            ||
+    s.includes('ausente')            ||
+    s.includes('rechazado')          ||
+    s.includes('rehusado')           ||
+    s.includes('zona peligrosa')     ||
+    s.includes('no encontrad')       ||   // no encontrado / no encontrada
+    s.includes('no se pudo entregar')||
+    s.includes('intento fallido')    ||
+    s.includes('intento de entrega') ||   // "Intento de entrega fallido"
+    s.includes('direccion incorrect') ||  // dirección/direccion incorrecta (sin tilde post-normalize)
+    s.includes('domicilio incorrecto')||
+    s.includes('cliente ausente')    ||
+    s.includes('no habia nadie')     ||
+    s.includes('no habia persona')   ||
+    s.includes('sin receptor')       ||
+    s.includes('fallida')                 // "Entrega fallida"
   ) return 'novedad'
 
   if (
-    s.includes('reparto')      ||
-    s.includes('en ruta')      ||
-    s.includes('mensajero')    ||
-    s.includes('despacho')     ||
-    s.includes('en camino')    ||
-    s.includes('en entrega')   ||
-    s.includes('para entrega')    // "Para entrega hoy", "Salió para entrega"
+    s.includes('reparto')         ||
+    s.includes('en ruta')         ||
+    s.includes('mensajero')       ||
+    s.includes('despacho')        ||
+    s.includes('en camino')       ||
+    s.includes('en entrega')      ||
+    s.includes('para entrega')    ||  // "Para entrega hoy", "Salió para entrega"
+    s.includes('a entregar')      ||  // "Salió a entregar"
+    s.includes('asignado a')      ||  // "Asignado al mensajero"
+    s.includes('listo para')      ||  // "Listo para entrega"
+    s.includes('con el mensajero')||
+    s.includes('en distribucion') ||  // "En distribución"
+    s.includes('distribucion')    ||
+    s.includes('courier')            // "Con courier", "Enviado al courier"
   ) return 'en_reparto'
 
   if (
@@ -92,7 +110,11 @@ export function mapNormalizedStatus(estado: string): string {
     s.includes('transporte')  ||
     s.includes('bodega')      ||
     s.includes('recibido')    ||
-    s.includes('generada')        // "generada" — guía creada/generada por el courier
+    s.includes('generada')    ||  // "generada" — guía creada/generada por el courier
+    s.includes('en proceso')  ||  // "En proceso de envío"
+    s.includes('procesado')   ||
+    s.includes('clasificado') ||  // "Clasificado en bodega"
+    s.includes('en camara')       // "En cámara de distribución"
   ) return 'in_transit'
 
   if (
@@ -481,6 +503,19 @@ export function parseEFITracking(html: string, guia: string): TrackingResult {
     console.log(
       `[efi-parser] guia=${guia} estado_global="${result.estado_global}" ` +
       `estado_actual="${result.estado_actual}" normalized="${result.normalized_status}"`,
+    )
+  }
+
+  // Alerta cuando el parser no pudo clasificar el estado — indica posible cambio en EFI
+  if (result.normalized_status === 'unknown') {
+    console.warn(
+      `[efi-parser] guia=${guia} UNKNOWN_STATUS ` +
+      `selector=${result._debug.status_selector_used} ` +
+      `estado_actual="${result.estado_actual ?? 'null'}" ` +
+      `estado_global="${result.estado_global ?? 'null'}" ` +
+      `historial_estados=${result.historial_estados.length} ` +
+      `historial_novedades=${result.historial_novedades.length} ` +
+      `body_sample="${bodyText.slice(0, 200)}"`,
     )
   }
 

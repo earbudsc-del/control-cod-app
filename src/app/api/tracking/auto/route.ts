@@ -3,14 +3,15 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { updateOrderTracking } from '@/lib/tracking/update-order'
 import { createTaskIfNotExists, resolveAutoTasks } from '@/lib/tasks/auto-tasks'
 
-// Vercel Cron: máximo 60 s por ejecución (requiere plan Pro)
-export const maxDuration = 60
+// Vercel Pro permite hasta 300 s para serverless functions.
+// Con 300 s podemos procesar ~200 órdenes cómodamente a 1-3 s por fetch EFI.
+export const maxDuration = 300
 
 const FINAL_STATUSES = ['delivered', 'returned', 'cancelled']
 const BATCH_SIZE     = 5
-const BATCH_DELAY_MS = 1_500
+const BATCH_DELAY_MS = 1_000
 
-// Campos mínimos necesarios para el loop de tracking
+// Campos mínimos — incluimos normalized_status para el guard anti-unknown-overwrite
 const SELECT = 'id, tracking_number, normalized_status, last_tracking_update, store_id'
 
 type SB = Awaited<ReturnType<typeof createServiceClient>>
@@ -21,86 +22,124 @@ function sleep(ms: number) {
 
 // ── Lógica de tracking compartida entre GET (Vercel Cron) y POST (script local) ──
 //
-// Estrategia de dos queries:
-//   1. Hasta 80 pedidos in_transit (prioridad — son los que necesitan reclasificación)
-//   2. Hasta 80 pedidos en otros estados no finalizados (en_reparto, novedad, pending…)
+// Estrategia de tres queries (prioridades):
+//   1. Hasta 60 pedidos in_transit      — reclasificación más crítica
+//   2. Hasta 50 pedidos en_reparto      — reparto activo: necesita sync frecuente
+//   3. Hasta 50 pedidos en otros estados no finalizados (novedad, pending, unknown…)
 //
-// Esto garantiza que las guías en tránsito siempre se re-sincronizan, incluso
-// cuando hay >200 pedidos no finalizados en total (en ese caso, con una sola query
-// de 200 algunos in_transit quedaban fuera del lote).
+// Esto garantiza que guías en reparto no sean desplazadas por novedades cuando
+// hay muchos pedidos en espera, y que in_transit siempre tenga prioridad máxima.
 
 async function runTracking(supabase: SB, logPrefix: string): Promise<NextResponse> {
-  const [transitRes, otherRes] = await Promise.all([
+  const [transitRes, repartoRes, otherRes] = await Promise.all([
     supabase
       .from('orders')
       .select(SELECT)
       .not('tracking_number', 'is', null)
       .eq('normalized_status', 'in_transit')
       .order('last_tracking_update', { ascending: true, nullsFirst: true })
-      .limit(80),
+      .limit(60),
     supabase
       .from('orders')
       .select(SELECT)
       .not('tracking_number', 'is', null)
-      .not('normalized_status', 'in', `(in_transit,${FINAL_STATUSES.join(',')})`)
+      .eq('normalized_status', 'en_reparto')
       .order('last_tracking_update', { ascending: true, nullsFirst: true })
-      .limit(80),
+      .limit(50),
+    supabase
+      .from('orders')
+      .select(SELECT)
+      .not('tracking_number', 'is', null)
+      .not('normalized_status', 'in', `(in_transit,en_reparto,${FINAL_STATUSES.join(',')})`)
+      .order('last_tracking_update', { ascending: true, nullsFirst: true })
+      .limit(50),
   ])
 
   if (transitRes.error) {
     console.error(`${logPrefix} error fetching in_transit orders:`, transitRes.error)
-    return NextResponse.json({ error: 'Error al obtener pedidos' }, { status: 500 })
+    return NextResponse.json({ error: 'Error al obtener pedidos in_transit' }, { status: 500 })
+  }
+  if (repartoRes.error) {
+    console.error(`${logPrefix} error fetching en_reparto orders:`, repartoRes.error)
+    return NextResponse.json({ error: 'Error al obtener pedidos en_reparto' }, { status: 500 })
   }
   if (otherRes.error) {
     console.error(`${logPrefix} error fetching other orders:`, otherRes.error)
-    return NextResponse.json({ error: 'Error al obtener pedidos' }, { status: 500 })
+    return NextResponse.json({ error: 'Error al obtener pedidos otros' }, { status: 500 })
   }
 
-  const orders = [...(transitRes.data ?? []), ...(otherRes.data ?? [])]
-  console.log(`${logPrefix} in_transit=${transitRes.data?.length ?? 0} other=${otherRes.data?.length ?? 0} total=${orders.length}`)
+  // Deduplicar: si un pedido aparece en más de un query (debería ser raro dado los filtros),
+  // conservamos solo la primera aparición.
+  const seen = new Set<string>()
+  const allOrders = [...(transitRes.data ?? []), ...(repartoRes.data ?? []), ...(otherRes.data ?? [])]
+    .filter(o => {
+      if (seen.has(o.id)) return false
+      seen.add(o.id)
+      return true
+    })
 
-  if (orders.length === 0) {
-    console.log(`${logPrefix} processed=0 updated=0 failed=0`)
-    return NextResponse.json({ processed: 0, updated: 0, failed: 0 })
+  console.log(
+    `${logPrefix} queued: ` +
+    `in_transit=${transitRes.data?.length ?? 0} ` +
+    `en_reparto=${repartoRes.data?.length ?? 0} ` +
+    `others=${otherRes.data?.length ?? 0} ` +
+    `total=${allOrders.length}`,
+  )
+
+  if (allOrders.length === 0) {
+    console.log(`${logPrefix} processed=0 updated=0 skipped=0 failed=0`)
+    return NextResponse.json({ processed: 0, updated: 0, skipped: 0, failed: 0 })
   }
 
   let updated = 0
+  let skipped = 0
   let failed  = 0
-  const errors: Array<{ orderId: string; error: string }> = []
+  const errors:   Array<{ trackingNumber: string; error: string }> = []
+  const skips:    Array<{ trackingNumber: string; reason: string }> = []
 
-  for (let i = 0; i < orders.length; i += BATCH_SIZE) {
-    const batch   = orders.slice(i, i + BATCH_SIZE)
+  for (let i = 0; i < allOrders.length; i += BATCH_SIZE) {
+    const batch   = allOrders.slice(i, i + BATCH_SIZE)
     const results = await Promise.all(
-      batch.map(o => updateOrderTracking(o.id, o.tracking_number, supabase))
+      batch.map(o =>
+        updateOrderTracking(o.id, o.tracking_number, supabase, o.normalized_status),
+      ),
     )
 
     const taskPromises: Promise<void>[] = []
 
     for (const [j, r] of results.entries()) {
+      const order = batch[j]
       if (r.success) {
-        updated++
-        const order = batch[j]
-        if (r.normalized_status !== undefined && order.store_id) {
-          taskPromises.push(
-            resolveAutoTasks(supabase, {
-              orderId:          r.orderId,
-              storeId:          order.store_id,
-              normalizedStatus: r.normalized_status,
-            }).catch(e => console.error('[auto-tasks]', r.orderId, e)),
-          )
+        if (r.skipped) {
+          skipped++
+          if (r.skip_reason) skips.push({ trackingNumber: order.tracking_number, reason: r.skip_reason })
+        } else {
+          updated++
+          if (r.normalized_status !== undefined && order.store_id) {
+            taskPromises.push(
+              resolveAutoTasks(supabase, {
+                orderId:          r.orderId,
+                storeId:          order.store_id,
+                normalizedStatus: r.normalized_status,
+              }).catch(e => console.error('[auto-tasks]', r.orderId, e)),
+            )
+          }
         }
       } else {
         failed++
-        if (r.error) errors.push({ orderId: r.orderId, error: r.error })
+        if (r.error) errors.push({ trackingNumber: order.tracking_number, error: r.error })
       }
     }
 
     await Promise.all(taskPromises)
 
-    if (i + BATCH_SIZE < orders.length) await sleep(BATCH_DELAY_MS)
+    if (i + BATCH_SIZE < allOrders.length) await sleep(BATCH_DELAY_MS)
   }
 
-  console.log(`${logPrefix} processed=${orders.length} updated=${updated} failed=${failed}`)
+  console.log(
+    `${logPrefix} processed=${allOrders.length} ` +
+    `updated=${updated} skipped=${skipped} failed=${failed}`,
+  )
 
   // Confirmation tasks para pedidos importados por Excel (no crean task en import)
   const { data: pendingOrders } = await supabase
@@ -124,10 +163,12 @@ async function runTracking(supabase: SB, logPrefix: string): Promise<NextRespons
   }
 
   return NextResponse.json({
-    processed: orders.length,
+    processed: allOrders.length,
     updated,
+    skipped,
     failed,
     ...(errors.length > 0 && { errors: errors.slice(0, 20) }),
+    ...(skips.length  > 0 && { skips:  skips.slice(0, 20) }),
   })
 }
 
