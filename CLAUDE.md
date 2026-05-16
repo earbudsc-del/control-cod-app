@@ -4,7 +4,112 @@
 
 ---
 
-## DIAGNÓSTICO Y FIXES: Pipeline EFI → App (2026-05-15)
+## DIAGNÓSTICO Y FIXES: Pipeline EFI → App — Ronda 2 (2026-05-15)
+
+### Problema reportado (ronda 2)
+
+Cron healthy (updatedLastHour=59), pero DB solo tiene 59 órdenes activas vs 133 en EFI (24 tránsito + 28 reparto + 81 novedad). El universo activo está incompleto. Shopify muestra 29 pedidos hoy pero app tiene 14.
+
+### Causas identificadas — ronda 2
+
+#### Causa A: Órdenes con tracking_number = null (excluidas del cron)
+
+El cron tiene `.not('tracking_number', 'is', null)` en todas sus queries. Órdenes que llegaron por webhook de Shopify pero nunca recibieron su guía quedan en `normalized_status='pending'` y **nunca son procesadas por el cron aunque existan en DB**. El cron no puede actualizarlas porque no sabe la guía.
+
+**Fix:** `GET /api/debug/tracking-reconcile` muestra `withoutTracking` — cuántas hay y de qué source. Solución manual: correr `POST /api/admin/recover-shopify-orders` para el rango de fechas.
+
+#### Causa B: Órdenes en final status (returned/delivered) que deberían estar activas
+
+Una vez que el cron marca una orden como `returned` o `delivered`, **no vuelve nunca a re-sincronizarla**. Si el parser EFI malclasificó el estado (e.g., "Cancelada temporaria" → `returned`), la orden queda atrapada para siempre.
+
+**Fix:** `GET /api/debug/tracking-reconcile` muestra `suspectFinalizations` — returned/delivered recientes con raw_status activo. `POST /api/admin/reactivate-tracking` re-sincroniza estas órdenes forzando consulta a EFI sin el guard de status.
+
+#### Causa C: Órdenes completamente faltantes en DB (webhook fallando)
+
+Shopify tiene 29 órdenes hoy, app tiene 14. ~15 órdenes/día no están llegando a DB. Estas órdenes tienen tracking en EFI pero la app nunca las vio.
+
+**Fix:** `GET /api/debug/tracking-reconcile` incluye `today.shopify` — llama a Shopify Admin API y compara con DB. Lista exacta de `missing_order_names`. Solución: correr `POST /api/admin/recover-shopify-orders` con `{ "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }`.
+
+### Archivos creados/modificados — ronda 2
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/debug/tracking-reconcile/route.ts` | **NUEVO.** `GET /api/debug/tracking-reconcile`. Solo admin. Muestra universo completo: órdenes con tracking por status, sin tracking por source, final status sospechosos, comparativa vs Shopify Admin API hoy. |
+| `src/app/api/admin/reactivate-tracking/route.ts` | **NUEVO.** `POST /api/admin/reactivate-tracking`. Solo admin. Re-sincroniza órdenes en final status con EFI. Sin body → auto-detecta returned recientes con raw_status activo. Con `{ order_ids: [...] }` → IDs específicos. |
+| `src/app/api/orders/[id]/tracking/route.ts` | **MODIFICADO.** Pasa `normalized_status` actual a `updateOrderTracking` para activar el guard anti-unknown-overwrite. |
+
+### Endpoint de reconciliación: `GET /api/debug/tracking-reconcile`
+
+```typescript
+{
+  withTracking: {
+    total: number,
+    active: number,           // no delivered/returned/cancelled
+    inFinalStatus: number,
+    byStatus: [{ status, count }]
+  },
+  withoutTracking: {
+    total: number,            // en DB pero cron no puede procesar
+    pendingOnly: number,
+    bySource: { shopify_webhook: N, csv_import: N },
+    sample: [...]
+  },
+  finalStatus: {
+    returned: N, delivered: N, cancelled: N
+  },
+  suspectFinalizations: {
+    returned_with_active_raw: N,
+    delivered_with_active_raw: N,
+    returned_sample: [...],     // órdenes returned con raw activo → posible error del parser
+    delivered_sample: [...]
+  },
+  unknownWithTracking: { count: N, sample: [...] },
+  today: {
+    db_webhook: N,
+    db_csv: N,
+    shopify: {
+      shopify_orders_today: N,
+      missing_from_db: N,
+      missing_order_names: ['#8634', ...]
+    }
+  }
+}
+```
+
+### Endpoint de reactivación: `POST /api/admin/reactivate-tracking`
+
+```bash
+# Auto-detectar returned sospechosos (últimos 7 días con raw_status activo)
+POST /api/admin/reactivate-tracking
+{}
+
+# IDs específicos
+POST /api/admin/reactivate-tracking
+{ "order_ids": ["uuid-1", "uuid-2"] }
+```
+
+Respuesta:
+```typescript
+{
+  processed: N,
+  reactivated: N,   // normalized_status cambió
+  failed: N,
+  results: [{ id, tracking_number, old_status, new_status, success }]
+}
+```
+
+### Flujo de diagnóstico recomendado
+
+1. `GET /api/debug/tracking-reconcile` → ver breakdown completo
+2. Si `withoutTracking.total > 0` → `POST /api/admin/recover-shopify-orders` con el rango de fechas
+3. Si `suspectFinalizations.returned_with_active_raw > 0` → `POST /api/admin/reactivate-tracking`
+4. Si `today.shopify.missing_from_db > 0` → correr recover-shopify-orders para hoy: `{ "from": "2026-05-15", "to": "2026-05-15" }`
+5. Si `unknownWithTracking.count > 0` → revisar logs Vercel con `[efi-parser] guia=X UNKNOWN_STATUS`
+6. Esperar 2-3 ciclos del cron y re-verificar con `GET /api/debug/tracking-health`
+
+---
+
+## DIAGNÓSTICO Y FIXES: Pipeline EFI → App — Ronda 1 (2026-05-15)
 
 ### Problema reportado
 

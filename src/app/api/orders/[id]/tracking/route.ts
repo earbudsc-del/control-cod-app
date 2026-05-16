@@ -15,7 +15,7 @@ export async function POST(
 
     const { data: order, error: orderErr } = await supabase
       .from('orders')
-      .select('id, tracking_number')
+      .select('id, tracking_number, normalized_status')
       .eq('id', id)
       .single()
 
@@ -26,7 +26,12 @@ export async function POST(
       return NextResponse.json({ error: 'El pedido no tiene número de guía' }, { status: 400 })
     }
 
-    const result = await updateOrderTracking(id, order.tracking_number, supabase)
+    const result = await updateOrderTracking(
+      id,
+      order.tracking_number,
+      supabase,
+      order.normalized_status,
+    )
 
     if (!result.success) {
       const status = result.error?.includes('no encontrada') ? 404 : 502
