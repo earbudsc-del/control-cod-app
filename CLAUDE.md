@@ -4,6 +4,85 @@
 
 ---
 
+## DIAGNÓSTICO: Universo activo del cron — Ronda 3 (2026-05-16)
+
+### Problema
+
+EFI muestra ~133 guías activas (24 tránsito + 28 reparto + 81 novedad). La app solo detecta 59 activas. `tracking-reconcile` mostró `withTracking.total=614, active=59, returned=282, delivered=273`. `reactivate-tracking` devolvió `processed=0, reactivated=0`. `missing_from_db=0` (solo para hoy).
+
+### Conclusión principal: el bottleneck NO está en la query del cron
+
+La query `runTracking()` en `/api/tracking/auto/route.ts` es estructuralmente correcta:
+
+| Query | Filtro | Cap/run |
+|---|---|---|
+| Q1 | `normalized_status = 'in_transit'` + `tracking_number IS NOT NULL` | 60 |
+| Q2 | `normalized_status = 'en_reparto'` + `tracking_number IS NOT NULL` | 50 |
+| Q3 | `normalized_status NOT IN (in_transit, en_reparto, delivered, returned, cancelled)` + `tracking_number IS NOT NULL` | 50 |
+
+Con solo 59 activas (< 160 cap total), el cron procesa **todas las 59 en cada run**. No hay exclusión accidental por límites, fecha, source, ni OR/AND incorrecto.
+
+### Causa raíz del gap (59 vs 133)
+
+El gap proviene de órdenes que **ya no son "activas" en la DB** pero EFI sí las considera activas. Tres escenarios en orden de probabilidad:
+
+#### Escenario A (más probable): Finalizaciones que EFI reactivó — DB congelada
+
+- 282 órdenes están en `returned` y 273 en `delivered` — excluidas permanentemente del cron.
+- Si el courier reagendó una entrega o EFI corrigió un error, esas órdenes vuelven a "En reparto" en EFI.
+- El cron NUNCA vuelve a sincronizar estados finales.
+- **Bug crítico del `reactivate-tracking`:** busca raw_status en DB con patrones activos. Pero `raw_status` está CONGELADO al momento del último sync. Si EFI dijo "Devuelto" cuando el cron las procesó, raw_status es "Devuelto" — nunca será detectado como sospechoso aunque EFI ahora diga "En reparto".
+
+#### Escenario B: Órdenes históricas faltantes en DB
+
+- El reconcile original solo compara HOY vs Shopify. No cubre los 30 días anteriores.
+- Si el webhook falló durante semanas antes del fix, esas órdenes están en EFI pero nunca llegaron a DB.
+
+#### Escenario C: Ventana de reactivate-tracking demasiado estrecha
+
+- `reactivate-tracking` usa `.gte('last_tracking_update', 7_days_ago)`. Órdenes finalizadas hace 8-30+ días no se revisan.
+
+### Nuevo endpoint de diagnóstico
+
+`GET /api/debug/active-universe` — creado 2026-05-16. Solo admin. Solo lectura.
+
+Responde:
+1. Simulación exacta de Q1/Q2/Q3 del cron con totales reales y muestra
+2. Breakdown completo por normalized_status (cuántas incluidas/excluidas del cron por cada condición)
+3. Distribución temporal de returned/delivered: cuántas se finalizaron en últimos 2/7/14/30/60 días
+4. Muestra de returned/delivered últimos 30 días con raw_status visible (para inspección manual)
+5. Reconcile Shopify extendido a 30 días (no solo hoy)
+6. Diagnóstico resumido con causas priorizadas y pasos siguientes
+
+```bash
+GET /api/debug/active-universe
+# Auth: sesión admin requerida
+```
+
+### Flujo de diagnóstico recomendado (Ronda 3)
+
+1. **Correr `GET /api/debug/active-universe`** → ver `cronSimulation` (confirma que el cron procesa todo lo activo) y `finalStatusTimeline` (distribución temporal de finalizados)
+2. **Si `shopify30dReconcile.gap > 0`** → Escenario B confirmado → correr `POST /api/admin/recover-shopify-orders` con `{ "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }` para el rango afectado
+3. **Tomar 10-20 tracking_numbers de `recentFinalSample.returned_last_30d`** → consultar manualmente en `effi.com.co/tracking/index/{guia}` → si EFI muestra estado activo, Escenario A confirmado
+4. **Si Escenario A confirmado** → safe fix: ampliar ventana de `reactivate-tracking` a 21-30 días (no 7) + cambiar la lógica para re-consultar EFI en lugar de depender de `raw_status` en DB
+5. **Si `finalStatusTimeline.returned.last_14d >> last_7d`** → Escenario C confirmado → ampliar ventana en reactivate-tracking
+
+### Bug crítico identificado (pendiente de fix)
+
+**`raw_status` en DB está congelado.** `reactivate-tracking` busca patrones activos en `raw_status` de DB, pero ese campo no cambia si el cron nunca re-sincroniza la orden (porque está en final status). La única forma de detectar si EFI reactivó una orden es **re-consultarla en EFI**, no confiar en raw_status de DB.
+
+El fix propuesto (pendiente de confirmación con diagnóstico):
+- En `reactivate-tracking` modo automático: en vez de filtrar por `raw_status`, tomar una muestra de returned/delivered recientes y re-consultarlos en EFI directamente
+- Ampliar ventana de 7 a 21 días
+
+### Archivos creados — ronda 3
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/debug/active-universe/route.ts` | **NUEVO.** `GET /api/debug/active-universe`. Solo admin. Diagnóstico completo del universo activo del cron: simula Q1/Q2/Q3, breakdown por status, distribución temporal de finalizados, muestras de raw_status, reconcile Shopify 30d. |
+
+---
+
 ## DIAGNÓSTICO Y FIXES: Pipeline EFI → App — Ronda 2 (2026-05-15)
 
 ### Problema reportado (ronda 2)
