@@ -77,6 +77,162 @@ Para las guías ya activas en EFI sin match en DB, se puede crear un endpoint de
 - [x] Paso 1: endpoint assign-tracking — **IMPLEMENTADO** (2026-05-16)
 - [x] Paso 2: UI en /confirmados — **IMPLEMENTADO** (2026-05-16)
 - [x] Paso 3: reconciliación retroactiva — **IMPLEMENTADO** (2026-05-17)
+- [x] Paso 4: importación masiva EFI (CSV) — **IMPLEMENTADO** (2026-05-17)
+
+---
+
+## FIX: Importación masiva de guías EFI — Paso 4 (2026-05-17)
+
+### Problema
+
+Con 70+ novedades y 30+ pedidos en reparto activos en EFI que no están vinculados en la app, la reconciliación manual guía por guía (endpoint individual) no escala. Se necesita un flujo automático que procese el export CSV de EFI en bulk.
+
+### Qué se hizo
+
+Se implementaron dos piezas:
+
+1. **Endpoint `POST /api/admin/reconcile-efi-import`** — Reconciliación masiva DB-only (sin llamadas EFI). Acepta hasta 200 items, procesa secuencialmente, devuelve summary completo.
+2. **UI en `/efi-import`** — Página admin con flujo de 4 pasos: subir/pegar CSV → previsualización → procesamiento → resultados detallados.
+
+### Archivos creados/modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/admin/reconcile-efi-import/route.ts` | **NUEVO.** `POST /api/admin/reconcile-efi-import`. Solo admin. DB-only (sin EFI calls). Hasta 200 items. Auto force_pending_match cuando hay exactamente 1 candidato pending con teléfono exacto. |
+| `src/app/(app)/efi-import/page.tsx` | **NUEVO.** UI admin de 4 pasos: drag-drop o textarea CSV → auto-detect columnas → preview → procesar → resultados con tablas colapsables. |
+| `src/components/layout/sidebar.tsx` | **MODIFICADO.** Añade `{ href: '/efi-import', label: 'Importar guías EFI', icon: Link2 }` en nav admin. |
+
+### Endpoint `POST /api/admin/reconcile-efi-import`
+
+**Auth:** 401 sin sesión · 403 para no-admin
+
+**Body:**
+```json
+{
+  "items": [
+    { "tracking_number": "9000555918", "phone": "8098344999", "estado": "Novedad" },
+    { "tracking_number": "9000555920", "phone": "8091234567", "estado": "En reparto" }
+  ]
+}
+```
+
+**Campos por item:**
+- `tracking_number` — obligatorio
+- `phone` — obligatorio
+- `estado` — opcional (texto EFI: "Novedad", "En reparto", "En tránsito", etc.)
+- `nombre` — opcional (para contexto, no se guarda en DB)
+- `ciudad` — opcional (para contexto, no se guarda en DB)
+
+**Límites:** máx 200 items por request · `maxDuration = 60`
+
+**Lógica por item:**
+1. Check si tracking ya está en otra orden → `already_assigned`
+2. Normalizar teléfono (mismo algoritmo que reconcile-guide)
+3. Buscar `confirmed + tracking=NULL + teléfono exacto`:
+   - 1 match → asignar → `assigned`
+   - 2+ matches → `multiple_candidates`
+4. Si 0 confirmed: buscar `pending + tracking=NULL + teléfono exacto`:
+   - 1 match → asignar + `confirmation_status='confirmed'` → `assigned_pending_forced`
+   - 2+ matches → `multiple_candidates`
+5. Si 0 en todo → `no_match`
+
+**Qué actualiza en DB cuando asigna:**
+- `tracking_number`
+- `normalized_status` (mapeado del campo `estado`)
+- `raw_status` = texto del estado (si se proveyó)
+- `last_tracking_update` = now
+- `last_novedad_at` = now (si estado es novedad)
+- `confirmation_status = 'confirmed'` (solo en `assigned_pending_forced`)
+
+**Mapeo estado EFI → normalized_status:**
+| Texto EFI | normalized_status |
+|---|---|
+| En reparto | en_reparto |
+| Novedad | novedad |
+| En tránsito / Tránsito | in_transit |
+| Generada | in_transit |
+| Entregada | delivered |
+| Devolución / Devuelta | returned |
+| (cualquier otro) | in_transit |
+
+**Response:**
+```json
+{
+  "summary": {
+    "total": 10,
+    "assigned": 6,
+    "assigned_pending_forced": 2,
+    "already_assigned": 1,
+    "multiple_candidates": 0,
+    "no_match": 1,
+    "errors": 0
+  },
+  "auto_assigned": [...],
+  "needs_review": [...],
+  "already_assigned": [...],
+  "errors": [...]
+}
+```
+
+### CSV auto-detección de columnas
+
+El parser de la UI detecta estos nombres de columna automáticamente (case-insensitive, sin acentos):
+
+| Campo | Nombres reconocidos |
+|---|---|
+| Guía (tracking) | Guía, No. Guia, # Guia, Tracking, Numero de Guia, Numero Guia |
+| Teléfono | Teléfono, Celular, Movil, Tel, Phone, Cel, Contacto |
+| Estado | Estado, Estatus, Status, Novedad, Ultima Novedad |
+| Nombre | Nombre, Cliente, Destinatario, Nombre del Cliente, Receptor |
+| Ciudad | Ciudad, City, Municipio |
+
+**Delimitadores soportados:** `;` (punto y coma), `,` (coma), `TAB` — auto-detectado por la frecuencia en la primera línea.
+
+### Seguridad / qué NO hace
+
+- No llama a EFI (datos vienen del export)
+- No crea registros nuevos en orders
+- No modifica campos financieros
+- No toca órdenes que ya tienen tracking
+- Solo admin puede acceder
+- Duplicado protegido: verifica `tracking_number` libre antes de asignar
+
+### Cómo usar en producción
+
+1. En EFI dashboard → exportar guías activas (Novedad + En reparto + Tránsito)
+2. Copiar el CSV (con encabezados)
+3. Ir a `/efi-import` en la app
+4. Arrastrar el archivo CSV o pegar el contenido en el textarea
+5. Revisar la previsualización (columnas detectadas, filas válidas)
+6. Click "Procesar N guías"
+7. Revisar resultados:
+   - **Asignados** → ya están en DB con tracking y el cron los procesa en el próximo ciclo
+   - **Requieren revisión** → múltiples candidatos o sin match → usar `/api/admin/reconcile-efi-guide` individual para los casos complejos
+   - **Ya asignados** → ya estaban vinculados, ignorar
+8. Opcional: re-importar el mismo CSV tras corregir teléfonos en los `no_match`
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como admin → sidebar → "Importar guías EFI"
+3. Pegar un CSV de prueba con 2-3 guías
+4. Verificar previsualización: columnas detectadas correctamente
+5. Click "Procesar" → verificar summary
+6. En Supabase: confirmar que las órdenes asignadas tienen `tracking_number` y `normalized_status` correctos
+7. Esperar próximo ciclo del cron → órdenes deben aparecer en `/despachados`, `/novedad`, `/reparto` según estado
+
+**Prueba con curl:**
+```bash
+curl -X POST http://localhost:3000/api/admin/reconcile-efi-import \
+  -H "Content-Type: application/json" \
+  -H "Cookie: [sesión admin]" \
+  -d '{
+    "items": [
+      { "tracking_number": "9000555918", "phone": "8098344999", "estado": "Novedad" },
+      { "tracking_number": "9000555920", "phone": "8091234567", "estado": "En reparto" }
+    ]
+  }'
+```
 
 ---
 

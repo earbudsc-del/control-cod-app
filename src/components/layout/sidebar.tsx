@@ -8,7 +8,7 @@ import {
   LayoutDashboard, Package, Upload, BarChart2,
   Settings, LogOut, Truck, Bike, AlertCircle, ClipboardList,
   ListTodo, TrendingUp, Box, CheckCircle2, X, ShoppingCart, Brain,
-  RotateCcw,
+  RotateCcw, Link2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
@@ -39,6 +39,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/carritos-abandonados',   label: 'Carritos abandonados', icon: ShoppingCart,    alert: null     },
     { href: '/orders',                 label: 'Pedidos',              icon: Package,         alert: null     },
     { href: '/imports',                label: 'Importar',             icon: Upload,          alert: null     },
+    { href: '/efi-import',             label: 'Importar guías EFI',   icon: Link2,           alert: null     },
     { href: '/performance',            label: 'Rendimiento',          icon: BarChart2,       alert: null     },
     { href: '/settings',               label: 'Configuración',        icon: Settings,        alert: null     },
   ],
