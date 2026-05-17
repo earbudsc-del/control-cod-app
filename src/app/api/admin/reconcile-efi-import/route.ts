@@ -3,9 +3,9 @@ import { NextResponse }      from 'next/server'
 import { normalizePhone }    from '@/lib/admin/reconcile-guide'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-export const maxDuration = 60  // DB-only, no EFI calls
+export const maxDuration = 300  // DB-only, no EFI calls — chunk loop dentro del límite
 
-const IMPORT_MAX = 200
+const IMPORT_MAX = 500
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

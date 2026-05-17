@@ -78,6 +78,38 @@ Para las guías ya activas en EFI sin match en DB, se puede crear un endpoint de
 - [x] Paso 2: UI en /confirmados — **IMPLEMENTADO** (2026-05-16)
 - [x] Paso 3: reconciliación retroactiva — **IMPLEMENTADO** (2026-05-17)
 - [x] Paso 4: importación masiva EFI (CSV) — **IMPLEMENTADO** (2026-05-17)
+- [x] Paso 5: límite de importación aumentado a 500 guías — **IMPLEMENTADO** (2026-05-17)
+
+---
+
+## FIX: Límite de importación aumentado a 500 guías (2026-05-17)
+
+### Problema
+
+El límite anterior de 200 guías bloqueaba la importación del archivo real de producción con 285 filas.
+
+### Qué se hizo
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/admin/reconcile-efi-import/route.ts` | `IMPORT_MAX` 200 → 500. `maxDuration` 60 → 300. Sin cambios en lógica. |
+| `src/app/(app)/efi-import/page.tsx` | Texto "Máximo 200 guías" → "Máximo 500 guías". Paso processing: agrega timer de segundos transcurridos + barra pulsante. Importa `useEffect` para el timer. |
+
+### Rendimiento
+
+El procesamiento es secuencial DB-only. 500 items × ~3 queries × ~5ms/query ≈ 7–30 segundos. El `maxDuration=300` da margen de sobra. No se necesitan chunks ni streaming.
+
+### UX
+
+El timer muestra segundos transcurridos y una estimación (`~Ns`) si el lote supera las 100 guías, evitando la sensación de congelado durante lotes grandes.
+
+### Cómo probar
+
+1. Preparar CSV con 285+ filas (el archivo real de producción)
+2. `/efi-import` → arrastrar o pegar
+3. Verificar que la previsualización muestra 285+ filas válidas (sin error de límite)
+4. Click "Procesar N guías" → el timer sube cada segundo
+5. Verificar el summary al finalizar
 
 ---
 
@@ -91,14 +123,14 @@ Con 70+ novedades y 30+ pedidos en reparto activos en EFI que no están vinculad
 
 Se implementaron dos piezas:
 
-1. **Endpoint `POST /api/admin/reconcile-efi-import`** — Reconciliación masiva DB-only (sin llamadas EFI). Acepta hasta 200 items, procesa secuencialmente, devuelve summary completo.
+1. **Endpoint `POST /api/admin/reconcile-efi-import`** — Reconciliación masiva DB-only (sin llamadas EFI). Acepta hasta 500 items, procesa secuencialmente, devuelve summary completo.
 2. **UI en `/efi-import`** — Página admin con flujo de 4 pasos: subir/pegar CSV → previsualización → procesamiento → resultados detallados.
 
 ### Archivos creados/modificados
 
 | Archivo | Cambio |
 |---|---|
-| `src/app/api/admin/reconcile-efi-import/route.ts` | **NUEVO.** `POST /api/admin/reconcile-efi-import`. Solo admin. DB-only (sin EFI calls). Hasta 200 items. Auto force_pending_match cuando hay exactamente 1 candidato pending con teléfono exacto. |
+| `src/app/api/admin/reconcile-efi-import/route.ts` | **NUEVO.** `POST /api/admin/reconcile-efi-import`. Solo admin. DB-only (sin EFI calls). Hasta 500 items. Auto force_pending_match cuando hay exactamente 1 candidato pending con teléfono exacto. |
 | `src/app/(app)/efi-import/page.tsx` | **NUEVO.** UI admin de 4 pasos: drag-drop o textarea CSV → auto-detect columnas → preview → procesar → resultados con tablas colapsables. |
 | `src/components/layout/sidebar.tsx` | **MODIFICADO.** Añade `{ href: '/efi-import', label: 'Importar guías EFI', icon: Link2 }` en nav admin. |
 
@@ -123,7 +155,7 @@ Se implementaron dos piezas:
 - `nombre` — opcional (para contexto, no se guarda en DB)
 - `ciudad` — opcional (para contexto, no se guarda en DB)
 
-**Límites:** máx 200 items por request · `maxDuration = 60`
+**Límites:** máx 500 items por request · `maxDuration = 300`
 
 **Lógica por item:**
 1. Check si tracking ya está en otra orden → `already_assigned`

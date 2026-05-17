@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import {
   Upload, CheckCircle2, AlertTriangle, X,
   ChevronDown, ChevronUp, Link2, FileText,
@@ -298,6 +298,21 @@ export default function EfiImportPage() {
     already_assigned: false,
     errors:           true,
   })
+  const [processingElapsed, setProcessingElapsed] = useState(0)
+  const processingStartRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (step !== 'processing') {
+      processingStartRef.current = null
+      setProcessingElapsed(0)
+      return
+    }
+    processingStartRef.current = Date.now()
+    const interval = setInterval(() => {
+      setProcessingElapsed(Math.floor((Date.now() - (processingStartRef.current ?? Date.now())) / 1000))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [step])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -510,7 +525,7 @@ export default function EfiImportPage() {
               <p>• <strong>Obligatorias:</strong> guía (<code>tracking_number</code> / <code>Guía</code>) y teléfono (<code>phone</code> / <code>Teléfono</code>)</p>
               <p>• <strong>Opcionales:</strong> estado (<code>status</code>), nombre (<code>customer_name</code>), ciudad (<code>city</code>)</p>
               <p>• Delimitador auto-detectado: TAB, punto y coma, coma, o espacios múltiples</p>
-              <p>• Máximo 200 guías por importación</p>
+              <p>• Máximo 500 guías por importación</p>
             </div>
           </div>
         </div>
@@ -629,7 +644,14 @@ export default function EfiImportPage() {
         <div className="bg-white rounded-xl border border-gray-200 p-16 text-center">
           <Spinner className="w-12 h-12 text-orange-500 mx-auto mb-4" />
           <p className="text-gray-700 font-semibold text-lg mb-1">Reconciliando {validRows.length} guías…</p>
-          <p className="text-gray-500 text-sm">Buscando coincidencias en DB — sin llamadas a EFI</p>
+          <p className="text-gray-500 text-sm mb-3">Buscando coincidencias en DB — sin llamadas a EFI</p>
+          <p className="text-orange-400 text-xs font-mono tabular-nums">
+            {processingElapsed}s transcurridos
+            {validRows.length > 100 ? ` · estimado ~${Math.ceil(validRows.length / 50)}s` : ''}
+          </p>
+          <div className="mt-4 mx-auto w-48 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-full bg-orange-400 rounded-full animate-pulse w-full" />
+          </div>
         </div>
       )}
 
