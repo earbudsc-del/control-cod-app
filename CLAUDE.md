@@ -182,7 +182,7 @@ Guías activas en EFI que fueron creadas antes del fix de asignación no tienen 
 
 | Archivo | Cambio |
 |---|---|
-| `src/lib/admin/reconcile-guide.ts` | **NUEVO.** Lógica compartida: `normalizePhone()`, `reconcileEFIGuide()`. Consulta EFI en tiempo real, busca orden por teléfono normalizado, asigna tracking + estado EFI con todos los campos. |
+| `src/lib/admin/reconcile-guide.ts` | **NUEVO (actualizado 2026-05-17).** Lógica compartida: `normalizePhone()`, `reconcileEFIGuide()`. Consulta EFI en tiempo real, busca orden por teléfono normalizado, asigna tracking + estado EFI con todos los campos. Cuando `no_match`: devuelve `near_candidates` con diagnóstico extendido (2 queries paralelas). |
 | `src/app/api/admin/reconcile-efi-guide/route.ts` | **NUEVO.** `POST /api/admin/reconcile-efi-guide`. Solo admin. Wraps `reconcileEFIGuide()` para un solo item. |
 | `src/app/api/admin/reconcile-efi-guides-batch/route.ts` | **NUEVO.** `POST /api/admin/reconcile-efi-guides-batch`. Solo admin. Procesa hasta 20 items con 700ms de pausa entre EFI calls. `maxDuration=300`. |
 
@@ -210,11 +210,23 @@ Guías activas en EFI que fueron creadas antes del fix de asignación no tienen 
 | `outcome` | HTTP | Descripción |
 |---|---|---|
 | `assigned` | 200 | Match único → tracking asignado, estado EFI aplicado |
-| `multiple_candidates` | 200 | 2+ órdenes con ese teléfono → requiere revisión manual |
-| `no_match` | 200 | Ninguna orden confirmada sin guía con ese teléfono |
+| `multiple_candidates` | 200 | 2+ órdenes confirmadas sin tracking con ese teléfono → requiere revisión manual |
+| `no_match` | 200 | 0 matches exactos — incluye `near_candidates` para diagnóstico |
 | `efi_not_found` | 200 | EFI no conoce la guía |
 | `efi_error` | 502 | Fallo de red o HTTP al consultar EFI |
 | `already_assigned` | 422 | La guía ya está en otra orden |
+
+**`near_candidates` (solo cuando `no_match`):**
+
+Dos queries paralelas de diagnóstico para entender por qué no hubo match exacto:
+
+| `match_reason` | Qué significa |
+|---|---|
+| `phone_exact_any_status` | Teléfono exacto coincide, pero la orden no está `confirmed` o ya tiene tracking |
+| `phone_partial_7dig` | Los últimos 7 dígitos coinciden (posible formato diferente en DB) |
+| `confirmed_recent_30d` | Orden `confirmed + tracking NULL` de los últimos 30 días (cualquier teléfono) |
+
+Todos incluyen: `order_number`, `customer_name`, `customer_phone`, `confirmation_status`, `normalized_status`, `tracking_number`, `created_at`, `match_reason`.
 
 **Cuando `outcome='assigned'`, actualiza en DB:**
 - `tracking_number`

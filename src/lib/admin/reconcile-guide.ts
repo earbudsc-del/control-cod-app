@@ -25,6 +25,24 @@ export interface OrderCandidate {
   last_confirmation_attempt: string | null
 }
 
+// Candidatos de diagnóstico devueltos cuando outcome='no_match'
+export type NearMatchReason =
+  | 'phone_exact_any_status'   // teléfono exacto pero orden no confirmada o ya tiene tracking
+  | 'phone_partial_7dig'       // últimos 7 dígitos coinciden (posible formato distinto)
+  | 'confirmed_recent_30d'     // confirmada sin tracking en los últimos 30 días (cualquier teléfono)
+
+export interface NearCandidate {
+  id:                  string
+  order_number:        string | null
+  customer_name:       string | null
+  customer_phone:      string | null
+  confirmation_status: string | null
+  normalized_status:   string | null
+  tracking_number:     string | null
+  created_at:          string
+  match_reason:        NearMatchReason
+}
+
 export interface ReconcileResult {
   outcome:        ReconcileOutcome
   tracking_number: string
@@ -40,9 +58,10 @@ export interface ReconcileResult {
     customer_name:     string | null
     normalized_status: string
   }
-  candidates?:    OrderCandidate[]
-  existing_order?: { id: string; order_number: string | null }
-  error?:         string
+  candidates?:      OrderCandidate[]
+  near_candidates?: NearCandidate[]
+  existing_order?:  { id: string; order_number: string | null }
+  error?:           string
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -143,10 +162,70 @@ export async function reconcileEFIGuide({
   )
 
   if (matched.length === 0) {
+    // Diagnóstico extendido: buscar candidatos cercanos para entender por qué no hubo match.
+    // Dos queries paralelas:
+    //   A) Ese teléfono en cualquier orden (any status, any tracking)
+    //   B) Órdenes confirmed sin tracking de los últimos 30 días (cualquier teléfono)
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+
+    const [phoneAnyRes, confirmedRecentRes] = await Promise.all([
+      supabase
+        .from('orders')
+        .select('id, order_number, customer_name, customer_phone, confirmation_status, normalized_status, tracking_number, created_at')
+        .ilike('customer_phone', `%${last7}%`)
+        .order('created_at', { ascending: false })
+        .limit(10),
+      supabase
+        .from('orders')
+        .select('id, order_number, customer_name, customer_phone, confirmation_status, normalized_status, tracking_number, created_at')
+        .eq('confirmation_status', 'confirmed')
+        .is('tracking_number', null)
+        .gte('created_at', thirtyDaysAgo)
+        .order('created_at', { ascending: false })
+        .limit(10),
+    ])
+
+    const seen = new Set<string>()
+    const nearCandidates: NearCandidate[] = []
+
+    for (const o of (phoneAnyRes.data ?? [])) {
+      if (seen.has(o.id)) continue
+      seen.add(o.id)
+      const storedNorm = normalizePhone(o.customer_phone ?? '')
+      nearCandidates.push({
+        id:                  o.id,
+        order_number:        o.order_number,
+        customer_name:       o.customer_name,
+        customer_phone:      o.customer_phone,
+        confirmation_status: o.confirmation_status,
+        normalized_status:   o.normalized_status,
+        tracking_number:     o.tracking_number,
+        created_at:          o.created_at,
+        match_reason:        storedNorm === normalizedPhone ? 'phone_exact_any_status' : 'phone_partial_7dig',
+      })
+    }
+
+    for (const o of (confirmedRecentRes.data ?? [])) {
+      if (seen.has(o.id)) continue
+      seen.add(o.id)
+      nearCandidates.push({
+        id:                  o.id,
+        order_number:        o.order_number,
+        customer_name:       o.customer_name,
+        customer_phone:      o.customer_phone,
+        confirmation_status: o.confirmation_status,
+        normalized_status:   o.normalized_status,
+        tracking_number:     o.tracking_number,
+        created_at:          o.created_at,
+        match_reason:        'confirmed_recent_30d',
+      })
+    }
+
     return {
-      outcome:        'no_match',
+      outcome:         'no_match',
       tracking_number: tn,
       efi: { found: true, estado_actual: efiResult.estado_actual, normalized_status: efiResult.normalized_status, attempts: efiResult.attempts },
+      near_candidates: nearCandidates,
     }
   }
 
