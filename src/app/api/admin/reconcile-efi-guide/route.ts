@@ -20,21 +20,20 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json()
-    const tracking_number: string = (body.tracking_number ?? '').toString().trim()
-    const phone: string           = (body.phone           ?? '').toString().trim()
+    const tracking_number: string    = (body.tracking_number ?? '').toString().trim()
+    const phone: string              = (body.phone           ?? '').toString().trim()
+    const force_pending_match: boolean = body.force_pending_match === true
 
     if (!tracking_number) return NextResponse.json({ error: 'tracking_number es requerido' }, { status: 400 })
     if (!phone)           return NextResponse.json({ error: 'phone es requerido' }, { status: 400 })
 
-    const result = await reconcileEFIGuide({ tracking_number, phone, supabase })
+    const result = await reconcileEFIGuide({ tracking_number, phone, supabase, force_pending_match })
 
-    const httpStatus = result.outcome === 'assigned'
-      ? 200
-      : result.outcome === 'efi_error'
-        ? 502
-        : result.outcome === 'already_assigned'
-          ? 422
-          : 200 // no_match, multiple_candidates, efi_not_found devuelven 200 con outcome explicativo
+    const httpStatus = result.outcome === 'efi_error'
+      ? 502
+      : result.outcome === 'already_assigned'
+        ? 422
+        : 200 // assigned, assigned_pending_forced, no_match, multiple_candidates, efi_not_found → 200
 
     return NextResponse.json(result, { status: httpStatus })
   } catch (err) {

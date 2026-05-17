@@ -368,6 +368,92 @@ curl -X POST https://tu-app.vercel.app/api/admin/reconcile-efi-guides-batch \
 
 ---
 
+## FIX: force_pending_match en reconcile-efi-guide (2026-05-17)
+
+### Problema diagnosticado
+
+Al reconciliar `tracking: 9000555918` + `phone: 8098344999`, el reconciliador devolvió `no_match`.
+
+Los `near_candidates` mostraron la orden `#8838`:
+- Teléfono exacto: `8098344999`
+- `tracking_number = NULL`
+- `confirmation_status = pending` ← razón del no_match: el filtro principal solo busca `confirmed`
+
+La orden fue despachada en EFI por el equipo logístico sin haber sido confirmada en la app primero. En DB quedó en `pending` indefinidamente.
+
+### Qué se hizo
+
+Se añadió un mecanismo de asignación forzada seguro al endpoint `POST /api/admin/reconcile-efi-guide`.
+
+Cuando la reconciliación normal produce `no_match` y el body incluye `"force_pending_match": true`, el sistema busca en los `near_candidates` si existe exactamente 1 candidato que cumpla **todas** estas condiciones:
+- `match_reason = 'phone_exact_any_status'` (teléfono exacto, no solo 7 dígitos)
+- `confirmation_status = 'pending'`
+- `tracking_number = null`
+
+Si se cumple, procede con la asignación y devuelve `outcome: 'assigned_pending_forced'`.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/admin/reconcile-guide.ts` | **MODIFICADO.** Nuevo outcome `assigned_pending_forced` en `ReconcileOutcome`. Nuevo param opcional `force_pending_match?: boolean`. Bloque de asignación forzada dentro del path `matched.length === 0`, después de construir `nearCandidates`. |
+| `src/app/api/admin/reconcile-efi-guide/route.ts` | **MODIFICADO.** Lee `force_pending_match` del body (solo acepta `true` booleano estricto). Lo pasa a `reconcileEFIGuide()`. |
+| `src/app/api/admin/reconcile-efi-guides-batch/route.ts` | **MODIFICADO.** `summary` ahora incluye `assigned_pending_forced: 0`. `autoAssigned` incluye ambos outcomes (`assigned` y `assigned_pending_forced`). Log actualizado. |
+
+### Qué actualiza en DB cuando se dispara el fix
+
+- `tracking_number` = guía EFI
+- `normalized_status` = estado EFI real (fallback `in_transit` si EFI devuelve `unknown`)
+- `raw_status` = `estado_actual` de EFI
+- `confirmation_status` = `'confirmed'` ← cambia de `pending`
+- `delivery_attempts`, `last_tracking_update`
+- Campos opcionales si EFI los provee: `last_attempt_reason`, `tracking_history`, `tracking_novedades`, `shipment_created_at`, `last_novedad_at`, `status_since`
+
+### Protecciones — qué NO hace
+
+- No permite si hay 0 candidatos pending elegibles → cae al `no_match` normal
+- No permite si hay 2+ candidatos pending elegibles → cae al `no_match` normal (ambigüedad)
+- No permite si la guía ya está asignada a otra orden → `already_assigned` antes de llegar aquí
+- No permite si la orden ya tiene tracking → filtrado por `tracking_number = null`
+- No crea registros nuevos
+- No toca EFI
+- No toca campos financieros
+
+### Cómo usar
+
+```bash
+# Intento normal (sin force):
+curl -X POST https://tu-app.vercel.app/api/admin/reconcile-efi-guide \
+  -H "Content-Type: application/json" \
+  -H "Cookie: [sesión admin]" \
+  -d '{ "tracking_number": "9000555918", "phone": "8098344999" }'
+# → outcome: "no_match" + near_candidates muestra la orden #8838 con match_reason: "phone_exact_any_status"
+
+# Con force (solo si near_candidates muestra exactamente 1 candidato pending):
+curl -X POST https://tu-app.vercel.app/api/admin/reconcile-efi-guide \
+  -H "Content-Type: application/json" \
+  -H "Cookie: [sesión admin]" \
+  -d '{ "tracking_number": "9000555918", "phone": "8098344999", "force_pending_match": true }'
+# → outcome: "assigned_pending_forced"
+```
+
+**Flujo seguro recomendado:**
+1. Llamar sin `force_pending_match` primero → verificar que `near_candidates` muestra exactamente 1 candidato con `match_reason: "phone_exact_any_status"`, `confirmation_status: "pending"`, `tracking_number: null`
+2. Confirmar visualmente que la orden es la correcta (nombre del cliente, monto)
+3. Repetir la llamada con `"force_pending_match": true`
+4. Verificar `outcome: "assigned_pending_forced"` en la respuesta
+5. El cron la procesa en el próximo ciclo
+
+### Cómo probar
+
+1. En Supabase: encontrar una orden con `confirmation_status='pending'` y `tracking_number=NULL`
+2. Anotar su `customer_phone`
+3. `POST /api/admin/reconcile-efi-guide` sin force → debe devolver `no_match` con `near_candidates` incluyendo esa orden
+4. `POST /api/admin/reconcile-efi-guide` con `force_pending_match: true` → debe devolver `assigned_pending_forced`
+5. Verificar en Supabase: la orden ahora tiene `tracking_number`, `confirmation_status='confirmed'`, `normalized_status` actualizado
+
+---
+
 ## DIAGNÓSTICO GUÍA POR GUÍA: compare-efi-guides (2026-05-16)
 
 ### Problema actual

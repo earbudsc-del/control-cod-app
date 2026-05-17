@@ -67,13 +67,14 @@ export async function POST(request: Request) {
 
     const results: BatchResultItem[] = []
     const summary = {
-      total:              items.length,
-      assigned:           0,
-      multiple_candidates: 0,
-      no_match:           0,
-      efi_not_found:      0,
-      efi_error:          0,
-      already_assigned:   0,
+      total:                   items.length,
+      assigned:                0,
+      assigned_pending_forced: 0,
+      multiple_candidates:     0,
+      no_match:                0,
+      efi_not_found:           0,
+      efi_error:               0,
+      already_assigned:        0,
     }
 
     for (let i = 0; i < items.length; i++) {
@@ -91,15 +92,16 @@ export async function POST(request: Request) {
     }
 
     // Separar para que el admin sepa qué revisar manualmente
-    const autoAssigned      = results.filter(r => r.outcome === 'assigned')
+    const autoAssigned      = results.filter(r => r.outcome === 'assigned' || r.outcome === 'assigned_pending_forced')
     const needsReview       = results.filter(r => r.outcome === 'multiple_candidates' || r.outcome === 'no_match')
     const efiIssues         = results.filter(r => r.outcome === 'efi_not_found' || r.outcome === 'efi_error')
     const alreadyAssigned   = results.filter(r => r.outcome === 'already_assigned')
 
     console.log(
       `[reconcile-efi-batch] total=${items.length} ` +
-      `assigned=${summary.assigned} no_match=${summary.no_match} ` +
-      `multiple=${summary.multiple_candidates} efi_issues=${summary.efi_not_found + summary.efi_error}`,
+      `assigned=${summary.assigned} pending_forced=${summary.assigned_pending_forced} ` +
+      `no_match=${summary.no_match} multiple=${summary.multiple_candidates} ` +
+      `efi_issues=${summary.efi_not_found + summary.efi_error}`,
     )
 
     return NextResponse.json({

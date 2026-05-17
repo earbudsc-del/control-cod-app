@@ -7,12 +7,13 @@ const EFI_BASE = 'https://effi.com.co/tracking/index'
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type ReconcileOutcome =
-  | 'assigned'            // 1 match — tracking asignado, estado EFI aplicado
-  | 'multiple_candidates' // 2+ matches — admin debe elegir
-  | 'no_match'            // 0 matches con ese teléfono
-  | 'efi_not_found'       // EFI no conoce la guía
-  | 'efi_error'           // fallo de red o HTTP al consultar EFI
-  | 'already_assigned'    // la guía ya está en otra orden
+  | 'assigned'                // 1 match — tracking asignado, estado EFI aplicado
+  | 'assigned_pending_forced' // 1 candidato pending + force_pending_match=true — asignado y confirmado
+  | 'multiple_candidates'     // 2+ matches — admin debe elegir
+  | 'no_match'                // 0 matches con ese teléfono
+  | 'efi_not_found'           // EFI no conoce la guía
+  | 'efi_error'               // fallo de red o HTTP al consultar EFI
+  | 'already_assigned'        // la guía ya está en otra orden
 
 export interface OrderCandidate {
   id:                        string
@@ -84,11 +85,13 @@ export async function reconcileEFIGuide({
   tracking_number,
   phone,
   supabase,
+  force_pending_match = false,
 }: {
-  tracking_number: string
-  phone:           string
+  tracking_number:      string
+  phone:                string
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  supabase:        SupabaseClient<any>
+  supabase:             SupabaseClient<any>
+  force_pending_match?: boolean
 }): Promise<ReconcileResult> {
   const tn             = tracking_number.trim()
   const normalizedPhone = normalizePhone(phone)
@@ -220,6 +223,87 @@ export async function reconcileEFIGuide({
         match_reason:        'confirmed_recent_30d',
       })
     }
+
+  // force_pending_match: si hay exactamente 1 candidato con teléfono exacto,
+  // tracking_number=NULL y confirmation_status=pending, permitir asignación forzada.
+  if (force_pending_match) {
+    const pendingEligible = nearCandidates.filter(
+      c => c.match_reason === 'phone_exact_any_status'
+        && c.confirmation_status === 'pending'
+        && c.tracking_number === null,
+    )
+
+    if (pendingEligible.length === 1) {
+      const target           = pendingEligible[0]!
+      const effectiveStatus  = efiResult.normalized_status === 'unknown' ? 'in_transit' : efiResult.normalized_status
+
+      const updates: Record<string, unknown> = {
+        tracking_number:      tn,
+        normalized_status:    effectiveStatus,
+        confirmation_status:  'confirmed',
+        delivery_attempts:    efiResult.attempts,
+        last_tracking_update: new Date().toISOString(),
+      }
+
+      if (efiResult.estado_actual && isValidEstadoText(efiResult.estado_actual)) {
+        updates.raw_status = efiResult.estado_actual
+      }
+      if (efiResult.last_attempt_reason)             updates.last_attempt_reason = efiResult.last_attempt_reason
+      if (efiResult.historial_estados.length  > 0)   updates.tracking_history    = efiResult.historial_estados
+      if (efiResult.historial_novedades.length > 0)  updates.tracking_novedades  = efiResult.historial_novedades
+
+      const shipmentCreatedAt = parseEFIDate(efiResult.fecha_creacion)
+      if (shipmentCreatedAt) updates.shipment_created_at = shipmentCreatedAt
+
+      const lastNovedad   = efiResult.historial_novedades.at(-1)
+      const lastNovedadAt = parseEFIDate(lastNovedad?.fecha)
+      if (lastNovedadAt) updates.last_novedad_at = lastNovedadAt
+
+      const firstEstado = efiResult.historial_estados.at(0)
+      const statusSince = parseEFIDate(firstEstado?.fecha)
+      if (statusSince) updates.status_since = statusSince
+
+      const { error: updateErr } = await supabase
+        .from('orders')
+        .update(updates)
+        .eq('id', target.id)
+
+      if (updateErr) {
+        return { outcome: 'efi_error', tracking_number: tn, error: updateErr.message }
+      }
+
+      if (effectiveStatus === 'novedad' && !lastNovedadAt) {
+        await supabase
+          .from('orders')
+          .update({ last_novedad_at: new Date().toISOString() })
+          .eq('id', target.id)
+          .is('last_novedad_at', null)
+      }
+
+      console.log(
+        `[reconcile-efi] assigned_pending_forced tracking=${tn} orderId=${target.id} ` +
+        `orderNumber=${target.order_number} status=${effectiveStatus}`,
+      )
+
+      return {
+        outcome:        'assigned_pending_forced',
+        tracking_number: tn,
+        efi: {
+          found:             true,
+          estado_actual:     efiResult.estado_actual,
+          normalized_status: effectiveStatus,
+          attempts:          efiResult.attempts,
+        },
+        assigned_order: {
+          id:                target.id,
+          order_number:      target.order_number,
+          customer_name:     target.customer_name,
+          normalized_status: effectiveStatus,
+        },
+      }
+    }
+    // Si hay 0 o múltiples elegibles, caer al no_match normal
+  }
 
     return {
       outcome:         'no_match',
