@@ -10,11 +10,42 @@ import type { ImportResponse, ImportResult, ImportSummary } from '@/app/api/admi
 
 // ── CSV parsing ────────────────────────────────────────────────────────────────
 
-const TRACKING_KEYS = ['numero de guia', 'no. guia', 'no guia', '# guia', 'guia', 'guía', 'tracking', 'numero guia']
-const PHONE_KEYS    = ['telefono', 'teléfono', 'celular', 'movil', 'móvil', 'tel', 'phone', 'cel', 'contacto']
-const ESTADO_KEYS   = ['estado', 'estatus', 'status', 'novedad', 'ultima novedad', 'última novedad']
-const NOMBRE_KEYS   = ['nombre del cliente', 'nombre', 'cliente', 'destinatario', 'name', 'receptor']
-const CIUDAD_KEYS   = ['ciudad', 'city', 'municipio']
+// Nombres de columna reconocidos después de normalización.
+// norm() convierte: mayúsculas→minúsculas, acentos→sin acento, _→espacio, -→espacio.
+// Así "tracking_number", "Tracking-Number", "TRACKING NUMBER" → "tracking number" → match.
+
+const TRACKING_KEYS = [
+  // estándar programático (snake_case / kebab-case → normalizado a espacio)
+  'tracking number', 'tracking', 'guide number', 'guide',
+  // nombres EFI históricos
+  'numero de guia', 'no. guia', 'no guia', '# guia', 'guia', 'numero guia',
+]
+const PHONE_KEYS = [
+  // estándar programático
+  'phone', 'phone number',
+  // nombres históricos EFI / español
+  'telefono', 'celular', 'movil', 'tel', 'cel', 'contacto',
+]
+const ESTADO_KEYS = [
+  // estándar programático
+  'status',
+  // nombres históricos EFI / español
+  'estado', 'estatus', 'novedad', 'ultima novedad',
+]
+const NOMBRE_KEYS = [
+  // estándar programático
+  'customer name', 'customer', 'name',
+  // nombres históricos EFI / español
+  'nombre del cliente', 'nombre', 'cliente', 'destinatario', 'receptor',
+]
+const CIUDAD_KEYS = [
+  // estándar programático
+  'city',
+  // nombres históricos EFI / español
+  'ciudad', 'municipio',
+]
+
+const WHITESPACE_DELIM = 'WHITESPACE'
 
 interface ParsedRow {
   tracking_number: string
@@ -32,36 +63,62 @@ interface ColumnDetection {
   estadoCol:   string | null
   nombreCol:   string | null
   ciudadCol:   string | null
+  delimiter:   string
   allHeaders:  string[]
 }
 
+// Normaliza un header: minúsculas, sin acentos, _ y - → espacio, espacios colapsados.
 function norm(s: string): string {
-  return s.toLowerCase().trim().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ')
+  return s
+    .toLowerCase()
+    .trim()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')   // quita diacríticos
+    .replace(/[_-]/g, ' ')                       // guión_bajo y guión → espacio
+    .replace(/\s+/g, ' ')                        // colapsa espacios múltiples
+    .trim()
 }
 
-function detectDelimiter(line: string): string {
-  const tabs       = (line.match(/\t/g) ?? []).length
-  const semicolons = (line.match(/;/g) ?? []).length
-  const commas     = (line.match(/,/g) ?? []).length
-  if (tabs > semicolons && tabs > commas) return '\t'
-  if (semicolons > commas)               return ';'
-  return ','
+// Limpia comillas y espacios de un valor de celda CSV.
+function cleanCell(s: string): string {
+  return s.replace(/^["'\s]+|["'\s]+$/g, '')
 }
 
-function splitCsvLine(line: string, delimiter: string): string[] {
+// Divide una línea CSV respetando comillas. Soporta delimitador WHITESPACE (split por \s+).
+function splitLine(line: string, delimiter: string): string[] {
+  if (delimiter === WHITESPACE_DELIM) {
+    return line.trim().split(/\s+/)
+  }
   const result: string[] = []
   let current = ''
   let inQuote = false
   for (const ch of line) {
     if (ch === '"') { inQuote = !inQuote }
-    else if (ch === delimiter && !inQuote) { result.push(current.trim()); current = '' }
+    else if (ch === delimiter && !inQuote) { result.push(cleanCell(current)); current = '' }
     else { current += ch }
   }
-  result.push(current.trim())
+  result.push(cleanCell(current))
   return result
 }
 
-function detectColumns(headers: string[]): ColumnDetection {
+// Devuelve true si los tokens de la primera línea contienen columnas de guía Y teléfono.
+function headersMatch(tokens: string[]): boolean {
+  const normed = tokens.map(norm)
+  return normed.some(h => TRACKING_KEYS.includes(h)) && normed.some(h => PHONE_KEYS.includes(h))
+}
+
+// Detecta el delimitador correcto probando tab → ; → , → whitespace.
+// Elige el primero que produzca al menos las columnas requeridas (tracking + phone).
+function detectBestDelimiter(headerLine: string): string {
+  for (const delim of ['\t', ';', ',']) {
+    if (headerLine.includes(delim) && headersMatch(headerLine.split(delim))) return delim
+  }
+  // Último recurso: whitespace (múltiples espacios / pegado desde tabla)
+  if (headersMatch(headerLine.trim().split(/\s+/))) return WHITESPACE_DELIM
+  // Sin match — devuelve coma para que el error sea descriptivo
+  return ','
+}
+
+function detectColumns(headers: string[], delimiter: string): ColumnDetection {
   const find = (keys: string[]) => headers.find(h => keys.includes(norm(h))) ?? null
   return {
     trackingCol: find(TRACKING_KEYS),
@@ -69,28 +126,31 @@ function detectColumns(headers: string[]): ColumnDetection {
     estadoCol:   find(ESTADO_KEYS),
     nombreCol:   find(NOMBRE_KEYS),
     ciudadCol:   find(CIUDAD_KEYS),
+    delimiter,
     allHeaders:  headers,
   }
 }
 
 function parseCSVText(text: string): { rows: ParsedRow[]; detection: ColumnDetection; error?: string } {
+  const empty: ColumnDetection = { trackingCol: null, phoneCol: null, estadoCol: null, nombreCol: null, ciudadCol: null, delimiter: ',', allHeaders: [] }
+
   const lines = text.trim().split(/\r?\n/).filter(l => l.trim())
   if (lines.length < 2) {
-    return { rows: [], detection: { trackingCol: null, phoneCol: null, estadoCol: null, nombreCol: null, ciudadCol: null, allHeaders: [] }, error: 'El CSV debe tener al menos una fila de encabezados y una fila de datos.' }
+    return { rows: [], detection: empty, error: 'El CSV debe tener al menos una fila de encabezados y una fila de datos.' }
   }
 
-  const delimiter = detectDelimiter(lines[0]!)
-  const headers   = splitCsvLine(lines[0]!, delimiter)
-  const detection = detectColumns(headers)
+  const delimiter = detectBestDelimiter(lines[0]!)
+  const headers   = splitLine(lines[0]!, delimiter)
+  const detection = detectColumns(headers, delimiter)
 
   if (!detection.trackingCol || !detection.phoneCol) {
     const missing: string[] = []
-    if (!detection.trackingCol) missing.push(`guía (ej: "Guía", "No. Guia", "Tracking")`)
-    if (!detection.phoneCol)    missing.push(`teléfono (ej: "Teléfono", "Celular", "Tel")`)
+    if (!detection.trackingCol) missing.push('guía (tracking_number, Guía, No. Guia, Tracking)')
+    if (!detection.phoneCol)    missing.push('teléfono (phone, Teléfono, Celular, Tel)')
     return {
       rows: [],
       detection,
-      error: `No se detectaron columnas de ${missing.join(' y ')}. Encabezados encontrados: ${headers.join(', ')}`,
+      error: `No se detectaron columnas de ${missing.join(' y ')}. Encabezados encontrados: "${headers.join('", "')}"`,
     }
   }
 
@@ -103,24 +163,33 @@ function parseCSVText(text: string): { rows: ParsedRow[]; detection: ColumnDetec
   const rows: ParsedRow[] = []
 
   for (let i = 1; i < lines.length; i++) {
-    const cols    = splitCsvLine(lines[i]!, delimiter)
-    const tracking = (cols[trackingIdx] ?? '').replace(/^["']|["']$/g, '').trim()
-    const phone    = (cols[phoneIdx]    ?? '').replace(/^["']|["']$/g, '').trim()
+    const cols     = splitLine(lines[i]!, delimiter)
+    const tracking = cleanCell(cols[trackingIdx] ?? '')
+    const phone    = cleanCell(cols[phoneIdx]    ?? '')
 
     if (!tracking && !phone) continue // fila vacía
 
     rows.push({
       tracking_number: tracking,
       phone,
-      estado:          estadoIdx >= 0 ? (cols[estadoIdx] ?? '').replace(/^["']|["']$/g, '').trim() || undefined : undefined,
-      nombre:          nombreIdx >= 0 ? (cols[nombreIdx] ?? '').replace(/^["']|["']$/g, '').trim() || undefined : undefined,
-      ciudad:          ciudadIdx >= 0 ? (cols[ciudadIdx] ?? '').replace(/^["']|["']$/g, '').trim() || undefined : undefined,
-      _rowIndex:       i,
-      _parseError:     (!tracking || !phone) ? `Guía="${tracking}" o Teléfono="${phone}" vacío` : undefined,
+      estado: estadoIdx >= 0 ? cleanCell(cols[estadoIdx] ?? '') || undefined : undefined,
+      nombre: nombreIdx >= 0 ? cleanCell(cols[nombreIdx] ?? '') || undefined : undefined,
+      ciudad: ciudadIdx >= 0 ? cleanCell(cols[ciudadIdx] ?? '') || undefined : undefined,
+      _rowIndex:    i,
+      _parseError:  (!tracking || !phone) ? `guía="${tracking}" o teléfono="${phone}" vacío` : undefined,
     })
   }
 
   return { rows, detection }
+}
+
+// Describe el delimitador detectado en términos legibles para el UI
+function delimLabel(d: string): string {
+  if (d === '\t')            return 'TAB'
+  if (d === ';')             return 'punto y coma (;)'
+  if (d === ',')             return 'coma (,)'
+  if (d === WHITESPACE_DELIM) return 'espacios'
+  return d
 }
 
 // ── UI helpers ─────────────────────────────────────────────────────────────────
@@ -396,7 +465,7 @@ export default function EfiImportPage() {
             <textarea
               value={csvText}
               onChange={(e) => setCsvText(e.target.value)}
-              placeholder={`Guía;Teléfono;Estado;Destinatario;Ciudad\n9000555918;8098344999;Novedad;Juan Pérez;Santo Domingo\n9000555920;8091234567;En reparto;María García;Santiago`}
+              placeholder={`tracking_number,phone,status,customer_name,created_at\n9000555918,8098344999,Novedad,Juan Pérez,2026-05-10\n9000555920,8091234567,En reparto,María García,2026-05-11`}
               className="w-full h-36 text-xs font-mono border border-gray-200 rounded-lg p-3 resize-y focus:outline-none focus:ring-2 focus:ring-orange-300 placeholder:text-gray-300"
             />
             <button
@@ -416,9 +485,9 @@ export default function EfiImportPage() {
                 <p className="text-sm font-semibold text-red-800 mb-1">Error al parsear el CSV</p>
                 <p className="text-sm text-red-700">{parseError}</p>
                 <div className="mt-2 text-xs text-red-600 space-y-0.5">
-                  <p>Nombres reconocidos de columna <strong>guía</strong>: Guía, No. Guia, Tracking, # Guia</p>
-                  <p>Nombres reconocidos de columna <strong>teléfono</strong>: Teléfono, Celular, Tel, Movil, Phone</p>
-                  <p>Delimitadores soportados: <code>;</code> (punto y coma), <code>,</code> (coma), <code>TAB</code></p>
+                  <p>Columna <strong>guía</strong> reconocida como: <code>tracking_number</code>, <code>Guía</code>, <code>No. Guia</code>, <code>Tracking</code></p>
+                  <p>Columna <strong>teléfono</strong> reconocida como: <code>phone</code>, <code>Teléfono</code>, <code>Celular</code>, <code>Tel</code></p>
+                  <p>Delimitadores auto-detectados: <code>TAB</code>, <code>;</code>, <code>,</code>, espacios múltiples</p>
                 </div>
               </div>
             </div>
@@ -426,16 +495,21 @@ export default function EfiImportPage() {
 
           {/* Format guide */}
           <div className="bg-orange-50 border border-orange-100 rounded-xl p-4 text-sm text-orange-800">
-            <p className="font-semibold mb-2">Formato esperado (exportación EFI):</p>
-            <pre className="text-xs font-mono bg-orange-100/60 rounded p-2 overflow-x-auto">
-{`Guía;Teléfono;Estado;Destinatario;Ciudad
-9000555918;8098344999;Novedad;Juan Pérez;Santo Domingo
-9000555920;8091234567;En reparto;María García;Santiago`}
-            </pre>
+            <p className="font-semibold mb-2">Formatos de CSV aceptados:</p>
+            <div className="space-y-2">
+              <div>
+                <p className="text-xs text-orange-600 font-semibold mb-1">Estándar programático (snake_case):</p>
+                <pre className="text-xs font-mono bg-orange-100/60 rounded p-2 overflow-x-auto">{`tracking_number,phone,status,customer_name,created_at\n9000555918,8098344999,Novedad,Juan Pérez,2026-05-10\n9000555920,8091234567,En reparto,María García,2026-05-11`}</pre>
+              </div>
+              <div>
+                <p className="text-xs text-orange-600 font-semibold mb-1">Formato EFI histórico (punto y coma):</p>
+                <pre className="text-xs font-mono bg-orange-100/60 rounded p-2 overflow-x-auto">{`Guía;Teléfono;Estado;Destinatario\n9000555918;8098344999;Novedad;Juan Pérez\n9000555920;8091234567;En reparto;María García`}</pre>
+              </div>
+            </div>
             <div className="mt-3 text-xs text-orange-700 space-y-1">
-              <p>• <strong>Obligatorias:</strong> Guía y Teléfono</p>
-              <p>• <strong>Opcionales:</strong> Estado, Destinatario/Nombre, Ciudad</p>
-              <p>• El estado EFI se mapea automáticamente a normalized_status</p>
+              <p>• <strong>Obligatorias:</strong> guía (<code>tracking_number</code> / <code>Guía</code>) y teléfono (<code>phone</code> / <code>Teléfono</code>)</p>
+              <p>• <strong>Opcionales:</strong> estado (<code>status</code>), nombre (<code>customer_name</code>), ciudad (<code>city</code>)</p>
+              <p>• Delimitador auto-detectado: TAB, punto y coma, coma, o espacios múltiples</p>
               <p>• Máximo 200 guías por importación</p>
             </div>
           </div>
@@ -463,10 +537,11 @@ export default function EfiImportPage() {
             )}
             {detection && (
               <div className="bg-orange-50 rounded-xl border border-orange-200 p-4">
-                <p className="text-xs font-semibold text-orange-800 mb-1">Columnas detectadas</p>
+                <p className="text-xs font-semibold text-orange-800 mb-1">Detectado</p>
                 <p className="text-xs text-orange-700">Guía: <strong>{detection.trackingCol ?? '—'}</strong></p>
                 <p className="text-xs text-orange-700">Tel: <strong>{detection.phoneCol ?? '—'}</strong></p>
                 {detection.estadoCol && <p className="text-xs text-orange-700">Estado: <strong>{detection.estadoCol}</strong></p>}
+                <p className="text-xs text-orange-500 mt-1">Delim: {delimLabel(detection.delimiter)}</p>
               </div>
             )}
           </div>

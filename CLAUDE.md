@@ -174,19 +174,34 @@ Se implementaron dos piezas:
 }
 ```
 
-### CSV auto-detección de columnas
+### CSV auto-detección de columnas (actualizado 2026-05-17)
 
-El parser de la UI detecta estos nombres de columna automáticamente (case-insensitive, sin acentos):
+El parser normaliza cada header antes de comparar: minúsculas + sin acentos + `_` y `-` → espacio + espacios colapsados.
+Resultado: `tracking_number`, `Tracking-Number`, `TRACKING NUMBER` → `"tracking number"` → match.
 
-| Campo | Nombres reconocidos |
+| Campo | Nombres reconocidos (normalizados) |
 |---|---|
-| Guía (tracking) | Guía, No. Guia, # Guia, Tracking, Numero de Guia, Numero Guia |
-| Teléfono | Teléfono, Celular, Movil, Tel, Phone, Cel, Contacto |
-| Estado | Estado, Estatus, Status, Novedad, Ultima Novedad |
-| Nombre | Nombre, Cliente, Destinatario, Nombre del Cliente, Receptor |
-| Ciudad | Ciudad, City, Municipio |
+| Guía (tracking) | `tracking number` (de `tracking_number`), `tracking`, `guide number`, `guide`, `numero de guia`, `no. guia`, `# guia`, `guia`, `numero guia` |
+| Teléfono | `phone`, `phone number`, `telefono`, `celular`, `movil`, `tel`, `cel`, `contacto` |
+| Estado | `status`, `estado`, `estatus`, `novedad`, `ultima novedad` |
+| Nombre | `customer name` (de `customer_name`), `customer`, `name`, `nombre del cliente`, `nombre`, `cliente`, `destinatario`, `receptor` |
+| Ciudad | `city`, `ciudad`, `municipio` |
 
-**Delimitadores soportados:** `;` (punto y coma), `,` (coma), `TAB` — auto-detectado por la frecuencia en la primera línea.
+Columnas ignoradas sin error: `created_at`, `id`, `order`, `date`, `fecha`, etc.
+
+**Detección de delimitador** — prueba en orden, usa el primero que produzca columnas reconocidas:
+1. `TAB` — datos copiados desde Excel/tabla
+2. `;` — CSV europeo / EFI histórico
+3. `,` — CSV estándar
+4. `espacios múltiples` — datos pegados desde terminal o vista web EFI
+
+**Formatos aceptados (todos equivalentes):**
+```
+tracking_number,phone,status,customer_name,created_at      ← snake_case / coma
+Guía;Teléfono;Estado;Destinatario;Ciudad                   ← EFI histórico / punto y coma
+tracking_number[TAB]phone[TAB]status                       ← TAB (Excel)
+tracking_number  phone  status  customer_name              ← espacios múltiples
+```
 
 ### Seguridad / qué NO hace
 
