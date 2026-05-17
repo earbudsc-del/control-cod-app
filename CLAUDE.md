@@ -76,7 +76,7 @@ Para las guías ya activas en EFI sin match en DB, se puede crear un endpoint de
 
 - [x] Paso 1: endpoint assign-tracking — **IMPLEMENTADO** (2026-05-16)
 - [x] Paso 2: UI en /confirmados — **IMPLEMENTADO** (2026-05-16)
-- [ ] Paso 3: reconciliación retroactiva — **PENDIENTE**
+- [x] Paso 3: reconciliación retroactiva — **IMPLEMENTADO** (2026-05-17)
 
 ---
 
@@ -166,6 +166,193 @@ Cron Q1 la procesa en el próximo ciclo → sincroniza con EFI
 - Input vacío → botón deshabilitado, no llama al endpoint
 - Guía ya asignada a otro pedido → error inline: "La guía X ya está asignada al pedido #YYYY"
 - Usuario no-admin → 403 (error inline visible)
+
+---
+
+## FIX: Reconciliación retroactiva de guías EFI — Paso 3 (2026-05-17)
+
+### Qué se hizo
+
+Guías activas en EFI que fueron creadas antes del fix de asignación no tienen ningún registro en DB. Para vincularlas con las órdenes confirmadas existentes sin crear registros duplicados ni modificar datos financieros, se implementaron dos endpoints:
+
+1. **`POST /api/admin/reconcile-efi-guide`** — vincula una guía EFI individual a la orden correcta buscando por teléfono del cliente.
+2. **`POST /api/admin/reconcile-efi-guides-batch`** — procesa hasta 20 guías a la vez, auto-asigna los matches únicos y devuelve candidatos/errores para revisión manual.
+
+### Archivos creados
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/admin/reconcile-guide.ts` | **NUEVO.** Lógica compartida: `normalizePhone()`, `reconcileEFIGuide()`. Consulta EFI en tiempo real, busca orden por teléfono normalizado, asigna tracking + estado EFI con todos los campos. |
+| `src/app/api/admin/reconcile-efi-guide/route.ts` | **NUEVO.** `POST /api/admin/reconcile-efi-guide`. Solo admin. Wraps `reconcileEFIGuide()` para un solo item. |
+| `src/app/api/admin/reconcile-efi-guides-batch/route.ts` | **NUEVO.** `POST /api/admin/reconcile-efi-guides-batch`. Solo admin. Procesa hasta 20 items con 700ms de pausa entre EFI calls. `maxDuration=300`. |
+
+### Endpoint single: `POST /api/admin/reconcile-efi-guide`
+
+**Auth:** 401 sin sesión · 403 para no-admin
+
+**Body:**
+```json
+{
+  "tracking_number": "9000555913",
+  "phone": "809-555-1234"
+}
+```
+
+**Flujo interno:**
+1. Verificar que `tracking_number` no esté ya en otra orden → `already_assigned` (422)
+2. Consultar EFI en tiempo real → `efi_not_found` o `efi_error` si falla
+3. Normalizar teléfono (strips non-digits, elimina prefijo +1/1 de 11 dígitos)
+4. Query DB: `confirmation_status='confirmed'` + `tracking_number IS NULL` + `ilike customer_phone '%7digits%'`
+5. Match exacto por teléfono normalizado en JS
+
+**Outcomes posibles:**
+
+| `outcome` | HTTP | Descripción |
+|---|---|---|
+| `assigned` | 200 | Match único → tracking asignado, estado EFI aplicado |
+| `multiple_candidates` | 200 | 2+ órdenes con ese teléfono → requiere revisión manual |
+| `no_match` | 200 | Ninguna orden confirmada sin guía con ese teléfono |
+| `efi_not_found` | 200 | EFI no conoce la guía |
+| `efi_error` | 502 | Fallo de red o HTTP al consultar EFI |
+| `already_assigned` | 422 | La guía ya está en otra orden |
+
+**Cuando `outcome='assigned'`, actualiza en DB:**
+- `tracking_number`
+- `normalized_status` (del EFI real; fallback `'in_transit'` si EFI devuelve `unknown`)
+- `raw_status` (estado_actual de EFI)
+- `delivery_attempts`
+- `last_attempt_reason`
+- `last_tracking_update` = now
+- `tracking_history`, `tracking_novedades`, `shipment_created_at`, `last_novedad_at`, `status_since` (si EFI los provee)
+
+**Response ejemplo:**
+```json
+{
+  "outcome": "assigned",
+  "tracking_number": "9000555913",
+  "efi": {
+    "found": true,
+    "estado_actual": "En reparto",
+    "normalized_status": "en_reparto",
+    "attempts": 1
+  },
+  "assigned_order": {
+    "id": "uuid",
+    "order_number": "#8712",
+    "customer_name": "Juan Pérez",
+    "normalized_status": "en_reparto"
+  }
+}
+```
+
+**Response cuando `multiple_candidates`:**
+```json
+{
+  "outcome": "multiple_candidates",
+  "tracking_number": "9000555913",
+  "efi": { ... },
+  "candidates": [
+    { "id": "uuid1", "order_number": "#8700", "customer_name": "...", "customer_phone": "...", "city": "...", "created_at": "..." },
+    { "id": "uuid2", "order_number": "#8712", ... }
+  ]
+}
+```
+
+### Endpoint batch: `POST /api/admin/reconcile-efi-guides-batch`
+
+**Auth:** 401 sin sesión · 403 para no-admin · `maxDuration = 300`
+
+**Body:**
+```json
+{
+  "items": [
+    { "tracking_number": "9000555913", "phone": "8095551234" },
+    { "tracking_number": "9000555914", "phone": "8295551234" }
+  ]
+}
+```
+
+**Límites:**
+- Máx 20 items por request
+- 700ms de pausa entre EFI calls (anti rate-limit)
+- Procesamiento secuencial (no paralelo)
+
+**Response:**
+```json
+{
+  "summary": {
+    "total": 5,
+    "assigned": 3,
+    "multiple_candidates": 1,
+    "no_match": 0,
+    "efi_not_found": 1,
+    "efi_error": 0,
+    "already_assigned": 0
+  },
+  "auto_assigned": [...],
+  "needs_review": [...],
+  "efi_issues": [...],
+  "already_assigned": [...],
+  "all_results": [...]
+}
+```
+
+- `auto_assigned`: se asignaron automáticamente (outcome=assigned)
+- `needs_review`: múltiples candidatos o no-match → requieren acción manual
+- `efi_issues`: EFI no encontró la guía o falló la consulta
+- `already_assigned`: la guía ya estaba vinculada a otra orden
+
+### Normalización de teléfono
+
+```
+"809-555-1234"  → "8095551234"
+"+1 809 555 1234" → "8095551234"
+"18095551234"   → "8095551234"
+"8095551234"    → "8095551234"
+```
+
+Comparación: últimos 7 dígitos en `ilike` DB + exacto en JS post-normalization. Tolerante a cualquier formato de almacenamiento en DB.
+
+### Cómo usar en producción
+
+**Flujo recomendado para reconciliar guías antiguas:**
+
+1. Abrir EFI dashboard → copiar guías activas (En Reparto / Novedad / En Tránsito)
+2. Para cada guía, buscar el cliente y su teléfono en EFI (campo Destinatario)
+3. Ejecutar `POST /api/admin/reconcile-efi-guide` por guía
+
+```bash
+curl -X POST https://tu-app.vercel.app/api/admin/reconcile-efi-guide \
+  -H "Content-Type: application/json" \
+  -H "Cookie: [sesión admin]" \
+  -d '{ "tracking_number": "9000555913", "phone": "8095551234" }'
+```
+
+4. Si `outcome=assigned` → listo, el cron la procesa en el próximo ciclo
+5. Si `outcome=multiple_candidates` → revisar `candidates` y usar `/api/orders/[id]/assign-tracking` con el ID correcto
+6. Si `outcome=no_match` → la orden puede estar bajo otro teléfono, cancelada, o fuera del sistema
+
+**Batch para varios a la vez:**
+
+```bash
+curl -X POST https://tu-app.vercel.app/api/admin/reconcile-efi-guides-batch \
+  -H "Content-Type: application/json" \
+  -H "Cookie: [sesión admin]" \
+  -d '{
+    "items": [
+      { "tracking_number": "9000555913", "phone": "8095551234" },
+      { "tracking_number": "9000555914", "phone": "8295551234" }
+    ]
+  }'
+```
+
+### Seguridad / qué NO toca
+
+- No crea registros nuevos en orders — solo vincula existentes
+- No modifica campos financieros (`cod_amount`, estados de pago)
+- No toca órdenes no-confirmadas ni órdenes ya con tracking
+- Solo admin puede ejecutarlo
+- Duplicado protegido: verifica `tracking_number` libre antes de asignar
 
 ---
 
