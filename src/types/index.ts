@@ -4,6 +4,7 @@ export type UserRole =
   | 'confirmation_agent'
   | 'novelty_agent'
   | 'delivery_agent'
+  | 'santo_domingo_delivery_agent'
   | 'agent'
   | 'viewer'
 export type ConfirmationStatus     = 'pending' | 'confirmed' | 'unreachable' | 'cancelled'

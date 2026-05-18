@@ -2740,6 +2740,7 @@ No se toma ninguna acción automática. Solo alerta visual al admin.
 | My-tasks | `/my-tasks` | Filtrado por rol automáticamente |
 | Panel admin | `/settings` | Ver usuarios (con email, último login, última acción), asignar roles con confirm dialog |
 | Auth + sesión | `middleware.ts` | Funcional — tokens se refrescan correctamente |
+| SD Delivery (mensajero local) | `/sd-delivery` | Módulo móvil-first para mensajeros del Gran Santo Domingo. Teal/esmeralda. Filtro de zona automático con `isSantoDomingoOrder`. Entrega inmediata en DB sin EFI. |
 | Sidebar dinámico | `components/layout/sidebar.tsx` | Nav por rol desde `NAV_BY_ROLE`. Drawer en móvil, fija en desktop |
 | Nav Shell | `components/layout/nav-shell.tsx` | Client Component: topbar hamburger (móvil) + overlay + estado open/close |
 | Duplicados | webhook + `/orders/[id]` | Detecta por customer_phone en ventana 7 días |
@@ -2768,6 +2769,8 @@ No se toma ninguna acción automática. Solo alerta visual al admin.
 | `GET /api/novedad/performance` | Métricas agente novedad: trabajados, reprogramados, tasaRecuperación, **recuperadasHoy/Ayer** |
 | `GET /api/reparto/performance` | Métricas agente reparto: entregados, contactados, críticos activos, **entregadosAyer** |
 | `POST /api/reparto/orders/[id]/mark-delivered` | Registra entrega por agente. Solo admin/delivery_agent. No modifica normalized_status. Retorna `{ action_id, reported_at, courier_confirmed, pending_validation }` |
+| `POST /api/sd-delivery/orders/[id]/mark-delivered` | Entrega local SD. Solo admin/santo_domingo_delivery_agent. Actualiza `normalized_status='delivered'` inmediatamente (sin EFI). Retorna `{ action_id, reported_at, local_confirmed: true, courier_confirmed: false }` |
+| `GET /api/sd-delivery/performance` | Stats del mensajero SD autenticado: entregadosHoy/Ayer, contactadosHoy, noRespondenHoy, reprogramadosHoy. Zona RD (UTC-4). |
 | `GET /api/reparto/entregados` | Pedidos entregados hoy+ayer. **Fuente 1 (principal):** `normalized_status='delivered'` con `last_tracking_update >= ayer`. **Fuente 2 (secundaria):** `agent_actions type='delivered'` sin confirmación EFI. Merge deduplicado, EFI toma precedencia. |
 | `GET /api/novedad/recuperadas` | Pedidos recuperados hoy+ayer: via acción 'recovered' o via `follow_up_result IN (recovered,delivered)` con `normalized_status='delivered'` |
 
@@ -3946,6 +3949,7 @@ order_id: FK a orders
 | `confirmation_agent` | Mi rendimiento, Confirmaciones |
 | `novelty_agent` | Mi rendimiento, Novedades, En Reparto, Tránsito |
 | `delivery_agent` | Mi rendimiento, En Reparto, Tránsito |
+| `santo_domingo_delivery_agent` | Mi rendimiento, Entregas SD |
 | `agent` | Mis tareas, Pedidos |
 | `viewer` | Pedidos (solo lectura) |
 
@@ -4858,6 +4862,152 @@ No hay FK formal — el join se hace en TypeScript en la API.
 - El `recovered_order_id` en `abandoned_carts` debe ser un `shopify_order_id` válido (lo garantiza el webhook)
 - Si un pedido tiene múltiples carritos recuperados (edge case), se usa el primero encontrado en el cartMap
 - `npx tsc --noEmit` limpio confirmado
+
+---
+
+---
+
+## MÓDULO SD DELIVERY — Mensajero local Gran Santo Domingo (2026-05-18)
+
+### Qué se hizo
+
+Nuevo rol `santo_domingo_delivery_agent` y módulo completo `/sd-delivery` para mensajeros locales que cubren el Gran Santo Domingo. Permite gestionar entregas locales que NO pasan por EFI, con confirmación inmediata en DB sin esperar al cron.
+
+### Archivos creados/modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/types/index.ts` | `UserRole` agrega `'santo_domingo_delivery_agent'` |
+| `src/lib/roles.ts` | `OPERATIVE_ROLES` agrega `'santo_domingo_delivery_agent'` — `isAgentOrAbove()` retorna true para este rol |
+| `src/components/layout/sidebar.tsx` | Import `MapPin` de lucide-react. Nav `santo_domingo_delivery_agent`: Mi rendimiento + Entregas SD (MapPin, amber). |
+| `src/app/api/sd-delivery/orders/[id]/mark-delivered/route.ts` | **NUEVO.** `POST /api/sd-delivery/orders/[id]/mark-delivered`. Roles: admin + santo_domingo_delivery_agent. Marca `normalized_status='delivered'` inmediatamente (sin esperar EFI). |
+| `src/app/api/sd-delivery/performance/route.ts` | **NUEVO.** `GET /api/sd-delivery/performance`. Stats del agente SD: entregadosHoy/Ayer, contactadosHoy, noRespondenHoy, reprogramadosHoy. |
+| `src/app/(app)/sd-delivery/page.tsx` | **NUEVO.** Página móvil-first para mensajero SD. Ver detalles abajo. |
+
+### Detección de zona SD (`isSantoDomingoOrder`)
+
+Reutiliza la función existente en `src/lib/alert-helpers.ts`. Regex: `/santo domingo|distrito nacional|\bdn\b/` sobre city+province+address normalizados (sin tildes, minúsculas).
+
+**Cubre automáticamente todas las zonas pedidas:**
+- Distrito Nacional, SD Este/Norte/Oeste → `city` o `province` = "Santo Domingo"
+- Los Alcarrizos, Pedro Brand, Boca Chica, Guerra → `province` = "Santo Domingo"
+
+No se requirió código nuevo para la detección de zonas.
+
+### Diferencia clave vs reparto normal
+
+| Aspecto | `/reparto` + EFI | `/sd-delivery` local |
+|---|---|---|
+| Marca entregado | Solo `agent_actions` — EFI confirma después | Actualiza `normalized_status='delivered'` inmediatamente |
+| Aparece en admin | Al sincronizar con EFI | Al instante (normalized_status ya es 'delivered') |
+| `courier_confirmed` | true cuando EFI lo confirma | Siempre false (no pasa por EFI) |
+| Endpoint | `/api/reparto/orders/[id]/mark-delivered` | `/api/sd-delivery/orders/[id]/mark-delivered` |
+
+### Endpoint `POST /api/sd-delivery/orders/[id]/mark-delivered`
+
+**Auth:** 401 sin sesión · 403 roles no permitidos
+
+**Actualiza en `orders`:**
+- `normalized_status = 'delivered'`
+- `follow_up_result = 'delivered'`
+- `last_tracking_update = now()`
+
+**Inserta en `agent_actions`:**
+- `action_type = 'delivered'`
+- `notes = 'Entregado por mensajero local SD'`
+
+**Response 201:**
+```json
+{
+  "action_id": "uuid",
+  "reported_at": "ISO",
+  "local_confirmed": true,
+  "courier_confirmed": false
+}
+```
+
+### Endpoint `GET /api/sd-delivery/performance`
+
+Zona RD (UTC-4, `America/Santo_Domingo`). Todas las queries filtradas por `agent_id = user.id`.
+
+**Response:**
+```json
+{
+  "entregadosHoy": 5,
+  "entregadosAyer": 3,
+  "contactadosHoy": 8,
+  "noRespondenHoy": 2,
+  "reprogramadosHoy": 1
+}
+```
+
+### Página `/sd-delivery`
+
+**Componentes clave:**
+- `SdCard` — card móvil con 7 acciones: WhatsApp, Llamar, Marcar contactado, No responde, Marcar entregado, Reprogramar, Agregar nota
+- `NoteModal` — modal textarea para notas (`action_type: 'note_added'`)
+- `ReprogramarModal` — modal para reprogramar (`action_type: 'rescheduled'`)
+
+**Filtros (client-side usando `isSantoDomingoOrder`):**
+- Muestra solo órdenes de zona SD del universo `en_reparto`
+- Pestañas de fecha: Hoy / Ayer / Todos
+- Pestañas de estado: Pendientes | No responden | Entregados hoy | Entregados ayer
+
+**Fuentes de datos:**
+1. `GET /api/orders?status=en_reparto&limit=500` → filtrado client-side por zona SD
+2. `GET /api/reparto/entregados` → entregados hoy+ayer (EFI + agente)
+3. `GET /api/sd-delivery/performance` → stats del agente
+
+**UX:**
+- Esquema de colores teal/esmeralda
+- Paginación PAGE_SIZE=40
+- Auto-refresh cada 3 minutos
+- Toast notifications
+- Tabla desktop también incluida
+
+### Operación del flujo
+
+```
+Admin crea/asigna pedido SD con normalized_status='en_reparto'
+  ↓ aparece automáticamente en /sd-delivery del mensajero
+Mensajero contacta → marca acciones (contacted/no_answer/rescheduled/note)
+  ↓ guarda en agent_actions
+Mensajero entrega → click "Marcar entregado"
+  ↓ POST /api/sd-delivery/orders/[id]/mark-delivered
+  ↓ normalized_status='delivered' en DB al instante
+  ↓ aparece en dashboard admin como entregado (no espera EFI)
+```
+
+### Permisos del nuevo rol
+
+| Módulo | Acceso |
+|---|---|
+| `/sd-delivery` | ✅ Solo mensajeros SD y admin |
+| `/mi-rendimiento` | ✅ (tab performance del agente) |
+| `/reparto`, `/novedad`, `/confirmacion` | ❌ (no en su sidebar) |
+| Datos financieros/montos | ❌ (no expuestos en el módulo) |
+| GPS/mapas/geolocalización | ❌ (Fase 1 — no implementado) |
+
+### Pendientes Fase 2 (NO implementar ahora)
+
+- GPS/geolocalización y mapa de ruta
+- Asignación automática de pedidos SD al mensajero
+- Firma digital o foto de confirmación de entrega
+- Historial de entregas por jornada
+- Integración con transportadora local SD
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. En Supabase: asignar rol `santo_domingo_delivery_agent` a un usuario de prueba
+3. Login como ese usuario → sidebar muestra solo "Mi rendimiento" y "Entregas SD"
+4. Navegar a `/sd-delivery` → debe mostrar pedidos `en_reparto` con dirección en zona SD
+5. Verificar filtros: Hoy/Ayer/Todos, tabs de estado
+6. Probar "Marcar entregado" → pedido debe salir de "Pendientes" y aparecer en "Entregados hoy"
+7. Verificar en Supabase: `orders.normalized_status='delivered'` actualizado al instante
+8. Verificar `agent_actions`: fila con `action_type='delivered'`
+9. Login como admin → el pedido debe aparecer como entregado en el dashboard inmediatamente
+10. `npx tsc --noEmit` → sin errores ✅ (verificado 2026-05-18)
 
 ---
 

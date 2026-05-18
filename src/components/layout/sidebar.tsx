@@ -8,7 +8,7 @@ import {
   LayoutDashboard, Package, Upload, BarChart2,
   Settings, LogOut, Truck, Bike, AlertCircle, ClipboardList,
   ListTodo, TrendingUp, Box, CheckCircle2, X, ShoppingCart, Brain,
-  RotateCcw, Link2,
+  RotateCcw, Link2, MapPin,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
@@ -71,6 +71,11 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/mi-rendimiento', label: 'Mi rendimiento', icon: TrendingUp, alert: null    },
     { href: '/reparto',        label: 'En Reparto',     icon: Bike,       alert: 'amber' },
     { href: '/transito',       label: 'Tránsito',       icon: Box,        alert: null    },
+  ],
+
+  santo_domingo_delivery_agent: [
+    { href: '/mi-rendimiento', label: 'Mi rendimiento',  icon: TrendingUp, alert: null    },
+    { href: '/sd-delivery',    label: 'Entregas SD',     icon: MapPin,     alert: 'amber' },
   ],
 
   agent: [

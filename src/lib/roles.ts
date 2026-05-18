@@ -6,6 +6,7 @@ export const OPERATIVE_ROLES: UserRole[] = [
   'confirmation_agent',
   'novelty_agent',
   'delivery_agent',
+  'santo_domingo_delivery_agent',
   'agent',
 ]
 
