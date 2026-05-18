@@ -54,6 +54,8 @@ export async function GET() {
       stuckNovedadSampleRes,
       // Conteo total de guías activas (con tracking, no finalizadas)
       totalActiveRes,
+      // Muestra de guías stuck: indemnizacion sin actualizar en +24h
+      stuckIndemnizacionSampleRes,
     ] = await Promise.all([
       // 1 - Conteos por normalized_status
       supabase
@@ -148,6 +150,15 @@ export async function GET() {
         .select('id', { count: 'exact', head: true })
         .not('tracking_number', 'is', null)
         .not('normalized_status', 'in', '(delivered,returned,cancelled)'),
+
+      // 13 - muestra indemnizacion stuck +24h
+      supabase
+        .from('orders')
+        .select('tracking_number, raw_status, normalized_status, last_tracking_update, created_at')
+        .eq('normalized_status', 'indemnizacion')
+        .or(`last_tracking_update.lt.${h24ago},last_tracking_update.is.null`)
+        .order('last_tracking_update', { ascending: true, nullsFirst: true })
+        .limit(15),
     ])
 
     // Agrupar conteos por normalized_status
@@ -219,9 +230,10 @@ export async function GET() {
       byStatus: byStatusSorted,
 
       stuckSamples: {
-        in_transit_stuck48h: stuckTransitSampleRes.data ?? [],
-        en_reparto_stuck48h: stuckRepartoSampleRes.data ?? [],
-        novedad_stuck48h:    stuckNovedadSampleRes.data ?? [],
+        in_transit_stuck48h:      stuckTransitSampleRes.data ?? [],
+        en_reparto_stuck48h:      stuckRepartoSampleRes.data ?? [],
+        novedad_stuck48h:         stuckNovedadSampleRes.data ?? [],
+        indemnizacion_stuck24h:   stuckIndemnizacionSampleRes.data ?? [],
       },
     })
   } catch (err) {

@@ -71,6 +71,7 @@ export interface ImportResponse {
 function mapEstadoToNormalized(estado: string | undefined | null): string {
   if (!estado) return 'in_transit'
   const s = estado.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  if (s.includes('indemnizaci'))                     return 'indemnizacion'
   if (s.includes('reparto'))                         return 'en_reparto'
   if (s.includes('novedad'))                         return 'novedad'
   if (s.includes('transit'))                         return 'in_transit'

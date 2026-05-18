@@ -9,7 +9,7 @@ import { ACTION_LABELS, type Classification, type SlaStatus } from '@/types'
 import {
   Package, TrendingDown, CheckCircle, AlertTriangle,
   RotateCcw, Clock, ShieldAlert, Bike, ArrowRight, Timer, ListTodo,
-  TrendingUp, CheckCircle2,
+  TrendingUp, CheckCircle2, Scale,
 } from 'lucide-react'
 import Link from 'next/link'
 
@@ -24,6 +24,7 @@ interface DashboardData {
     returned: number
     at_risk: number
     sla_breached: number
+    indemnizacion: number
   }
   confirmed_hoy:  number
   confirmed_ayer: number
@@ -218,9 +219,25 @@ export default function DashboardPage() {
         ) : (
           <KpiCard label="Tránsito +48h" value={stats.transit_critico} icon={TrendingUp} color="bg-green-50 text-green-600" sub="Sin demoras críticas" />
         )}
-        <KpiCard label="Intentos fallidos" value={stats.failed_attempts} icon={AlertTriangle} color="bg-amber-50 text-amber-600" />
-        <KpiCard label="Devoluciones"      value={stats.returned}        icon={RotateCcw}     color="bg-red-50 text-red-600" />
-        <KpiCard label="En riesgo"         value={work_queue.length}     icon={ShieldAlert}   color="bg-orange-50 text-orange-600" />
+        <KpiCard label="Intentos fallidos" value={stats.failed_attempts}  icon={AlertTriangle} color="bg-amber-50 text-amber-600" />
+        <KpiCard label="Devoluciones"      value={stats.returned}         icon={RotateCcw}     color="bg-red-50 text-red-600" />
+        {stats.indemnizacion > 0 && (
+          <Link
+            href="/novedad?filter=indemnizacion"
+            className="bg-white rounded-xl border border-violet-200 p-5 flex items-center gap-4
+                       hover:border-violet-400 hover:shadow-sm transition-all group"
+          >
+            <div className="p-3 rounded-xl bg-violet-50 text-violet-600 group-hover:bg-violet-100 transition-colors">
+              <Scale className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-gray-900">{stats.indemnizacion.toLocaleString()}</p>
+              <p className="text-sm text-gray-500">Indemnizaciones</p>
+              <p className="text-xs text-violet-600 mt-0.5 font-medium">Ver en /novedad</p>
+            </div>
+          </Link>
+        )}
+        <KpiCard label="En riesgo"         value={work_queue.length}      icon={ShieldAlert}   color="bg-orange-50 text-orange-600" />
         <KpiCard label="SLA vencidos"      value={stats.sla_breached}    icon={TrendingDown}  color="bg-red-50 text-red-700" />
 
         {/* Confirmados hoy */}

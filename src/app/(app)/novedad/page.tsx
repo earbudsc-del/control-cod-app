@@ -13,12 +13,12 @@ import {
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, Search, TrendingUp, CalendarClock,
   RotateCcw, ShieldAlert, Clock, ChevronLeft, ChevronRight,
-  Package, DollarSign,
+  Package, DollarSign, Scale, User,
 } from 'lucide-react'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
-type Tab = 'all' | 'dos' | 'tres-mas' | 'reprogramados' | 'no-salvables' | 'recuperadas'
+type Tab = 'all' | 'dos' | 'tres-mas' | 'reprogramados' | 'no-salvables' | 'recuperadas' | 'indemnizacion'
 
 interface NoveltyPerfData {
   novedadesTrabajadasHoy:  number
@@ -66,12 +66,13 @@ function buildNovedadMsg(nombre: string, producto: string | null | undefined): s
 }
 
 const TAB_META: { tab: Tab; label: string }[] = [
-  { tab: 'all',           label: 'Todos'         },
-  { tab: 'dos',           label: '2 intentos'    },
-  { tab: 'tres-mas',      label: 'Alerta 3+'     },
-  { tab: 'reprogramados', label: 'Reprogramados' },
-  { tab: 'no-salvables',  label: 'No salvables'  },
-  { tab: 'recuperadas',   label: '✓ Entregadas' },
+  { tab: 'all',             label: 'Todos'           },
+  { tab: 'dos',             label: '2 intentos'      },
+  { tab: 'tres-mas',        label: 'Alerta 3+'       },
+  { tab: 'reprogramados',   label: 'Reprogramados'   },
+  { tab: 'no-salvables',    label: 'No salvables'    },
+  { tab: 'recuperadas',     label: '✓ Entregadas'   },
+  { tab: 'indemnizacion',   label: '⚖ Indemniz.'    },
 ]
 
 const ACTION_BADGE: Record<string, { label: string; color: string }> = {
@@ -485,10 +486,12 @@ export default function NovedadPage() {
 
   const initNovedadTab = (): Tab => {
     const f = searchParamsObj.get('filter')
-    if (f === '2-intentos') return 'dos'
+    if (f === '2-intentos')    return 'dos'
+    if (f === 'indemnizacion') return 'indemnizacion'
     return 'all'
   }
   const [activeTab, setActiveTab]     = useState<Tab>(initNovedadTab)
+  const [indemnizacionOrders, setIndemnizacionOrders] = useState<Order[]>([])
   const [searchQuery, setSearchQuery] = useState('')
 
   const [actionMap, setActionMap]   = useState<Record<string, string>>({})
@@ -504,17 +507,19 @@ export default function NovedadPage() {
     setLoading(true)
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const [ordersRes, perfRes, tasksRes, recuperadasRes]: [OrdersResponse, NoveltyPerfData, { tasks: any[] }, RecuperadaEntry[]] =
+      const [ordersRes, perfRes, tasksRes, recuperadasRes, indemnizacionRes]: [OrdersResponse, NoveltyPerfData, { tasks: any[] }, RecuperadaEntry[], OrdersResponse] =
         await Promise.all([
           fetch('/api/orders?status=novedad&limit=200&page=1').then(r => r.json()),
           fetch('/api/novedad/performance').then(r => r.json()),
           fetch('/api/my-tasks').then(r => r.json()),
           fetch('/api/novedad/recuperadas').then(r => r.json()),
+          fetch('/api/orders?status=indemnizacion&limit=200&page=1').then(r => r.json()),
         ])
 
       setAllOrders(ordersRes.data ?? [])
       setPerf(perfRes)
       setRecuperadasDbOrders(Array.isArray(recuperadasRes) ? recuperadasRes : [])
+      setIndemnizacionOrders(indemnizacionRes.data ?? [])
 
       const map: Record<string, string> = {}
       for (const t of (tasksRes.tasks ?? [])) {
@@ -660,6 +665,7 @@ export default function NovedadPage() {
 
   const displayedOrders = useMemo(() => {
     if (activeTab === 'recuperadas') return []
+    if (activeTab === 'indemnizacion') return []
 
     let base: Order[]
     switch (activeTab) {
@@ -690,7 +696,8 @@ export default function NovedadPage() {
     reprogramados:  reprogramadosSesion.length,
     'no-salvables': noSalvables.length,
     recuperadas:    recuperadasDbOrders.length,
-  }), [activeOrders, dosExactos, tresOmas, reprogramadosSesion, noSalvables, recuperadasDbOrders])
+    indemnizacion:  indemnizacionOrders.length,
+  }), [activeOrders, dosExactos, tresOmas, reprogramadosSesion, noSalvables, recuperadasDbOrders, indemnizacionOrders])
 
   const displayedRecuperadas = useMemo(() => {
     let entries = [...recuperadasDbOrders]
@@ -732,8 +739,8 @@ export default function NovedadPage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  const totalPages = activeTab === 'recuperadas' ? totalPagesRecuperadas : totalPagesNovedad
-  const activeCount = activeTab === 'recuperadas' ? displayedRecuperadas.length : displayedOrders.length
+  const totalPages = activeTab === 'recuperadas' ? totalPagesRecuperadas : activeTab === 'indemnizacion' ? 1 : totalPagesNovedad
+  const activeCount = activeTab === 'recuperadas' ? displayedRecuperadas.length : activeTab === 'indemnizacion' ? indemnizacionOrders.length : displayedOrders.length
 
   return (
     <div className="space-y-3 md:space-y-4">
@@ -985,7 +992,7 @@ export default function NovedadPage() {
       )}
 
       {/* ── Tabla/Cards + buscador + tabs ── */}
-      {(loading || allOrders.length > 0 || recuperadasDbOrders.length > 0) && (
+      {(loading || allOrders.length > 0 || recuperadasDbOrders.length > 0 || indemnizacionOrders.length > 0) && (
         <div className="bg-white rounded-xl border-2 border-red-200 overflow-hidden shadow-sm">
 
           {/* Info header */}
@@ -1506,6 +1513,136 @@ export default function NovedadPage() {
                 })}
               </tbody>
             </table>
+          )}
+
+          {/* ── MOBILE: Cards indemnizacion (< md) ── */}
+          {!loading && activeTab === 'indemnizacion' && indemnizacionOrders.length > 0 && (
+            <div className="md:hidden p-3 space-y-3">
+              {indemnizacionOrders.map(order => {
+                const ubicacion = order.city || order.province || ''
+                const lastUpdate = order.last_tracking_update ?? order.created_at
+                return (
+                  <div key={order.id} className="bg-violet-50/60 border border-violet-200 rounded-xl p-3 space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-bold text-violet-800 truncate">
+                          {order.tracking_number}
+                        </p>
+                        <p className="text-[10px] text-violet-500">
+                          {order.order_number ? `#${order.order_number}` : ''}
+                        </p>
+                      </div>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-100 text-violet-700 border border-violet-200 shrink-0">
+                        <Scale className="w-3 h-3" />
+                        Indemnización
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <User className="w-3 h-3 text-violet-400 shrink-0" />
+                      <p className="text-xs font-semibold text-gray-800 truncate">{order.customer_name}</p>
+                    </div>
+                    {order.customer_phone && (
+                      <div className="flex items-center gap-1.5">
+                        <Phone className="w-3 h-3 text-violet-400 shrink-0" />
+                        <a href={`tel:${order.customer_phone}`}
+                           className="text-xs text-violet-700 hover:underline">{order.customer_phone}</a>
+                      </div>
+                    )}
+                    {ubicacion && (
+                      <div className="flex items-center gap-1.5">
+                        <MapPin className="w-3 h-3 text-violet-400 shrink-0" />
+                        <span className="text-xs text-gray-600 truncate">{ubicacion}</span>
+                      </div>
+                    )}
+                    {lastUpdate && (
+                      <p className="text-[10px] text-gray-400">
+                        Última act.: {formatEventDate(lastUpdate)}
+                      </p>
+                    )}
+                    <Link
+                      href={`/orders/${order.id}`}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-800 hover:underline"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Ver detalle
+                    </Link>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {/* ── DESKTOP: Tabla indemnizacion (≥ md) ── */}
+          {!loading && activeTab === 'indemnizacion' && indemnizacionOrders.length > 0 && (
+            <table className="hidden md:table w-full text-sm">
+              <thead className="bg-violet-50/60 border-b border-violet-100">
+                <tr>
+                  {['Guía / Pedido', 'Cliente', 'Teléfono', 'Ubicación', 'Última actualización', ''].map(h => (
+                    <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-violet-700 whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-violet-50">
+                {indemnizacionOrders.map(order => {
+                  const ubicacion = order.city || order.province || '—'
+                  const lastUpdate = order.last_tracking_update ?? order.created_at
+                  return (
+                    <tr key={order.id} className="hover:bg-violet-50/40 transition-colors">
+                      <td className="px-3 py-2.5">
+                        <p className="text-xs font-bold text-violet-800">{order.tracking_number}</p>
+                        {order.order_number && (
+                          <p className="text-[10px] text-gray-400">#{order.order_number}</p>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <p className="text-xs font-semibold text-gray-800">{order.customer_name}</p>
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-violet-100 text-violet-700 mt-0.5">
+                          <Scale className="w-2.5 h-2.5" />
+                          Indemnización
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {order.customer_phone ? (
+                          <a href={`tel:${order.customer_phone}`}
+                             className="text-xs text-violet-700 hover:underline">{order.customer_phone}</a>
+                        ) : <span className="text-xs text-gray-400">—</span>}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <div className="flex items-start gap-1 text-gray-600">
+                          <MapPin className="w-3 h-3 text-gray-400 shrink-0 mt-0.5" />
+                          <span className="text-xs truncate max-w-[120px]">{ubicacion}</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {lastUpdate ? (
+                          <span className="text-xs text-gray-500">{formatEventDate(lastUpdate)}</span>
+                        ) : <span className="text-xs text-gray-400">—</span>}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <Link
+                          href={`/orders/${order.id}`}
+                          className="inline-flex items-center gap-1 text-xs font-medium
+                                     text-violet-600 hover:text-violet-800 whitespace-nowrap hover:underline"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          Ver detalle
+                        </Link>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+
+          {/* ── Empty state indemnizacion ── */}
+          {!loading && activeTab === 'indemnizacion' && indemnizacionOrders.length === 0 && (
+            <div className="py-12 text-center">
+              <Scale className="w-10 h-10 text-violet-300 mx-auto mb-3" />
+              <p className="text-sm font-semibold text-gray-500">Sin indemnizaciones activas</p>
+            </div>
           )}
 
           {/* Paginación */}

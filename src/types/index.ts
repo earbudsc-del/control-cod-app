@@ -16,6 +16,7 @@ export type NormalizedStatus =
   | 'out_for_delivery'
   | 'en_reparto'
   | 'novedad'
+  | 'indemnizacion'
   | 'delivered'
   | 'failed_attempt'
   | 'returned'
@@ -287,6 +288,7 @@ export const STATUS_LABELS: Record<NormalizedStatus, string> = {
   out_for_delivery: 'Reprogramado',
   en_reparto:       'En reparto',
   novedad:          'Novedad',
+  indemnizacion:    'Indemnización',
   delivered:        'Entregado',
   failed_attempt:   'Intento fallido',
   returned:         'Devuelto',
@@ -299,6 +301,7 @@ export const STATUS_COLORS: Record<NormalizedStatus, string> = {
   out_for_delivery: 'bg-indigo-100 text-indigo-700',
   en_reparto:       'bg-amber-100 text-amber-700',
   novedad:          'bg-red-100 text-red-700',
+  indemnizacion:    'bg-violet-100 text-violet-700',
   delivered:        'bg-green-100 text-green-700',
   failed_attempt:   'bg-orange-100 text-orange-700',
   returned:         'bg-red-100 text-red-700',

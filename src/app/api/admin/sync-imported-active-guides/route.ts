@@ -7,7 +7,7 @@ export const maxDuration = 300
 const DEFAULT_LIMIT    = 150
 const MAX_LIMIT        = 300
 const EFI_DELAY_MS     = 600
-const ACTIVE_STATUSES  = ['in_transit', 'en_reparto', 'novedad'] as const
+const ACTIVE_STATUSES  = ['in_transit', 'en_reparto', 'novedad', 'indemnizacion'] as const
 
 type ActiveStatus = typeof ACTIVE_STATUSES[number]
 

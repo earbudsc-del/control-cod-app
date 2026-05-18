@@ -70,6 +70,10 @@ export function mapNormalizedStatus(estado: string): string {
   ) return 'delivered'
 
   if (
+    s.includes('indemnizaci')   // "indemnización / indemnizacion" — caso de seguro, separado de novedad
+  ) return 'indemnizacion'
+
+  if (
     s.includes('novedad')            ||
     s.includes('ausente')            ||
     s.includes('rechazado')          ||

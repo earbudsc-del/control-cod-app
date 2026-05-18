@@ -24,7 +24,7 @@ export async function GET() {
     const hoyRD  = rdDayBounds(0)
     const ayerRD = rdDayBounds(1)
 
-    const [statsRes, slaRes, classRes, recentRes, staleRepartoRes, staleNovedadRes, workQueueRes, staleTransitRes, confirmedHoyRes, confirmedAyerRes] = await Promise.all([
+    const [statsRes, slaRes, classRes, recentRes, staleRepartoRes, staleNovedadRes, workQueueRes, staleTransitRes, confirmedHoyRes, confirmedAyerRes, staleIndemnizacionRes] = await Promise.all([
       // Conteos por estado
       supabase.rpc('get_order_stats').maybeSingle(),
 
@@ -92,6 +92,14 @@ export async function GET() {
         .eq('confirmation_status', 'confirmed')
         .gte('last_confirmation_attempt', ayerRD.start)
         .lte('last_confirmation_attempt', ayerRD.end),
+
+      // Indemnizaciones con más de 1 día sin movimiento
+      supabase.from('orders')
+        .select('id, tracking_number, customer_name, city, last_tracking_update, created_at')
+        .eq('normalized_status', 'indemnizacion')
+        .or(`last_tracking_update.lt.${oneDayAgo},and(last_tracking_update.is.null,created_at.lt.${oneDayAgo})`)
+        .order('last_tracking_update', { ascending: true, nullsFirst: true })
+        .limit(20),
     ])
 
     // Cola de trabajo: asignar prioridad y ordenar
@@ -143,6 +151,7 @@ export async function GET() {
       on_delivery:     statusCounts?.filter(o => o.normalized_status === 'en_reparto').length ?? 0,
       delivered:       statusCounts?.filter(o => o.normalized_status === 'delivered').length ?? 0,
       in_transit:      statusCounts?.filter(o => o.normalized_status === 'in_transit').length ?? 0,
+      indemnizacion:   statusCounts?.filter(o => o.normalized_status === 'indemnizacion').length ?? 0,
       transit_critico: (statusCounts ?? []).filter(o => {
         if (o.normalized_status !== 'in_transit') return false
         const base = o.last_tracking_update ?? o.created_at
@@ -159,9 +168,10 @@ export async function GET() {
       sla_alerts:        slaRes.data ?? [],
       classification:    classCounts,
       recent_activity:   recentRes.data ?? [],
-      stale_reparto:     staleRepartoRes.data ?? [],
-      stale_novedad:     staleNovedadRes.data ?? [],
-      stale_transit:     staleTransitRes.data ?? [],
+      stale_reparto:        staleRepartoRes.data ?? [],
+      stale_novedad:        staleNovedadRes.data ?? [],
+      stale_transit:        staleTransitRes.data ?? [],
+      stale_indemnizacion:  staleIndemnizacionRes.data ?? [],
       work_queue:        workQueue,
       confirmed_hoy:     confirmedHoyRes.count  ?? 0,
       confirmed_ayer:    confirmedAyerRes.count ?? 0,

@@ -81,6 +81,57 @@ Para las guías ya activas en EFI sin match en DB, se puede crear un endpoint de
 - [x] Paso 5: límite de importación aumentado a 500 guías — **IMPLEMENTADO** (2026-05-17)
 - [x] Paso 6: revalidación en tiempo real contra EFI de guías activas — **IMPLEMENTADO** (2026-05-17)
 - [x] Paso 7: debug y corrección de discrepancias novedad DB vs EFI — **IMPLEMENTADO** (2026-05-18)
+- [x] Paso 8: `indemnizacion` como normalized_status independiente — **IMPLEMENTADO** (2026-05-17)
+
+---
+
+## FIX: `indemnizacion` como normalized_status independiente — Paso 8 (2026-05-17)
+
+### Problema
+
+Después del debug (Paso 7), se confirmó que las 10 novedades de más eran órdenes cuyo `raw_status` en EFI era "Indemnización". El parser antiguo mapeaba "Indemnización" → `novedad`, contaminando el KPI operativo de novedades reales con casos que ya están en proceso de reclamo al courier.
+
+### Solución
+
+Nuevo `normalized_status = 'indemnizacion'` que segrega estos casos del flujo de novedad activa.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/types/index.ts` | `NormalizedStatus` agrega `'indemnizacion'`. `STATUS_LABELS` agrega `indemnizacion: 'Indemnización'`. `STATUS_COLORS` agrega `indemnizacion: 'bg-violet-100 text-violet-700'`. |
+| `src/lib/tracking/efi-parser.ts` | `mapNormalizedStatus()` agrega `if (s.includes('indemnizaci')) return 'indemnizacion'` ANTES del bloque `novedad`. Orden crítico: "Indemnización" no contiene "novedad", pero si EFI combinara términos, verificar antes. |
+| `src/app/api/admin/reconcile-efi-import/route.ts` | `mapEstadoToNormalized()` agrega `if (s.includes('indemnizaci')) return 'indemnizacion'` antes de `en_reparto`. |
+| `src/app/api/admin/sync-imported-active-guides/route.ts` | `ACTIVE_STATUSES` actualizado: `['in_transit', 'en_reparto', 'novedad', 'indemnizacion']`. Las guías en indemnizacion ahora se re-validan en tiempo real contra EFI. |
+| `src/app/api/dashboard/route.ts` | Agrega `staleIndemnizacionRes` al Promise.all (guías indemnizacion +1 día sin movimiento). Stats agrega `indemnizacion: count`. Response agrega `stale_indemnizacion`. |
+| `src/app/(app)/dashboard/page.tsx` | Importa `Scale` de lucide-react. `DashboardData.stats` agrega `indemnizacion: number`. KPI card violet condicional (solo visible cuando `stats.indemnizacion > 0`). |
+| `src/app/(app)/novedad/page.tsx` | Tab `⚖ Indemniz.` añadido. Fetch paralelo a `/api/orders?status=indemnizacion`. Estado `indemnizacionOrders`. Vista separada: mobile cards + desktop table violet, sin botones de acción, solo "Ver detalle". `tabCounts` incluye `indemnizacion`. `displayedOrders` retorna `[]` para tab indemnizacion. `totalPages`/`activeCount` manejan tab indemnizacion. |
+| `src/app/api/debug/tracking-health/route.ts` | Agrega `stuckIndemnizacionSampleRes` (guías indemnizacion +24h sin actualización) al Promise.all. Respuesta incluye `stuckSamples.indemnizacion_stuck24h`. |
+
+### Comportamiento del parser (regla permanente)
+
+```
+mapNormalizedStatus():
+  1. 'indemnizaci' → 'indemnizacion'   ← PRIMERO (antes del bloque novedad)
+  2. 'novedad' / 'ausente' / ... → 'novedad'
+  ...
+```
+
+**Umbral de stale:** indemnizacion usa +1 día (igual que novedad) — son casos activos con courier.
+
+### Tab `/novedad` — ⚖ Indemniz.
+
+- **Visible para:** admin y novelty_agent (mismos roles que el resto de /novedad)
+- **Aparece solo cuando hay órdenes** (`tabCounts.indemnizacion > 0`)
+- **Sin botones de acción:** solo violet badge + "Ver detalle"
+- **Fetch independiente:** `/api/orders?status=indemnizacion&limit=200&page=1`
+
+### Normalización de estados — actualización
+
+| Estado EFI (raw_status) | normalized_status | Notas |
+|---|---|---|
+| contiene 'indemnizaci' | `indemnizacion` | **NUEVO** — evaluado ANTES de novedad |
+| contiene 'novedad' / 'ausente' / ... | `novedad` | Sin cambio |
 
 ---
 
@@ -3758,6 +3809,7 @@ Regex: `/santo domingo|distrito nacional|\bdn\b/` aplicado sobre `normalize(city
 
 | Estado EFI (raw_status) | normalized_status | Notas |
 |---|---|---|
+| contiene "indemnizaci" | `indemnizacion` | **Evaluado PRIMERO** — antes de novedad |
 | contiene "devoluci\*" / "devuelto" / "a origen" / "retorn\*" / "regresado" | `returned` | Evaluado ANTES de delivered |
 | contiene "cancelada" | `returned` | Cubre "cancelada por transportadora" |
 | contiene "entregado" / "entregada" / "entrega exitosa" | `delivered` | |
