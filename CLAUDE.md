@@ -5547,3 +5547,149 @@ Cuando el mensajero marca "Cliente confirma":
 10. En tab "En ruta": verificar botón "Marcar entregado"
 11. Strip "Mi día": verificar que `confirmedHoy` sube al confirmar clientes
 12. `npx tsc --noEmit` → sin errores ✅ (verificado 2026-05-18)
+
+---
+
+## INTEGRACIÓN: App → Shopify (fulfillment + mark_paid) — 2026-05-18
+
+### Objetivo
+
+Cuando una orden se gestiona en Control COD, reflejar el cambio en Shopify automáticamente:
+- **Mensajero confirma ruta** → crear fulfillment en Shopify (empacado/en camino)
+- **Mensajero marca entregado** → marcar la orden como pagada en Shopify (COD cobrado)
+
+### Arquitectura
+
+Sin romper el flujo local ni el flujo EFI. Shopify es una capa de sincronización adicional:
+- Si Shopify falla → la app sigue funcionando (operación local no se cancela)
+- Si ya está fulfillada/pagada → se omite silenciosamente (idempotente)
+- Todos los resultados se guardan en `shopify_sync_log` para auditoría
+
+### Scopes requeridos en el token `SHOPIFY_ADMIN_ACCESS_TOKEN`
+
+| Scope | Para qué |
+|---|---|
+| `read_orders` | Verificar financial_status antes de marcar paid (ya existente) |
+| `write_orders` | `orderMarkAsPaid` GraphQL |
+| `read_fulfillments` | Consultar fulfillment_orders y estado actual |
+| `write_fulfillments` | Crear fulfillments |
+
+**Acción requerida antes del deploy:** Actualizar el token en Shopify Admin → Apps → Custom apps y añadir los scopes que falten. El token actual solo tiene `read_orders`.
+
+### Archivos creados
+
+| Archivo | Función |
+|---|---|
+| `src/lib/shopify/client.ts` | **NUEVO.** Helper base: `shopifyRestUrl()`, `shopifyHeaders()`, `shopifyGraphQL()`. Centraliza credenciales y API version. |
+| `src/lib/shopify/fulfillments.ts` | **NUEVO.** `createLocalFulfillment(shopifyOrderId, trackingNumber?)`. Verifica idempotencia, obtiene fulfillment_orders abiertos, crea fulfillment via REST. |
+| `src/lib/shopify/payments.ts` | **NUEVO.** `markOrderAsPaid(shopifyOrderId)`. Verifica financial_status via GraphQL, ejecuta `orderMarkAsPaid` mutation solo si `!= PAID`. |
+| `supabase/migrations/025_shopify_sync_log.sql` | **NUEVO.** Tabla `shopify_sync_log`: audit log de cada sincronización con `event_type` (fulfillment/mark_paid), `result` (success/skipped/error), `error_message`, `metadata`. |
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/orders/[id]/actions/route.ts` | **MODIFICADO.** Cuando `action_type='route_confirmed'`: llama `createLocalFulfillment()` si la orden tiene `shopify_order_id` y `source='shopify_webhook'`. Log en `shopify_sync_log`. El fallo de Shopify no rompe la respuesta HTTP. |
+| `src/app/api/sd-delivery/orders/[id]/mark-delivered/route.ts` | **MODIFICADO.** Después de marcar entregada en DB: llama `markOrderAsPaid()` si la orden tiene `shopify_order_id` y `source='shopify_webhook'`. Log en `shopify_sync_log`. El fallo de Shopify no rompe la respuesta HTTP. |
+
+### Flujo por acción
+
+#### Confirmar ruta (Shopify fulfillment)
+
+```
+Mensajero → "Confirmar ruta" → POST /api/orders/[id]/actions { action_type: 'route_confirmed' }
+    ↓ [local — siempre ocurre]
+Inserta en agent_actions (route_confirmed)
+    ↓ [Shopify — best-effort]
+¿order.shopify_order_id && source='shopify_webhook'?
+    SÍ → createLocalFulfillment(shopify_order_id, tracking_number)
+        → fulfillment_status='fulfilled' en Shopify
+    NO → skip silencioso
+    → shopify_sync_log: event_type='fulfillment', result=success|skipped|error
+Responde HTTP 201 (independiente del resultado Shopify)
+```
+
+#### Marcar entregado (Shopify mark_paid)
+
+```
+Mensajero → "Marcar entregado" → POST /api/sd-delivery/orders/[id]/mark-delivered
+    ↓ [local — siempre ocurre]
+DB update: normalized_status='delivered', follow_up_result='delivered'
+agent_actions: action_type='delivered'
+    ↓ [Shopify — best-effort]
+¿order.shopify_order_id && source='shopify_webhook'?
+    SÍ → markOrderAsPaid(shopify_order_id)
+        → financial_status='paid' en Shopify
+    NO → skip silencioso
+    → shopify_sync_log: event_type='mark_paid', result=success|skipped|error
+Responde HTTP 201 (independiente del resultado Shopify)
+```
+
+### Protecciones (idempotencia)
+
+| Condición | Comportamiento |
+|---|---|
+| Shopify `fulfillment_status='fulfilled'` | `createLocalFulfillment` retorna `{ skipped: true }` — sin API write |
+| Shopify `financial_status='PAID'` | `markOrderAsPaid` retorna `{ skipped: true }` — sin API write |
+| `userErrors` incluye "already paid" | Tratado como `skipped` |
+| No hay fulfillment_orders abiertas | `createLocalFulfillment` retorna `{ skipped: true }` |
+| orden sin `shopify_order_id` o `source != 'shopify_webhook'` | Skip completo — no se llama a Shopify |
+| Shopify API lanza error de red | Retorna `{ error }` — flujo local completado, se loguea warning |
+
+### Monitoreo (shopify_sync_log)
+
+```sql
+-- Ver últimos errores de Shopify
+SELECT order_id, shopify_order_id, event_type, error_message, created_at
+FROM shopify_sync_log
+WHERE result = 'error'
+ORDER BY created_at DESC
+LIMIT 20;
+
+-- Resumen del día
+SELECT event_type, result, COUNT(*) 
+FROM shopify_sync_log
+WHERE created_at >= now() - INTERVAL '24h'
+GROUP BY event_type, result
+ORDER BY event_type, result;
+```
+
+### Logs en Vercel
+
+```
+[actions/route_confirmed] Shopify fulfillment creado — order=UUID shopify=1234567890
+[actions/route_confirmed] Shopify fulfillment ya existía — order=UUID shopify=1234567890
+[actions/route_confirmed] Shopify fulfillment FALLÓ (flujo local OK) — order=UUID ... error=...
+
+[sd-delivery/mark-delivered] Shopify mark_paid OK — order=UUID shopify=1234567890
+[sd-delivery/mark-delivered] Shopify mark_paid ya estaba pagada — order=UUID shopify=1234567890
+[sd-delivery/mark-delivered] Shopify mark_paid FALLÓ (flujo local OK) — order=UUID ... error=...
+```
+
+### Qué NO hace esta integración
+
+- No toca órdenes que no son `source='shopify_webhook'` (CSV imports, manual)
+- No toca órdenes sin `shopify_order_id`
+- No rompe el flujo EFI ni el cron de tracking
+- No crea fulfillments para `confirm-client` (cliente confirma ≠ despachado)
+- No marca paid si la orden ya está pagada
+- No duplica fulfillments
+- No modifica el flujo de novedades, devoluciones, ni ningún otro módulo
+
+### Pendientes antes del deploy
+
+1. **Actualizar scopes del token Shopify:**
+   Shopify Admin → Settings → Apps → Custom apps → Control COD → Edit permissions
+   Añadir: `write_orders`, `read_fulfillments`, `write_fulfillments`
+   Revocar y re-generar el token, actualizar `SHOPIFY_ADMIN_ACCESS_TOKEN` en Vercel env vars
+
+2. **Ejecutar migración en Supabase:**
+   ```sql
+   -- Pegar contenido de supabase/migrations/025_shopify_sync_log.sql en Supabase SQL Editor
+   ```
+
+3. **Verificar en producción con una orden de prueba:**
+   - Tomar una orden SD con `shopify_order_id` no nulo
+   - Confirmar ruta → verificar en Shopify que `fulfillment_status='fulfilled'`
+   - Marcar entregado → verificar en Shopify que `financial_status='paid'`
+   - Revisar `shopify_sync_log` en Supabase

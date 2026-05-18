@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
+import { markOrderAsPaid } from '@/lib/shopify/payments'
 
 const ALLOWED_ROLES = ['admin', 'santo_domingo_delivery_agent']
 
@@ -18,7 +19,10 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     }
 
     const { data: order } = await supabase
-      .from('orders').select('id, normalized_status').eq('id', order_id).single()
+      .from('orders')
+      .select('id, normalized_status, shopify_order_id, source')
+      .eq('id', order_id)
+      .single()
 
     if (!order) return NextResponse.json({ error: 'Pedido no encontrado' }, { status: 404 })
 
@@ -52,6 +56,38 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     if (actionError) throw actionError
 
     console.log(`[sd-delivery/mark-delivered] order=${order_id} by=${profile.id} role=${profile.role}`)
+
+    // ── Sincronización Shopify: marcar como pagada (COD entregado = cobrado) ──
+    if (order.shopify_order_id && order.source === 'shopify_webhook') {
+      const paidResult = await markOrderAsPaid(order.shopify_order_id)
+
+      // Log de sincronización — sin bloquear respuesta
+      const logEntry = {
+        order_id,
+        shopify_order_id: order.shopify_order_id,
+        event_type:       'mark_paid',
+        result:           paidResult.success
+          ? (paidResult.skipped ? 'skipped' : 'success')
+          : 'error',
+        error_message:    paidResult.error ?? null,
+        metadata:         { triggered_action: 'mark-delivered' },
+        triggered_by:     profile.id,
+      }
+
+      supabase.from('shopify_sync_log').insert(logEntry).then(({ error: logErr }) => {
+        if (logErr) console.error('[mark-delivered] shopify_sync_log error:', logErr.message)
+      })
+
+      if (paidResult.success) {
+        console.log(
+          `[sd-delivery/mark-delivered] Shopify mark_paid ${paidResult.skipped ? 'ya estaba pagada' : 'OK'} — order=${order_id} shopify=${order.shopify_order_id}`,
+        )
+      } else {
+        console.warn(
+          `[sd-delivery/mark-delivered] Shopify mark_paid FALLÓ (flujo local OK) — order=${order_id} shopify=${order.shopify_order_id} error=${paidResult.error}`,
+        )
+      }
+    }
 
     return NextResponse.json({
       action_id:         action!.id,

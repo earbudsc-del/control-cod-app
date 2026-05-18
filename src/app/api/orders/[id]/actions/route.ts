@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { ActionType, ContactResult } from '@/types'
 import { isAgentOrAbove } from '@/lib/roles'
+import { createLocalFulfillment } from '@/lib/shopify/fulfillments'
 
 interface ActionBody {
   action_type: ActionType
@@ -48,6 +49,50 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       .single()
 
     if (error) throw error
+
+    // ── Sincronización Shopify: crear fulfillment cuando el mensajero sale a ruta ──
+    if (action_type === 'route_confirmed') {
+      const { data: order } = await supabase
+        .from('orders')
+        .select('shopify_order_id, tracking_number, source')
+        .eq('id', order_id)
+        .single()
+
+      if (order?.shopify_order_id && order.source === 'shopify_webhook') {
+        const fulfillResult = await createLocalFulfillment(
+          order.shopify_order_id,
+          order.tracking_number ?? null,
+        )
+
+        // Log de sincronización — sin bloquear respuesta
+        const logEntry = {
+          order_id,
+          shopify_order_id: order.shopify_order_id,
+          event_type:       'fulfillment',
+          result:           fulfillResult.success
+            ? (fulfillResult.skipped ? 'skipped' : 'success')
+            : 'error',
+          error_message:    fulfillResult.error ?? null,
+          metadata:         { action_type, fulfillment_id: fulfillResult.fulfillment_id ?? null },
+          triggered_by:     profile.id,
+        }
+
+        supabase.from('shopify_sync_log').insert(logEntry).then(({ error: logErr }) => {
+          if (logErr) console.error('[actions/route_confirmed] shopify_sync_log error:', logErr.message)
+        })
+
+        if (fulfillResult.success) {
+          console.log(
+            `[actions/route_confirmed] Shopify fulfillment ${fulfillResult.skipped ? 'ya existía' : 'creado'} — order=${order_id} shopify=${order.shopify_order_id}`,
+          )
+        } else {
+          console.warn(
+            `[actions/route_confirmed] Shopify fulfillment FALLÓ (flujo local OK) — order=${order_id} shopify=${order.shopify_order_id} error=${fulfillResult.error}`,
+          )
+        }
+      }
+    }
+
     return NextResponse.json(data, { status: 201 })
   } catch (err) {
     console.error('[POST /api/orders/[id]/actions]', err)
