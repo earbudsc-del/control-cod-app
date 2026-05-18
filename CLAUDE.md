@@ -4867,6 +4867,103 @@ No hay FK formal — el join se hace en TypeScript en la API.
 
 ---
 
+## FIX: Flujo operativo correcto del mensajero SD — Confirmar ruta antes de entregar (2026-05-18)
+
+### Problema resuelto
+
+El flujo anterior mostraba el botón "Marcar entregado" directamente desde el inicio, sin requerir que el mensajero confirmara que saldría a ruta. Esto ensuciaba el perfil del mensajero con entregas registradas antes de salir, y rompía el flujo operativo real.
+
+### Flujo correcto implementado
+
+```
+Pedido asignado → aparece en tab "Pendientes"
+    ↓ mensajero confirma salida
+[Confirmar ruta] → registra agent_action(route_confirmed) → tab "En ruta"
+    ↓ mensajero entrega
+[Marcar entregado] → POST /api/sd-delivery/orders/[id]/mark-delivered
+    → normalized_status='delivered' en DB al instante → tab "Entregados"
+
+En cualquier momento:
+[No responde] → agent_action(contacted, no_answer) → tab "No responden"
+[Reprogramar] → agent_action(rescheduled) → tab "No responden"
+[WA] / [Llamar] → siempre visibles, registran agent_action(contacted)
+```
+
+### Tabs (4 tabs operativos)
+
+| Tab | Filtro local (actionMap) |
+|---|---|
+| **Pendientes** | sin acción, o `contacted`, o `note_added` |
+| **En ruta** | `route_confirmed` |
+| **No responden** | `no_answer` o `rescheduled` |
+| **Entregados** | `delivered` o en deliveredDb |
+
+El tab activo se deriva del `actionMap` local (en sesión). Cambios de estado se persisten en `agent_actions` via API.
+
+### Botones por estado
+
+| Estado del pedido | Botones mostrados |
+|---|---|
+| Pendiente | **Confirmar ruta** (teal, ancho completo) · No responde · Nota |
+| En ruta | **Marcar entregado** (verde, ancho completo) · No resp. · Reprogramar · Nota |
+| No responde | badge No responde · Nota |
+| Entregado | badge Entregado ✓ |
+| Siempre | WhatsApp · Llamar (cuando hay teléfono y no está entregado) |
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/types/index.ts` | `ActionType` agrega `'route_confirmed'`. `ACTION_LABELS` agrega `route_confirmed: 'Confirmó salida a ruta'`. |
+| `src/app/api/orders/[id]/actions/route.ts` | `VALID_TYPES` agrega `'route_confirmed'`. |
+| `src/app/api/sd-delivery/performance/route.ts` | Agrega `enRutaHoy` (count de `route_confirmed` hoy por el agente). Response: `{ entregadosHoy, entregadosAyer, enRutaHoy, contactadosHoy, noRespondenHoy, reprogramadosHoy }`. |
+| `src/app/(app)/sd-delivery/page.tsx` | Reescritura completa del flujo. Tab type: `pendientes \| en_ruta \| no_responden \| entregados`. Nuevo `confirmRoute()`. Nuevo `localEstado()` helper. SdCard rediseñada: 3 estados visuales distintos. Strip "Mi día" muestra `enRutaHoy`. |
+
+### Función `confirmRoute()` (page.tsx)
+
+```typescript
+async function confirmRoute(orderId: string) {
+  // POST /api/orders/{id}/actions con action_type='route_confirmed'
+  // → setActionMap(prev => ({ ...prev, [orderId]: 'route_confirmed' }))
+  // → orden pasa a tab "En ruta"
+  // → solo desde "En ruta" aparece "Marcar entregado"
+}
+```
+
+### Función `localEstado()` (page.tsx)
+
+```typescript
+function localEstado(accion: LocalAccion): 'pendiente' | 'en_ruta' | 'no_responde' | 'entregado' {
+  if (!accion || accion === 'contacted' || accion === 'note_added') return 'pendiente'
+  if (accion === 'route_confirmed')                                  return 'en_ruta'
+  if (accion === 'no_answer' || accion === 'rescheduled')            return 'no_responde'
+  if (accion === 'delivered')                                        return 'entregado'
+  return 'pendiente'
+}
+```
+
+### Seguridad / qué NO cambia
+
+- `mark-delivered` endpoint: sin cambios — sigue marcando `normalized_status='delivered'` al instante
+- EFI: NO tocado (flujo es 100% local SD, sin EFI)
+- Datos financieros: NO expuestos al agente
+- El `dateFilter` (Hoy/Ayer/Todos) sigue funcionando: filtra activos por `status_since` y entregados por `reported_at`
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `santo_domingo_delivery_agent`
+3. En `/sd-delivery`: verificar tab "Pendientes" con botón **"Confirmar ruta"** (no "Entregado")
+4. Click "Confirmar ruta" en un pedido → toast "Ruta confirmada" → pedido aparece en tab "En ruta"
+5. En tab "En ruta": verificar botón **"Marcar entregado"** visible
+6. Click "Marcar entregado" → pedido pasa a tab "Entregados"
+7. En tab "Pendientes": verificar botones WA + Llamar siempre visibles
+8. Verificar "No responde" mueve pedido a tab "No responden"
+9. Strip "Mi día": verificar que `enRutaHoy` sube al confirmar ruta
+10. `npx tsc --noEmit` → sin errores ✅ (verificado 2026-05-18)
+
+---
+
 ## MÓDULO SD DELIVERY — Mensajero local Gran Santo Domingo (2026-05-18)
 
 ### Qué se hizo
@@ -4881,8 +4978,8 @@ Nuevo rol `santo_domingo_delivery_agent` y módulo completo `/sd-delivery` para 
 | `src/lib/roles.ts` | `OPERATIVE_ROLES` agrega `'santo_domingo_delivery_agent'` — `isAgentOrAbove()` retorna true para este rol |
 | `src/components/layout/sidebar.tsx` | Import `MapPin` de lucide-react. Nav `santo_domingo_delivery_agent`: Mi rendimiento + Entregas SD (MapPin, amber). |
 | `src/app/api/sd-delivery/orders/[id]/mark-delivered/route.ts` | **NUEVO.** `POST /api/sd-delivery/orders/[id]/mark-delivered`. Roles: admin + santo_domingo_delivery_agent. Marca `normalized_status='delivered'` inmediatamente (sin esperar EFI). |
-| `src/app/api/sd-delivery/performance/route.ts` | **NUEVO.** `GET /api/sd-delivery/performance`. Stats del agente SD: entregadosHoy/Ayer, contactadosHoy, noRespondenHoy, reprogramadosHoy. |
-| `src/app/(app)/sd-delivery/page.tsx` | **NUEVO.** Página móvil-first para mensajero SD. Ver detalles abajo. |
+| `src/app/api/sd-delivery/performance/route.ts` | **NUEVO** (luego modificado — ver fix arriba). `GET /api/sd-delivery/performance`. |
+| `src/app/(app)/sd-delivery/page.tsx` | **NUEVO** (luego reescrito — ver fix arriba). Página móvil-first para mensajero SD. |
 
 ### Detección de zona SD (`isSantoDomingoOrder`)
 

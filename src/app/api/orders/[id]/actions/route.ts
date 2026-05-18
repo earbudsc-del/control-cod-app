@@ -29,6 +29,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const VALID_TYPES: ActionType[] = [
       'contacted','confirmed','rescheduled','recovered',
       'courier_claim','status_updated','returned','delivered',
+      'route_confirmed',
     ]
     if (!VALID_TYPES.includes(action_type)) {
       return NextResponse.json({ error: 'Tipo de acción inválido' }, { status: 400 })

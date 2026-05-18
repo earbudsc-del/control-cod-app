@@ -41,6 +41,7 @@ export type ActionType =
   | 'status_updated'
   | 'returned'
   | 'delivered'
+  | 'route_confirmed'
 export type InvalidReason =
   | 'courier_no_call'
   | 'courier_no_show'
@@ -324,15 +325,16 @@ export const CLASSIFICATION_COLORS: Record<Classification, string> = {
 }
 
 export const ACTION_LABELS: Record<ActionType, string> = {
-  contacted:      'Contactó al cliente',
-  confirmed:      'Confirmó recepción',
-  rescheduled:    'Reprogramó entrega',
-  recovered:      'Recuperó pedido',
-  courier_claim:  'Reclamo al courier',
-  note_added:     'Nota interna',
-  status_updated: 'Actualizó estado',
-  returned:       'Confirmó devolución',
-  delivered:      'Confirmó entrega',
+  contacted:       'Contactó al cliente',
+  confirmed:       'Confirmó recepción',
+  rescheduled:     'Reprogramó entrega',
+  recovered:       'Recuperó pedido',
+  courier_claim:   'Reclamo al courier',
+  note_added:      'Nota interna',
+  status_updated:  'Actualizó estado',
+  returned:        'Confirmó devolución',
+  delivered:       'Confirmó entrega',
+  route_confirmed: 'Confirmó salida a ruta',
 }
 
 export type TaskType = 'follow_up' | 'novedad' | 'confirmation' | 'recovery'

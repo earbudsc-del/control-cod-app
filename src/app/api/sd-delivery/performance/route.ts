@@ -21,6 +21,7 @@ export async function GET() {
     const [
       { count: entregadosHoy },
       { count: entregadosAyer },
+      { count: enRutaHoy },
       { count: contactadosHoy },
       { count: noRespondenHoy },
       { count: reprogramadosHoy },
@@ -41,6 +42,14 @@ export async function GET() {
         .eq('action_type', 'delivered')
         .gte('created_at', yesterdayIso)
         .lt('created_at', todayIso),
+
+      // Rutas confirmadas hoy (mensajero confirmó salida)
+      supabase
+        .from('agent_actions')
+        .select('*', { count: 'exact', head: true })
+        .eq('agent_id', agentId)
+        .eq('action_type', 'route_confirmed')
+        .gte('created_at', todayIso),
 
       // Contactados hoy (cualquier acción contacted)
       supabase
@@ -69,10 +78,11 @@ export async function GET() {
     ])
 
     return NextResponse.json({
-      entregadosHoy:   entregadosHoy   ?? 0,
-      entregadosAyer:  entregadosAyer  ?? 0,
-      contactadosHoy:  contactadosHoy  ?? 0,
-      noRespondenHoy:  noRespondenHoy  ?? 0,
+      entregadosHoy:    entregadosHoy    ?? 0,
+      entregadosAyer:   entregadosAyer   ?? 0,
+      enRutaHoy:        enRutaHoy        ?? 0,
+      contactadosHoy:   contactadosHoy   ?? 0,
+      noRespondenHoy:   noRespondenHoy   ?? 0,
       reprogramadosHoy: reprogramadosHoy ?? 0,
     })
   } catch (err) {
