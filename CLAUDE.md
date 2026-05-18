@@ -79,6 +79,116 @@ Para las guías ya activas en EFI sin match en DB, se puede crear un endpoint de
 - [x] Paso 3: reconciliación retroactiva — **IMPLEMENTADO** (2026-05-17)
 - [x] Paso 4: importación masiva EFI (CSV) — **IMPLEMENTADO** (2026-05-17)
 - [x] Paso 5: límite de importación aumentado a 500 guías — **IMPLEMENTADO** (2026-05-17)
+- [x] Paso 6: revalidación en tiempo real contra EFI de guías activas — **IMPLEMENTADO** (2026-05-17)
+
+---
+
+## FIX: Revalidación en tiempo real de guías activas contra EFI — Paso 6 (2026-05-17)
+
+### Problema
+
+Después de la importación masiva (Paso 4), los estados en DB reflejaban el CSV exportado de EFI, no el estado actual real. El CSV puede tener horas o días de antigüedad. Ejemplo de discrepancia observada:
+
+| Estado | App (post-import) | EFI real |
+|--------|-------------------|----------|
+| Novedad | 97 | 87 |
+| Tránsito | 21 | 19 |
+| Reparto | 17 | 19 |
+| Generadas | 22 | — |
+
+### Qué se hizo
+
+Nuevo endpoint `POST /api/admin/sync-imported-active-guides` que consulta EFI en tiempo real para todas las guías activas en DB y corrige los estados del CSV con el estado real actual.
+
+### Archivos creados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/admin/sync-imported-active-guides/route.ts` | **NUEVO.** `POST /api/admin/sync-imported-active-guides`. Solo admin. Consulta EFI real-time. `maxDuration=300`. Default 150 guías, configurable hasta 300. |
+
+### Endpoint `POST /api/admin/sync-imported-active-guides`
+
+**Auth:** 401 sin sesión · 403 para no-admin
+
+**Body (todos opcionales):**
+```json
+{ "limit": 150 }
+```
+`limit`: cuántas guías procesar (default 150, máx 300). Se procesan las más antiguas primero (`last_tracking_update ASC NULLS FIRST`).
+
+**Universo activo consultado:** `normalized_status IN ('in_transit', 'en_reparto', 'novedad')` + `tracking_number IS NOT NULL`
+
+**Flujo interno:**
+1. Consulta DB → guías activas ordenadas por `last_tracking_update ASC NULLS FIRST`
+2. Para cada guía: llama `updateOrderTracking()` (lib ya existente) con 600ms de pausa entre calls
+3. `updateOrderTracking` hace: fetch EFI → parse → DB update completo (raw_status, normalized_status, delivery_attempts, historial, fechas)
+4. Registra cambios de estado para el summary
+
+**Rendimiento:** 150 guías × (600ms delay + ~3s fetch) ≈ 90–135s. Bien dentro de `maxDuration=300`.
+
+**Response:**
+```json
+{
+  "summary": {
+    "total_queried": 135,
+    "checked": 130,
+    "updated": 128,
+    "changed_status": 23,
+    "skipped": 2,
+    "failed": 5
+  },
+  "by_old_status": { "in_transit": 21, "en_reparto": 17, "novedad": 97 },
+  "by_new_status": { "in_transit": 19, "en_reparto": 19, "novedad": 87, "delivered": 3, "returned": 2 },
+  "changed": [
+    { "order_number": "1234", "tracking_number": "9001234", "old_status": "novedad", "new_status": "delivered" }
+  ],
+  "failed": [
+    { "order_number": "5678", "tracking_number": "9005678", "error": "Guía no encontrada en EFI" }
+  ]
+}
+```
+
+**Campos del summary:**
+| Campo | Descripción |
+|---|---|
+| `total_queried` | Filas que devolvió la query DB |
+| `checked` | EFI respondió exitosamente |
+| `updated` | DB actualizado (status o datos) |
+| `changed_status` | `normalized_status` cambió respecto a DB anterior |
+| `skipped` | EFI devolvió `unknown` y se evitó sobreescribir un estado válido |
+| `failed` | EFI no respondió o error de DB |
+
+**Seguridad / qué NO hace:**
+- No crea registros nuevos
+- No toca campos financieros
+- No modifica guías `delivered` ni `returned` (no están en el universo activo)
+- No fuerza estados — usa el mismo parser que el cron normal (`updateOrderTracking`)
+- Solo admin puede acceder
+
+### Cómo usar en producción
+
+```bash
+# Con límite default (150):
+curl -X POST https://tu-app.vercel.app/api/admin/sync-imported-active-guides \
+  -H "Content-Type: application/json" \
+  -H "Cookie: [sesión admin]" \
+  -d '{}'
+
+# Con límite custom:
+curl -X POST https://tu-app.vercel.app/api/admin/sync-imported-active-guides \
+  -H "Content-Type: application/json" \
+  -H "Cookie: [sesión admin]" \
+  -d '{ "limit": 200 }'
+```
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como admin
+3. `curl -X POST http://localhost:3000/api/admin/sync-imported-active-guides -H "Content-Type: application/json" -H "Cookie: [sesión]" -d '{}'`
+4. Verificar response: `summary.changed_status > 0` si había discrepancias
+5. `by_old_status` vs `by_new_status` muestra exactamente cuánto cambió cada categoría
+6. En Supabase: confirmar que `normalized_status` y `raw_status` de las guías cambiadas reflejan ahora el estado real de EFI
 
 ---
 
