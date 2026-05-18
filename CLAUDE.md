@@ -82,6 +82,82 @@ Para las guías ya activas en EFI sin match en DB, se puede crear un endpoint de
 - [x] Paso 6: revalidación en tiempo real contra EFI de guías activas — **IMPLEMENTADO** (2026-05-17)
 - [x] Paso 7: debug y corrección de discrepancias novedad DB vs EFI — **IMPLEMENTADO** (2026-05-18)
 - [x] Paso 8: `indemnizacion` como normalized_status independiente — **IMPLEMENTADO** (2026-05-17)
+- [x] Paso 9: migración DB de registros previos al Paso 8 + fix `failed_attempt` — **IMPLEMENTADO** (2026-05-18)
+
+---
+
+## FIX: Migración de registros previos al Paso 8 — indemnizacion en DB (2026-05-18)
+
+### Problema
+
+El parser (Paso 8) mapea correctamente `raw_status ILIKE '%indemniz%'` → `normalized_status='indemnizacion'` para las guías sincronizadas por el cron a partir del 2026-05-17. Sin embargo, los registros ya existentes en DB (importados por CSV antes del Paso 8) siguen con `normalized_status='novedad'` y `raw_status='Indemnización'`. Esto causa:
+
+- Tab `⚖ Indemniz.` muestra 0 órdenes
+- Conteo de novedades inflado (~10 extra)
+- Ejemplo: guía `9000532922` aparece en Novedad aunque raw_status = "Indemnización"
+
+### Qué se hizo
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/admin/fix-indemnizacion-status/route.ts` | **NUEVO.** `POST /api/admin/fix-indemnizacion-status`. Solo admin. DB-only (sin llamadas EFI). Encuentra `normalized_status='novedad' AND raw_status ILIKE '%indemniz%'` y actualiza a `normalized_status='indemnizacion'`. Devuelve `{ scanned, updated, sample }`. |
+| `src/app/api/debug/indemnizacion-status/route.ts` | **NUEVO.** `GET /api/debug/indemnizacion-status`. Solo admin. Solo lectura. Devuelve `{ total_indemnizacion, total_mismatched, sample, note }`. |
+| `src/app/api/orders/route.ts` | **MODIFICADO.** Filtro `failed_attempt`: añadido `.neq('normalized_status', 'indemnizacion')`. Previene que órdenes de indemnización con `delivery_attempts >= 1` aparezcan en la vista de intentos fallidos. |
+
+### Endpoints
+
+#### `GET /api/debug/indemnizacion-status`
+
+**Auth:** 401 sin sesión · 403 para no-admin · solo lectura
+
+**Response:**
+```json
+{
+  "generatedAt": "...",
+  "total_indemnizacion": 12,
+  "total_mismatched": 8,
+  "sample": [
+    { "tracking_number": "9000532922", "order_number": "#8750", "customer_name": "...", "raw_status": "Indemnización", "last_tracking_update": "...", "created_at": "..." }
+  ],
+  "note": "total_mismatched > 0 significa que hay órdenes en novedad con raw_status de indemnización — ejecutar POST /api/admin/fix-indemnizacion-status para corregirlas."
+}
+```
+
+#### `POST /api/admin/fix-indemnizacion-status`
+
+**Auth:** 401 sin sesión · 403 para no-admin
+
+**Lógica:**
+1. Query: `normalized_status='novedad' AND raw_status ILIKE '%indemniz%'`
+2. UPDATE en lote: `normalized_status='indemnizacion'`
+3. Devuelve `{ scanned, updated, sample }` (muestra máx. 20 filas)
+
+**Response:**
+```json
+{ "scanned": 8, "updated": 8, "sample": [...] }
+```
+
+Si ya no hay desincronizadas: `{ "scanned": 0, "updated": 0, "sample": [] }`
+
+### Fix secundario: `failed_attempt` excluye `indemnizacion`
+
+`/api/orders?status=failed_attempt` filtraba `delivery_attempts >= 1 AND normalized_status != 'delivered'`. Las órdenes de indemnización (que tienen delivery_attempts >= 1 por haberlo sido novedades) aparecían incorrectamente en esa vista.
+
+**Fix:** `.neq('normalized_status', 'indemnizacion')` añadido al branch `failed_attempt` en `src/app/api/orders/route.ts`.
+
+### Flujo de uso
+
+1. `GET /api/debug/indemnizacion-status` → verificar `total_mismatched`
+2. Si `total_mismatched > 0`: `POST /api/admin/fix-indemnizacion-status`
+3. Verificar: tab `⚖ Indemniz.` en `/novedad` muestra las órdenes; conteo de novedades baja en igual cantidad
+
+### Seguridad / qué NO hace
+
+- No llama a EFI (solo DB)
+- No crea ni elimina registros
+- No modifica guías que ya tengan `normalized_status='indemnizacion'`
+- Solo admin puede ejecutarlo
+- Idempotente: correr dos veces no duplica actualizaciones
 
 ---
 

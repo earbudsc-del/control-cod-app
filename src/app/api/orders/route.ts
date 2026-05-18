@@ -40,7 +40,8 @@ export async function GET(request: Request) {
 
     if (status === 'failed_attempt') {
       // "Intento fallido" no es un normalized_status — son pedidos con al menos un intento de entrega no completado
-      query = query.gte('delivery_attempts', 1).neq('normalized_status', 'delivered')
+      // Excluir indemnizacion: aunque tenga delivery_attempts >= 1, es un estado de reclamo independiente
+      query = query.gte('delivery_attempts', 1).neq('normalized_status', 'delivered').neq('normalized_status', 'indemnizacion')
     } else if (status === 'in_transit') {
       // in_transit activos: excluye guías con raw_status que indique cancelación o anulación,
       // aunque normalized_status aún no haya sido actualizado por el cron (estado transitorio).
