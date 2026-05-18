@@ -80,6 +80,113 @@ Para las guías ya activas en EFI sin match en DB, se puede crear un endpoint de
 - [x] Paso 4: importación masiva EFI (CSV) — **IMPLEMENTADO** (2026-05-17)
 - [x] Paso 5: límite de importación aumentado a 500 guías — **IMPLEMENTADO** (2026-05-17)
 - [x] Paso 6: revalidación en tiempo real contra EFI de guías activas — **IMPLEMENTADO** (2026-05-17)
+- [x] Paso 7: debug y corrección de discrepancias novedad DB vs EFI — **IMPLEMENTADO** (2026-05-18)
+
+---
+
+## FIX: Debug y corrección de discrepancias novedad DB vs EFI — Paso 7 (2026-05-18)
+
+### Problema
+
+Después de la importación masiva y la sincronización general (Pasos 4–6), tránsito y reparto quedaron alineados, pero aún había 10 novedades de más en la app (App: 106, EFI: 96). Las discrepancias venían del CSV importado, cuyos estados tenían horas de antigüedad al momento de la importación.
+
+### Qué se hizo
+
+Dos endpoints nuevos que trabajan en pareja: uno diagnóstico (sin escrituras) y uno correctivo.
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/debug/novedad-vs-efi/route.ts` | **NUEVO.** `GET /api/debug/novedad-vs-efi`. Solo admin. Solo lectura. Consulta EFI real-time para cada novedad en DB y compara. `maxDuration=300`. Limit configurable via `?limit=N` (default 120, máx 200). |
+| `src/app/api/admin/fix-novedad-mismatches/route.ts` | **NUEVO.** `POST /api/admin/fix-novedad-mismatches`. Solo admin. Consulta EFI y aplica `updateOrderTracking()` para todas las novedades. `maxDuration=300`. Limit configurable en body. |
+
+### Endpoint debug: `GET /api/debug/novedad-vs-efi`
+
+**Auth:** 401 sin sesión · 403 para no-admin · solo lectura
+
+**Query params:**
+- `limit` — cuántas novedades revisar (default 120, máx 200). Default diseñado para cubrir el universo típico de ~106 novedades.
+
+**Flujo:**
+1. Query DB: `normalized_status='novedad'` + `tracking_number IS NOT NULL`, ordenado por `last_tracking_update ASC`
+2. Para cada guía: fetch EFI HTML directo + `parseEFITracking()` — SIN escribir DB
+3. Categoriza: `still_novedad` / `changed_from_novedad` / `unknown_or_failed`
+4. `changed_from_novedad` ordenadas por urgencia: delivered > returned > en_reparto > in_transit
+
+**Response:**
+```json
+{
+  "generated_at": "...",
+  "query": { "limit": 120, "checked": 106, "note": "Se revisaron todas las novedades." },
+  "summary": {
+    "total_db_novedad": 106,
+    "still_novedad_in_efi": 96,
+    "changed_from_novedad": 7,
+    "unknown_or_failed": 3,
+    "by_efi_status": { "novedad": 96, "delivered": 3, "in_transit": 2, "en_reparto": 2, "not_found": 2, "unknown": 1 }
+  },
+  "changed_from_novedad": [
+    {
+      "tracking_number": "9001234",
+      "order_number": "1234",
+      "customer_name": "Juan Pérez",
+      "last_tracking_update": "2026-05-17T10:00:00Z",
+      "db_raw_status": "Novedad",
+      "efi_raw_status": "Entregada",
+      "efi_normalized_status": "delivered"
+    }
+  ],
+  "still_novedad": [...],
+  "unknown_or_failed": [...]
+}
+```
+
+### Endpoint fix: `POST /api/admin/fix-novedad-mismatches`
+
+**Auth:** 401 sin sesión · 403 para no-admin
+
+**Body (opcional):**
+```json
+{ "limit": 120 }
+```
+
+**Flujo:** igual que `sync-imported-active-guides` pero filtrado solo a `normalized_status='novedad'`. Usa `updateOrderTracking()` que aplica el guardia anti-unknown-overwrite (si EFI devuelve `unknown`, preserva `novedad` en DB).
+
+**Response:**
+```json
+{
+  "summary": {
+    "total_queried": 106,
+    "checked": 103,
+    "updated": 101,
+    "changed_status": 10,
+    "skipped": 2,
+    "failed": 3
+  },
+  "by_old_status": { "novedad": 106 },
+  "by_new_status": { "novedad": 96, "delivered": 4, "in_transit": 3, "en_reparto": 2, "returned": 1 },
+  "changed": [
+    { "order_number": "1234", "tracking_number": "9001234", "customer_name": "Juan Pérez", "old_status": "novedad", "new_status": "delivered" }
+  ],
+  "failed": [...]
+}
+```
+
+### Rendimiento
+
+- 120 guías × (500ms delay + ~1.5s fetch promedio) ≈ 240s → dentro del `maxDuration=300`
+- EFI delay: 500ms (vs 600ms del batch — sin escritura DB en el debug, más liviano)
+
+### Flujo recomendado de uso
+
+1. Ejecutar debug primero: `GET /api/debug/novedad-vs-efi`
+2. Revisar `changed_from_novedad` — ver cuáles guías ya no son novedad en EFI
+3. Si el resultado tiene sentido, ejecutar fix: `POST /api/admin/fix-novedad-mismatches`
+4. Verificar `by_new_status` del fix para confirmar que los conteos se alinean con EFI
+
+### Seguridad / qué NO hace
+
+- Debug: no escribe nada en DB
+- Fix: no crea registros nuevos, no toca financiero, no modifica guías `delivered`/`returned` (no están en el universo novedad), usa mismo parser que el cron
 
 ---
 
