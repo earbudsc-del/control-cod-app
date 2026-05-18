@@ -22,6 +22,7 @@ export async function GET() {
       { count: entregadosHoy },
       { count: entregadosAyer },
       { count: enRutaHoy },
+      { count: confirmedHoy },
       { count: contactadosHoy },
       { count: noRespondenHoy },
       { count: reprogramadosHoy },
@@ -49,6 +50,14 @@ export async function GET() {
         .select('*', { count: 'exact', head: true })
         .eq('agent_id', agentId)
         .eq('action_type', 'route_confirmed')
+        .gte('created_at', todayIso),
+
+      // Clientes confirmados hoy por el mensajero SD
+      supabase
+        .from('agent_actions')
+        .select('*', { count: 'exact', head: true })
+        .eq('agent_id', agentId)
+        .eq('action_type', 'confirmed')
         .gte('created_at', todayIso),
 
       // Contactados hoy (cualquier acción contacted)
@@ -81,6 +90,7 @@ export async function GET() {
       entregadosHoy:    entregadosHoy    ?? 0,
       entregadosAyer:   entregadosAyer   ?? 0,
       enRutaHoy:        enRutaHoy        ?? 0,
+      confirmedHoy:     confirmedHoy     ?? 0,
       contactadosHoy:   contactadosHoy   ?? 0,
       noRespondenHoy:   noRespondenHoy   ?? 0,
       reprogramadosHoy: reprogramadosHoy ?? 0,

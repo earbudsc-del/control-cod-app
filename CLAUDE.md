@@ -5412,3 +5412,138 @@ Los mensajes se generan en el servidor (deterministas, sin IA). Ejemplos:
 - La fórmula de pago puede cambiar — siempre se muestra el disclaimer "Sistema experimental"
 - No se modificaron migraciones de DB para esta fase
 - `npx tsc --noEmit` limpio confirmado (2026-05-10)
+
+---
+
+## SD DELIVERY — Pedidos nuevos/pending + 5 tabs (2026-05-18)
+
+### Qué se hizo
+
+Extendió el módulo `/sd-delivery` para que el mensajero local también vea pedidos **nuevos de Shopify** (`confirmation_status='pending'`) de la zona SD, no solo los ya despachados (`en_reparto`). Esto permite que el mensajero ayude a confirmar pedidos antes de que pasen por el flujo de confirmación central, acelerando la entrega local.
+
+### Tabs (5 tabs operativos)
+
+| Tab | Fuente | Filtro local |
+|---|---|---|
+| **Nuevos / Por confirmar** | Pool B (`confirmationStatus=pending`) | sin acción, o `note_added` |
+| **Confirmados / Listos** | Pool A (`en_reparto`) + Pool B con `client_confirmed` | no `route_confirmed` |
+| **En ruta** | Pool A | `route_confirmed` |
+| **No responden** | Pool A + Pool B | `no_answer` o `rescheduled` |
+| **Entregados** | Pool A + sesión | `delivered` o en `deliveredDb` |
+
+### Botones por displayState
+
+| DisplayState | Botones |
+|---|---|
+| `nuevo` | WhatsApp · Llamar · **Cliente confirma** (azul) · **No responde** |
+| `espera_despacho` | badge "Confirmado · esperando despacho admin" (sin botones de acción) |
+| `confirmado_listo` | WhatsApp · Llamar · **Confirmar ruta** (teal) · No responde · Nota |
+| `en_ruta` | WhatsApp · Llamar · **Marcar entregado** (verde) · No resp. · Reprogram. · Nota |
+| `no_responde` | badge · Nota · si pool=nuevo: **"El cliente llamó y confirma"** |
+| `entregado` | badge "Entregado" |
+
+### Flujo completo
+
+```
+Shopify → orders(confirmation_status='pending') → aparece en tab "Nuevos / Por confirmar"
+    ↓ mensajero llama/WA
+[Cliente confirma] → POST /api/sd-delivery/orders/[id]/confirm-client
+    → confirmation_status='confirmed', customer_confirmed=true
+    → agent_actions(action_type='confirmed')
+    → mueve a tab "Confirmados / Listos" (pool local = espera_despacho)
+    → Admin ve el pedido confirmado y asigna normalized_status='en_reparto'
+    → En próximo refresh: aparece en Pool A como confirmado_listo
+
+[No responde] → agent_actions(contacted, no_answer)
+    → mueve a tab "No responden"
+    → permanece en sistema (no sale)
+    → si llama después: botón "El cliente llamó y confirma" disponible
+
+Flujo existente (Pool A):
+Pendiente → Confirmar ruta → En ruta → Marcar entregado
+```
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/orders/route.ts` | Nuevo param `confirmationStatus`. `pending` filtra `confirmation_status='pending'` excluyendo `delivered`/`returned`. `confirmed` filtra confirmados. |
+| `src/app/api/orders/[id]/actions/route.ts` | `VALID_TYPES` agrega `'note_added'` (corrección de bug: estaba en el tipo pero no en la validación). |
+| `src/app/api/sd-delivery/orders/[id]/confirm-client/route.ts` | **NUEVO.** `POST /api/sd-delivery/orders/[id]/confirm-client`. Roles: admin + santo_domingo_delivery_agent. Actualiza `confirmation_status='confirmed'`, `customer_confirmed=true`, `customer_confirmed_at`, `last_confirmation_attempt`, `confirmation_method='call'`. Inserta `agent_actions(action_type='confirmed')`. 409 si ya estaba confirmado. |
+| `src/app/api/sd-delivery/performance/route.ts` | Agrega `confirmedHoy` (count de `confirmed` hoy por el agente). Response incluye `confirmedHoy`. |
+| `src/app/(app)/sd-delivery/page.tsx` | **REESCRITO.** Ver detalles abajo. |
+
+### Página `/sd-delivery` — cambios principales
+
+**Nuevos tipos:**
+- `Tab = 'nuevos' | 'confirmados' | 'en_ruta' | 'no_responden' | 'entregados'`
+- `OrderPool = 'nuevo' | 'confirmado'`
+- `DisplayState` — 6 estados visuales distintos
+- `PooledOrder = { order: Order; pool: OrderPool }`
+
+**Fetch (4 paralelos):**
+1. `GET /api/orders?status=en_reparto&limit=500` → Pool A (confirmados/en_reparto)
+2. `GET /api/orders?confirmationStatus=pending&limit=300` → Pool B (nuevos SD)
+3. `GET /api/reparto/entregados` → entregados
+4. `GET /api/sd-delivery/performance` → stats
+
+**Deduplicación:** Pool B excluye IDs ya presentes en Pool A para evitar duplicados.
+
+**Filtro de zona:** client-side usando `isSantoDomingoOrder` en ambos pools.
+
+**Filtro de fecha:** Pool A usa `status_since`; Pool B usa `created_at`.
+
+**Strip "Mi día":** agrega "Confirmados" (azul) junto a los demás conteos.
+
+**TAB_META colores:** cada tab tiene su color activo (azul=nuevos, teal=confirmados/en_ruta, amber=no_responden, emerald=entregados).
+
+**SdCard:** acepta `pool: OrderPool` + calcula `computeDisplayState()` para decidir qué botones mostrar. Mensaje de WhatsApp diferente para pedidos nuevos (solicita confirmación) vs pedidos en reparto (avisa que el mensajero pasará hoy).
+
+### Nuevo endpoint `POST /api/sd-delivery/orders/[id]/confirm-client`
+
+**Auth:** 401 sin sesión · 403 para no-admin/no-SD-agent · 409 si ya confirmado
+
+**Actualiza en `orders`:**
+- `confirmation_status = 'confirmed'`
+- `customer_confirmed = true`
+- `customer_confirmed_at = now()`
+- `last_confirmation_attempt = now()`
+- `confirmation_method = 'call'`
+
+**Inserta en `agent_actions`:**
+- `action_type = 'confirmed'`
+- `notes = 'Confirmado por mensajero SD (cliente confirmó recepción)'`
+
+**Response 201:**
+```json
+{ "action_id": "uuid", "confirmed_at": "ISO" }
+```
+
+### Qué NO hace / no cambia
+
+- EFI: no tocado (el flujo SD es 100% local)
+- `mark-delivered` endpoint: sin cambios
+- Montos/pagos: no expuestos
+- Sincronización con admin: automática — cuando el agente confirma, el admin ve `confirmation_status='confirmed'` en su vista de confirmación sin cambios de código
+
+### Comportamiento "espera_despacho"
+
+Cuando el mensajero marca "Cliente confirma":
+- El pedido se mueve localmente al tab "Confirmados / Listos" con estado `espera_despacho`
+- No se muestran botones de acción (solo badge informativo)
+- En el próximo refresh (3 min): si el admin ya despachó → aparece en Pool A como `confirmado_listo`; si no → desaparece del módulo hasta que el admin despache
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `santo_domingo_delivery_agent`
+3. Navegar a `/sd-delivery` → debe mostrar tab "Nuevos / Por confirmar" con pedidos SD `confirmation_status='pending'`
+4. Verificar que tab "Confirmados / Listos" muestra pedidos `en_reparto` (flujo existente)
+5. En tab "Nuevos": click WhatsApp/Llamar → registra `contacted` en `agent_actions`
+6. Click "Cliente confirma" → toast "Cliente confirmado" → pedido pasa a tab "Confirmados"
+7. Click "No responde" en un nuevo → pedido pasa a tab "No responden"
+8. En tab "No responden" (pool=nuevo): verificar botón "El cliente llamó y confirma" visible
+9. En tab "Confirmados" (pedido en_reparto): verificar botón "Confirmar ruta"
+10. En tab "En ruta": verificar botón "Marcar entregado"
+11. Strip "Mi día": verificar que `confirmedHoy` sube al confirmar clientes
+12. `npx tsc --noEmit` → sin errores ✅ (verificado 2026-05-18)

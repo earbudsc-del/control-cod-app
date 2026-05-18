@@ -12,23 +12,35 @@ import {
   Search, TrendingUp, Package2,
   CalendarDays, RotateCcw, FileText, X,
   ChevronLeft, ChevronRight, Truck, Navigation,
+  UserCheck, Clock,
 } from 'lucide-react'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
-type Tab        = 'pendientes' | 'en_ruta' | 'no_responden' | 'entregados'
+type Tab        = 'nuevos' | 'confirmados' | 'en_ruta' | 'no_responden' | 'entregados'
 type DateFilter = 'hoy' | 'ayer' | 'todos'
-
-// 'route_confirmed' → en_ruta
-// 'no_answer' | 'rescheduled' → no_responden
-// 'delivered' → entregados
-// anything else (contacted, note_added, undefined) → pendientes
+type OrderPool  = 'nuevo' | 'confirmado'
 type LocalAccion = string | undefined
+
+// Estados de visualización del card
+type DisplayState =
+  | 'nuevo'            // pool=nuevo, sin acción (necesita confirmación)
+  | 'espera_despacho'  // pool=nuevo, client_confirmed (admin debe despachar)
+  | 'confirmado_listo' // pool=confirmado, sin route_confirmed
+  | 'en_ruta'          // pool=confirmado, route_confirmed
+  | 'no_responde'      // no_answer/rescheduled (cualquier pool)
+  | 'entregado'
+
+interface PooledOrder {
+  order: Order
+  pool:  OrderPool
+}
 
 interface SdPerfData {
   entregadosHoy:    number
   entregadosAyer:   number
   enRutaHoy:        number
+  confirmedHoy:     number
   contactadosHoy:   number
   noRespondenHoy:   number
   reprogramadosHoy: number
@@ -73,9 +85,9 @@ function tiempoLabel(order: Order): string {
   const h    = horasEnReparto(order)
   const dias = Math.floor(h / 24)
   const hrs  = Math.floor(h % 24)
-  if (h < 1)     return 'Hace menos de 1h'
-  if (h < 24)    return `Hace ${Math.floor(h)}h`
-  if (dias === 1) return hrs > 0 ? `Hace 1d ${hrs}h` : 'Hace 1 día'
+  if (h < 1)      return 'Hace menos de 1h'
+  if (h < 24)     return `Hace ${Math.floor(h)}h`
+  if (dias === 1)  return hrs > 0 ? `Hace 1d ${hrs}h` : 'Hace 1 día'
   return hrs > 0 ? `Hace ${dias}d ${hrs}h` : `Hace ${dias} días`
 }
 
@@ -99,13 +111,39 @@ function buildWaMsg(nombre: string, product: string | null | undefined): string 
   ].join('\n')
 }
 
-// Deriva el tab-estado local de un order
-function localEstado(accion: LocalAccion): 'pendiente' | 'en_ruta' | 'no_responde' | 'entregado' {
-  if (!accion || accion === 'contacted' || accion === 'note_added') return 'pendiente'
-  if (accion === 'route_confirmed') return 'en_ruta'
-  if (accion === 'no_answer' || accion === 'rescheduled') return 'no_responde'
-  if (accion === 'delivered') return 'entregado'
-  return 'pendiente'
+function buildWaMsgNuevo(nombre: string, product: string | null | undefined): string {
+  const n = nombre.trim() || 'cliente'
+  const p = (product ?? '').trim().slice(0, 32) || 'tu pedido'
+  return [
+    `Hola ${n} 😊,`,
+    '',
+    `Te contactamos para confirmar tu pedido de ${p} 📦.`,
+    '¿Puedes confirmar que lo recibirás hoy?',
+    '',
+    'Por favor tener el monto exacto listo 🙏',
+  ].join('\n')
+}
+
+function computeDisplayState(pool: OrderPool, accion: LocalAccion, isDelivered: boolean): DisplayState {
+  if (isDelivered) return 'entregado'
+  if (pool === 'nuevo') {
+    if (accion === 'client_confirmed')                          return 'espera_despacho'
+    if (accion === 'no_answer' || accion === 'rescheduled')     return 'no_responde'
+    return 'nuevo'
+  }
+  // pool === 'confirmado'
+  if (accion === 'route_confirmed')                             return 'en_ruta'
+  if (accion === 'no_answer' || accion === 'rescheduled')       return 'no_responde'
+  return 'confirmado_listo'
+}
+
+function computeTab(state: DisplayState): Tab {
+  if (state === 'nuevo')            return 'nuevos'
+  if (state === 'espera_despacho')  return 'confirmados'
+  if (state === 'confirmado_listo') return 'confirmados'
+  if (state === 'en_ruta')          return 'en_ruta'
+  if (state === 'no_responde')      return 'no_responden'
+  return 'entregados'
 }
 
 const PAGE_SIZE = 40
@@ -231,74 +269,88 @@ function ReprogramarModal({ orderId, name, onSave, onClose }: ReprogramarModalPr
 // ── Card móvil ────────────────────────────────────────────────────────────────
 
 interface SdCardProps {
-  order:           Order
-  accion:          LocalAccion
-  busy:            boolean
-  isDelivered:     boolean
-  onWA:            () => void
-  onLlamar:        () => void
-  onConfirmarRuta: () => void
-  onNoAnswer:      () => void
-  onEntregado:     () => void
-  onReprogramar:   () => void
-  onNota:          () => void
+  order:             Order
+  pool:              OrderPool
+  accion:            LocalAccion
+  busy:              boolean
+  isDelivered:       boolean
+  onWA:              () => void
+  onLlamar:          () => void
+  onConfirmarRuta:   () => void
+  onClienteConfirma: () => void
+  onNoAnswer:        () => void
+  onEntregado:       () => void
+  onReprogramar:     () => void
+  onNota:            () => void
 }
 
 function SdCard({
-  order, accion, busy, isDelivered,
-  onWA, onLlamar, onConfirmarRuta, onNoAnswer, onEntregado, onReprogramar, onNota,
+  order, pool, accion, busy, isDelivered,
+  onWA, onLlamar, onConfirmarRuta, onClienteConfirma, onNoAnswer, onEntregado, onReprogramar, onNota,
 }: SdCardProps) {
-  const nombre   = order.customer_name ?? ''
-  const waUrl    = whatsAppUrl(order.customer_phone, buildWaMsg(nombre, order.product_summary))
+  const nombre  = order.customer_name ?? ''
+  const waMsg   = pool === 'nuevo'
+    ? buildWaMsgNuevo(nombre, order.product_summary)
+    : buildWaMsg(nombre, order.product_summary)
+  const waUrl    = whatsAppUrl(order.customer_phone, waMsg)
   const telUrl   = callUrl(order.customer_phone)
   const hasPhone = !!order.customer_phone
   const crit     = criticalityLabel(order)
-  const estado   = isDelivered ? 'entregado' : localEstado(accion)
-
-  const isEnRuta     = estado === 'en_ruta'
-  const isNoResponde = estado === 'no_responde'
-  const isPendiente  = estado === 'pendiente'
+  const ds       = computeDisplayState(pool, accion, isDelivered)
 
   const ubicacion = order.city
     || order.province
     || (order.customer_address ? order.customer_address.slice(0, 24) : null)
 
-  const cardBg = isDelivered
-    ? 'bg-green-50/40'
-    : isEnRuta   ? 'bg-teal-50/30'
-    : crit === 'critico' ? 'bg-red-50/20'
-    : crit === 'riesgo'  ? 'bg-orange-50/20'
+  const cardBg =
+    ds === 'entregado'        ? 'bg-green-50/40'
+    : ds === 'en_ruta'        ? 'bg-teal-50/30'
+    : ds === 'nuevo'          ? 'bg-blue-50/30'
+    : ds === 'espera_despacho'? 'bg-purple-50/20'
+    : crit === 'critico'      ? 'bg-red-50/20'
+    : crit === 'riesgo'       ? 'bg-orange-50/20'
     : 'bg-white'
 
   return (
     <div className={`p-4 border-b border-teal-100 ${cardBg}`}>
 
-      {/* Cabecera: guía + badge de estado */}
+      {/* Cabecera: identificador + badge de estado */}
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="min-w-0">
           <p className="font-mono text-sm font-bold text-gray-900 truncate">
-            {order.tracking_number ?? '—'}
+            {order.tracking_number ?? order.order_number ?? '—'}
           </p>
-          {order.order_number && (
+          {order.tracking_number && order.order_number && (
             <p className="font-mono text-[10px] text-gray-400 mt-0.5">{order.order_number}</p>
           )}
         </div>
-        {isDelivered && (
+        {ds === 'entregado' && (
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700 shrink-0">
             <CheckCircle2 className="inline w-3 h-3 mr-0.5" />Entregado
           </span>
         )}
-        {isEnRuta && !isDelivered && (
+        {ds === 'en_ruta' && (
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 shrink-0">
             <Navigation className="inline w-3 h-3 mr-0.5" />En ruta
           </span>
         )}
-        {isNoResponde && !isDelivered && (
+        {ds === 'no_responde' && (
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 shrink-0">
             <PhoneMissed className="inline w-3 h-3 mr-0.5" />No responde
+            {pool === 'nuevo' && <span className="ml-1 opacity-70">· pendiente conf.</span>}
           </span>
         )}
-        {isPendiente && !isDelivered && (
+        {ds === 'nuevo' && (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 shrink-0">
+            <Clock className="inline w-3 h-3 mr-0.5" />Por confirmar
+          </span>
+        )}
+        {ds === 'espera_despacho' && (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 shrink-0">
+            <UserCheck className="inline w-3 h-3 mr-0.5" />Listo · esperando despacho
+          </span>
+        )}
+        {ds === 'confirmado_listo' && (
           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0
             ${crit === 'critico' ? 'bg-red-100 text-red-700 animate-pulse'
               : crit === 'riesgo'  ? 'bg-orange-100 text-orange-700'
@@ -311,6 +363,13 @@ function SdCard({
       {/* Cliente */}
       <p className="font-semibold text-gray-900 text-base leading-tight">{nombre || '—'}</p>
       <p className="font-mono text-sm text-gray-500 mt-0.5">{order.customer_phone || '—'}</p>
+
+      {/* Producto — visible para nuevos */}
+      {ds === 'nuevo' && order.product_summary && (
+        <p className="text-xs text-blue-700 font-medium mt-1 truncate" title={order.product_summary}>
+          📦 {order.product_summary.slice(0, 55)}
+        </p>
+      )}
 
       {/* Ubicación */}
       {ubicacion && (
@@ -325,14 +384,14 @@ function SdCard({
         </p>
       )}
 
-      {order.delivery_attempts > 0 && !isDelivered && (
+      {order.delivery_attempts > 0 && ds !== 'entregado' && (
         <p className="text-[11px] text-amber-600 font-medium mt-1">
           {order.delivery_attempts} intento{order.delivery_attempts > 1 ? 's' : ''} previos
         </p>
       )}
 
-      {/* WA + Llamar — siempre visibles cuando hay teléfono y no está entregado */}
-      {hasPhone && !isDelivered && !busy && (
+      {/* WA + Llamar — visibles excepto entregado y espera_despacho */}
+      {hasPhone && ds !== 'entregado' && ds !== 'espera_despacho' && !busy && (
         <div className="flex gap-2 mt-3">
           {waUrl && (
             <a href={waUrl} target="_blank" rel="noopener noreferrer" onClick={onWA}
@@ -353,9 +412,9 @@ function SdCard({
         </div>
       )}
 
-      {/* Acciones según estado */}
+      {/* Acciones según displayState */}
       <div className="mt-3">
-        {isDelivered ? (
+        {ds === 'entregado' ? (
           <span className="inline-flex items-center gap-1.5 text-xs font-semibold
                            px-3 py-1.5 rounded-full bg-green-100 text-green-700">
             <CheckCircle2 className="w-3.5 h-3.5" />Entregado — registrado
@@ -364,8 +423,30 @@ function SdCard({
         ) : busy ? (
           <Spinner className="w-5 h-5 text-teal-500" />
 
-        ) : isPendiente ? (
-          // Estado pendiente: solo "Confirmar ruta" + "No responde"
+        ) : ds === 'nuevo' ? (
+          <div className="space-y-2">
+            <button
+              onClick={onClienteConfirma}
+              className="w-full flex items-center justify-center gap-2
+                         bg-blue-600 active:bg-blue-700 text-white
+                         text-sm font-bold py-3 rounded-xl transition-colors">
+              <UserCheck className="w-4 h-4" />Cliente confirma
+            </button>
+            <button onClick={onNoAnswer}
+              className="w-full flex items-center justify-center gap-1.5
+                         bg-amber-100 active:bg-amber-200 text-amber-700
+                         text-sm font-medium py-2.5 rounded-xl transition-colors">
+              <PhoneMissed className="w-4 h-4" />No responde
+            </button>
+          </div>
+
+        ) : ds === 'espera_despacho' ? (
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold
+                           px-3 py-1.5 rounded-full bg-purple-100 text-purple-700">
+            <UserCheck className="w-3.5 h-3.5" />Confirmado — el admin asignará a ruta
+          </span>
+
+        ) : ds === 'confirmado_listo' ? (
           <div className="space-y-2">
             <button
               onClick={onConfirmarRuta}
@@ -390,8 +471,7 @@ function SdCard({
             </div>
           </div>
 
-        ) : isEnRuta ? (
-          // En ruta: "Marcar entregado" + "No responde" + "Reprogramar"
+        ) : ds === 'en_ruta' ? (
           <div className="space-y-2">
             <button
               onClick={onEntregado}
@@ -422,22 +502,33 @@ function SdCard({
             </div>
           </div>
 
-        ) : isNoResponde ? (
-          // No responde: badge + nota
-          <div className="flex items-center justify-between">
-            <span className="inline-flex items-center gap-1.5 text-xs font-semibold
-                             px-3 py-1.5 rounded-full bg-amber-100 text-amber-700">
-              <PhoneMissed className="w-3.5 h-3.5" />No responde
-            </span>
-            <button onClick={onNota}
-              className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-teal-600 ml-2">
-              <FileText className="w-3 h-3" />Nota
-            </button>
+        ) : ds === 'no_responde' ? (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold
+                               px-3 py-1.5 rounded-full bg-amber-100 text-amber-700">
+                <PhoneMissed className="w-3.5 h-3.5" />No responde
+                {pool === 'nuevo' && <span className="text-[10px] opacity-70 ml-1">· pendiente conf.</span>}
+              </span>
+              <button onClick={onNota}
+                className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-teal-600 ml-2">
+                <FileText className="w-3 h-3" />Nota
+              </button>
+            </div>
+            {pool === 'nuevo' && (
+              <button
+                onClick={onClienteConfirma}
+                className="w-full flex items-center justify-center gap-2
+                           bg-blue-100 active:bg-blue-200 text-blue-700
+                           text-xs font-semibold py-2.5 rounded-xl transition-colors">
+                <UserCheck className="w-3.5 h-3.5" />El cliente llamó y confirma
+              </button>
+            )}
           </div>
         ) : null}
       </div>
 
-      {/* Footer: ver detalle */}
+      {/* Ver detalle */}
       <div className="mt-3 flex items-center justify-end">
         <Link href={`/orders/${order.id}`}
           className="inline-flex items-center gap-1 text-xs font-medium text-teal-600 hover:text-teal-800">
@@ -451,35 +542,38 @@ function SdCard({
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function SdDeliveryPage() {
-  const [allOrders, setAllOrders]     = useState<Order[]>([])
-  const [deliveredDb, setDeliveredDb] = useState<DeliveredEntry[]>([])
-  const [perf, setPerf]               = useState<SdPerfData | null>(null)
-  const [loading, setLoading]         = useState(true)
-  const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
+  const [allEnReparto, setAllEnReparto] = useState<Order[]>([])
+  const [allNuevos, setAllNuevos]       = useState<Order[]>([])
+  const [deliveredDb, setDeliveredDb]   = useState<DeliveredEntry[]>([])
+  const [perf, setPerf]                 = useState<SdPerfData | null>(null)
+  const [loading, setLoading]           = useState(true)
+  const [lastRefresh, setLastRefresh]   = useState<Date>(new Date())
 
-  const [activeTab, setActiveTab]     = useState<Tab>('pendientes')
-  const [dateFilter, setDateFilter]   = useState<DateFilter>('hoy')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [currentPage, setCurrentPage] = useState(1)
+  const [activeTab, setActiveTab]       = useState<Tab>('nuevos')
+  const [dateFilter, setDateFilter]     = useState<DateFilter>('hoy')
+  const [searchQuery, setSearchQuery]   = useState('')
+  const [currentPage, setCurrentPage]   = useState(1)
 
-  const [actionMap, setActionMap]     = useState<Record<string, string>>({})
-  const [loadingRow, setLoadingRow]   = useState<Record<string, boolean>>({})
-  const [noteModal, setNoteModal]     = useState<{ orderId: string; name: string } | null>(null)
-  const [reModal, setReModal]         = useState<{ orderId: string; name: string } | null>(null)
-  const [toast, setToast]             = useState<{ msg: string; ok: boolean } | null>(null)
+  const [actionMap, setActionMap]       = useState<Record<string, string>>({})
+  const [loadingRow, setLoadingRow]     = useState<Record<string, boolean>>({})
+  const [noteModal, setNoteModal]       = useState<{ orderId: string; name: string } | null>(null)
+  const [reModal, setReModal]           = useState<{ orderId: string; name: string } | null>(null)
+  const [toast, setToast]               = useState<{ msg: string; ok: boolean } | null>(null)
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const [ordersRes, deliveredRes, perfRes]: [OrdersResponse, DeliveredEntry[], SdPerfData] =
-        await Promise.all([
+      const [enRepartoRes, nuevosRes, deliveredRes, perfRes]:
+        [OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData] = await Promise.all([
           fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc').then(r => r.json()),
+          fetch('/api/orders?confirmationStatus=pending&limit=300').then(r => r.json()),
           fetch('/api/reparto/entregados').then(r => r.json()),
           fetch('/api/sd-delivery/performance').then(r => r.json()),
         ])
-      setAllOrders(ordersRes.data ?? [])
+      setAllEnReparto(enRepartoRes.data ?? [])
+      setAllNuevos(nuevosRes.data ?? [])
       setDeliveredDb(Array.isArray(deliveredRes) ? deliveredRes : [])
       setPerf(perfRes)
       setLastRefresh(new Date())
@@ -496,12 +590,20 @@ export default function SdDeliveryPage() {
     return () => clearInterval(id)
   }, [fetchData])
 
-  // ── Órdenes SD (filtro por zona) ──────────────────────────────────────────
+  // ── Órdenes SD filtradas por zona ─────────────────────────────────────────
 
-  const sdOrders = useMemo(
-    () => allOrders.filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address)),
-    [allOrders],
+  const sdEnReparto = useMemo(
+    () => allEnReparto.filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address)),
+    [allEnReparto],
   )
+
+  const sdNuevos = useMemo(() => {
+    const enRepartoIds = new Set(allEnReparto.map(o => o.id))
+    return allNuevos.filter(o =>
+      isSantoDomingoOrder(o.city, o.province, o.customer_address) &&
+      !enRepartoIds.has(o.id),
+    )
+  }, [allNuevos, allEnReparto])
 
   const deliveredDbIds = useMemo(
     () => new Set(deliveredDb.map(e => e.order.id)),
@@ -509,55 +611,85 @@ export default function SdDeliveryPage() {
   )
 
   const sdDeliveredDb = useMemo(
-    () => deliveredDb.filter(e => isSantoDomingoOrder(e.order.city, e.order.province, e.order.customer_address)),
+    () => deliveredDb.filter(e =>
+      isSantoDomingoOrder(e.order.city, e.order.province, e.order.customer_address),
+    ),
     [deliveredDb],
   )
 
-  // Órdenes activas (no marcadas delivered)
-  const activeOrders = useMemo(
-    () => sdOrders.filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id)),
-    [sdOrders, actionMap, deliveredDbIds],
+  // ── Pooled orders (activos, no entregados en DB) ───────────────────────────
+
+  const allPooled = useMemo((): PooledOrder[] => {
+    const confirmedPool: PooledOrder[] = sdEnReparto
+      .filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id))
+      .map(o => ({ order: o, pool: 'confirmado' as OrderPool }))
+    const nuevosPool: PooledOrder[] = sdNuevos
+      .filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id))
+      .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
+    return [...nuevosPool, ...confirmedPool]
+  }, [sdEnReparto, sdNuevos, actionMap, deliveredDbIds])
+
+  // ── Filtro de fecha ────────────────────────────────────────────────────────
+
+  const filteredPooled = useMemo(() => {
+    if (dateFilter === 'todos') return allPooled
+    const check = dateFilter === 'hoy' ? isToday : isYesterday
+    return allPooled.filter(({ order, pool }) => {
+      const ts = pool === 'nuevo'
+        ? order.created_at
+        : (order.status_since ?? order.last_tracking_update ?? order.updated_at)
+      return check(ts)
+    })
+  }, [allPooled, dateFilter])
+
+  // ── Listas por tab ─────────────────────────────────────────────────────────
+
+  const nuevosList = useMemo(
+    () => filteredPooled.filter(({ order, pool }) =>
+      computeDisplayState(pool, actionMap[order.id], false) === 'nuevo',
+    ),
+    [filteredPooled, actionMap],
   )
 
-  // Órdenes activas filtradas por fecha (cuándo entraron a en_reparto)
-  const filteredActive = useMemo(() => {
-    if (dateFilter === 'todos') return activeOrders
-    if (dateFilter === 'hoy')
-      return activeOrders.filter(o => isToday(o.status_since ?? o.last_tracking_update ?? o.updated_at))
-    return activeOrders.filter(o => isYesterday(o.status_since ?? o.last_tracking_update ?? o.updated_at))
-  }, [activeOrders, dateFilter])
-
-  // Listas por tab
-  const pendientes  = useMemo(
-    () => filteredActive.filter(o => {
-      const a = actionMap[o.id]
-      return !a || a === 'contacted' || a === 'note_added'
+  const confirmadosList = useMemo(
+    () => filteredPooled.filter(({ order, pool }) => {
+      const s = computeDisplayState(pool, actionMap[order.id], false)
+      return s === 'espera_despacho' || s === 'confirmado_listo'
     }),
-    [filteredActive, actionMap],
+    [filteredPooled, actionMap],
   )
 
-  const enRuta = useMemo(
-    () => filteredActive.filter(o => actionMap[o.id] === 'route_confirmed'),
-    [filteredActive, actionMap],
+  const enRutaList = useMemo(
+    () => filteredPooled.filter(({ order, pool }) =>
+      computeDisplayState(pool, actionMap[order.id], false) === 'en_ruta',
+    ),
+    [filteredPooled, actionMap],
   )
 
-  const noResponden = useMemo(
-    () => filteredActive.filter(o => {
-      const a = actionMap[o.id]
-      return a === 'no_answer' || a === 'rescheduled'
-    }),
-    [filteredActive, actionMap],
+  const noRespondenList = useMemo(
+    () => filteredPooled.filter(({ order, pool }) =>
+      computeDisplayState(pool, actionMap[order.id], false) === 'no_responde',
+    ),
+    [filteredPooled, actionMap],
   )
 
-  // Entregados session + DB, filtrados por fecha
-  const sessionDelivered = useMemo(
-    () => sdOrders
-      .filter(o => actionMap[o.id] === 'delivered' && !deliveredDbIds.has(o.id))
-      .map(o => ({ order: o, reported_at: new Date().toISOString(), local_confirmed: true })),
-    [sdOrders, actionMap, deliveredDbIds],
-  )
+  // ── Entregados ─────────────────────────────────────────────────────────────
 
-  const allDelivered = useMemo(() => [...sdDeliveredDb, ...sessionDelivered], [sdDeliveredDb, sessionDelivered])
+  const sessionDelivered = useMemo(() => {
+    const allSdIds = new Set([...sdEnReparto.map(o => o.id), ...sdNuevos.map(o => o.id)])
+    return Array.from(allSdIds)
+      .filter(id => actionMap[id] === 'delivered' && !deliveredDbIds.has(id))
+      .flatMap(id => {
+        const o = sdEnReparto.find(x => x.id === id) ?? sdNuevos.find(x => x.id === id)
+        if (!o) return []
+        return [{ order: o, reported_at: new Date().toISOString(), local_confirmed: true }]
+      })
+  }, [sdEnReparto, sdNuevos, actionMap, deliveredDbIds])
+
+  const allDelivered = useMemo(
+    () => [...sdDeliveredDb, ...sessionDelivered],
+    [sdDeliveredDb, sessionDelivered],
+  )
 
   const entregadosFiltrados = useMemo(() => {
     if (dateFilter === 'todos') return allDelivered
@@ -565,38 +697,62 @@ export default function SdDeliveryPage() {
     return allDelivered.filter(e => isYesterday(e.reported_at))
   }, [allDelivered, dateFilter])
 
-  // Conteos para tabs
-  const tabCounts = useMemo(() => ({
-    pendientes:   pendientes.length,
-    en_ruta:      enRuta.length,
-    no_responden: noResponden.length,
-    entregados:   entregadosFiltrados.length,
-  }), [pendientes, enRuta, noResponden, entregadosFiltrados])
+  // ── Conteos ────────────────────────────────────────────────────────────────
 
-  // displayedOrders según tab activo
-  const displayedOrders = useMemo(() => {
-    let base: Order[]
-    if (activeTab === 'pendientes')    base = pendientes
-    else if (activeTab === 'en_ruta')  base = enRuta
-    else if (activeTab === 'no_responden') base = noResponden
-    else base = entregadosFiltrados.map(e => e.order)
+  const tabCounts = useMemo(() => ({
+    nuevos:       nuevosList.length,
+    confirmados:  confirmadosList.length,
+    en_ruta:      enRutaList.length,
+    no_responden: noRespondenList.length,
+    entregados:   entregadosFiltrados.length,
+  }), [nuevosList, confirmadosList, enRutaList, noRespondenList, entregadosFiltrados])
+
+  const totalActive = allPooled.length
+
+  // ── displayedPooled / displayedEntregados ──────────────────────────────────
+
+  const displayedPooled = useMemo((): PooledOrder[] => {
+    let base: PooledOrder[]
+    if (activeTab === 'nuevos')        base = nuevosList
+    else if (activeTab === 'confirmados')   base = confirmadosList
+    else if (activeTab === 'en_ruta')       base = enRutaList
+    else if (activeTab === 'no_responden')  base = noRespondenList
+    else return []
 
     if (!searchQuery.trim()) return base
     const q = searchQuery.toLowerCase()
-    return base.filter(o =>
+    return base.filter(({ order: o }) =>
       (o.tracking_number  ?? '').toLowerCase().includes(q) ||
       (o.customer_name    ?? '').toLowerCase().includes(q) ||
       (o.customer_phone   ?? '').toLowerCase().includes(q) ||
       (o.customer_address ?? '').toLowerCase().includes(q) ||
-      (o.city             ?? '').toLowerCase().includes(q),
+      (o.city             ?? '').toLowerCase().includes(q) ||
+      (o.order_number     ?? '').toLowerCase().includes(q),
     )
-  }, [activeTab, pendientes, enRuta, noResponden, entregadosFiltrados, searchQuery])
+  }, [activeTab, nuevosList, confirmadosList, enRutaList, noRespondenList, searchQuery])
 
-  const pagedOrders = useMemo(
-    () => displayedOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
-    [displayedOrders, currentPage],
+  const displayedEntregados = useMemo(() => {
+    if (activeTab !== 'entregados') return []
+    if (!searchQuery.trim()) return entregadosFiltrados
+    const q = searchQuery.toLowerCase()
+    return entregadosFiltrados.filter(({ order: o }) =>
+      (o.tracking_number ?? '').toLowerCase().includes(q) ||
+      (o.customer_name   ?? '').toLowerCase().includes(q) ||
+      (o.customer_phone  ?? '').toLowerCase().includes(q),
+    )
+  }, [activeTab, entregadosFiltrados, searchQuery])
+
+  const totalDisplay  = activeTab === 'entregados' ? displayedEntregados.length : displayedPooled.length
+  const totalPages    = Math.ceil(totalDisplay / PAGE_SIZE)
+
+  const pagedPooled = useMemo(
+    () => displayedPooled.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [displayedPooled, currentPage],
   )
-  const totalPages = Math.ceil(displayedOrders.length / PAGE_SIZE)
+  const pagedEntregados = useMemo(
+    () => displayedEntregados.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [displayedEntregados, currentPage],
+  )
 
   useEffect(() => { setCurrentPage(1) }, [activeTab, dateFilter, searchQuery])
 
@@ -657,6 +813,25 @@ export default function SdDeliveryPage() {
     }
   }
 
+  async function confirmClient(orderId: string) {
+    setLoadingRow(prev => ({ ...prev, [orderId]: true }))
+    try {
+      const res = await fetch(`/api/sd-delivery/orders/${orderId}/confirm-client`, { method: 'POST' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        showToast(body.error ?? 'Error al registrar confirmación', false)
+        return
+      }
+      setActionMap(prev => ({ ...prev, [orderId]: 'client_confirmed' }))
+      showToast('✓ Cliente confirmado — el admin asignará a ruta', true)
+      fetch('/api/sd-delivery/performance').then(r => r.json()).then(setPerf).catch(() => null)
+    } catch {
+      showToast('Error de red', false)
+    } finally {
+      setLoadingRow(prev => ({ ...prev, [orderId]: false }))
+    }
+  }
+
   async function markDelivered(orderId: string) {
     setLoadingRow(prev => ({ ...prev, [orderId]: true }))
     try {
@@ -684,12 +859,31 @@ export default function SdDeliveryPage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  const TAB_META: { tab: Tab; label: string; icon?: React.ReactNode }[] = [
-    { tab: 'pendientes',   label: 'Pendientes' },
-    { tab: 'en_ruta',      label: 'En ruta'    },
-    { tab: 'no_responden', label: 'No responden' },
-    { tab: 'entregados',   label: 'Entregados' },
+  const TAB_META: { tab: Tab; label: string }[] = [
+    { tab: 'nuevos',       label: 'Nuevos / Por confirmar' },
+    { tab: 'confirmados',  label: 'Confirmados / Listos'   },
+    { tab: 'en_ruta',      label: 'En ruta'               },
+    { tab: 'no_responden', label: 'No responden'           },
+    { tab: 'entregados',   label: 'Entregados'             },
   ]
+
+  // Ayuda visual: color del tab por estado
+  function tabBadgeColors(tab: Tab, active: boolean) {
+    if (!active) return 'bg-gray-100 text-gray-500'
+    if (tab === 'nuevos')       return 'bg-blue-500 text-white'
+    if (tab === 'confirmados')  return 'bg-teal-500 text-white'
+    if (tab === 'en_ruta')      return 'bg-teal-600 text-white'
+    if (tab === 'no_responden') return 'bg-amber-500 text-white'
+    return 'bg-emerald-500 text-white'
+  }
+
+  function tabActiveColors(tab: Tab) {
+    if (tab === 'nuevos')       return 'border-blue-500 text-blue-700 bg-blue-50/60'
+    if (tab === 'confirmados')  return 'border-teal-500 text-teal-700 bg-teal-50/60'
+    if (tab === 'en_ruta')      return 'border-teal-600 text-teal-800 bg-teal-50/80'
+    if (tab === 'no_responden') return 'border-amber-500 text-amber-700 bg-amber-50/60'
+    return 'border-emerald-500 text-emerald-700 bg-emerald-50/60'
+  }
 
   return (
     <div className="space-y-4">
@@ -735,16 +929,23 @@ export default function SdDeliveryPage() {
               <MapPin className="w-5 h-5 md:w-6 md:h-6 text-white" />
             </div>
             <div>
-              <div className="flex items-center gap-2 md:gap-3">
+              <div className="flex items-center gap-2 md:gap-3 flex-wrap">
                 <h1 className="text-xl md:text-2xl font-black text-white tabular-nums">
-                  {loading ? '…' : activeOrders.length.toLocaleString()}
+                  {loading ? '…' : totalActive.toLocaleString()}
                 </h1>
-                {!loading && pendientes.filter(o => criticalityLabel(o) === 'critico').length > 0 && (
+                {!loading && tabCounts.nuevos > 0 && (
+                  <span className="flex items-center gap-1.5 bg-blue-500/80 text-white
+                                   text-xs font-bold px-2.5 py-1 rounded-full">
+                    <Clock className="w-3 h-3" />
+                    {tabCounts.nuevos} por confirmar
+                  </span>
+                )}
+                {!loading && nuevosList.filter(({ order }) => criticalityLabel(order) === 'critico').length > 0 && (
                   <span className="flex items-center gap-1.5 bg-red-500/80 text-white
                                    text-xs font-bold px-2.5 py-1 rounded-full animate-pulse">
                     <span className="w-1.5 h-1.5 rounded-full bg-white" />
-                    {pendientes.filter(o => criticalityLabel(o) === 'critico').length} CRÍTICO
-                    {pendientes.filter(o => criticalityLabel(o) === 'critico').length !== 1 ? 'S' : ''}
+                    {nuevosList.filter(({ order }) => criticalityLabel(order) === 'critico').length} CRÍTICO
+                    {nuevosList.filter(({ order }) => criticalityLabel(order) === 'critico').length !== 1 ? 'S' : ''}
                   </span>
                 )}
               </div>
@@ -788,6 +989,7 @@ export default function SdDeliveryPage() {
             <div className="flex items-center gap-1.5 md:gap-2 flex-wrap flex-1">
               {([
                 { label: 'Entregados',   count: perf.entregadosHoy,    cls: 'bg-emerald-100 text-emerald-700' },
+                { label: 'Confirmados',  count: perf.confirmedHoy,     cls: 'bg-blue-100    text-blue-700'    },
                 { label: 'En ruta',      count: perf.enRutaHoy,        cls: 'bg-teal-100    text-teal-700'    },
                 { label: 'No responden', count: perf.noRespondenHoy,   cls: 'bg-amber-100   text-amber-700'   },
                 { label: 'Reprogramados',count: perf.reprogramadosHoy, cls: 'bg-indigo-100  text-indigo-700'  },
@@ -824,18 +1026,18 @@ export default function SdDeliveryPage() {
       </div>
 
       {/* ── Sin pedidos ── */}
-      {!loading && activeOrders.length === 0 && allDelivered.length === 0 && (
+      {!loading && totalActive === 0 && allDelivered.length === 0 && (
         <div className="bg-teal-50 border border-teal-200 rounded-xl px-5 py-8 text-center">
           <Package2 className="w-10 h-10 text-teal-400 mx-auto mb-3" />
-          <p className="text-teal-700 font-medium">No hay pedidos SD asignados en este momento</p>
+          <p className="text-teal-700 font-medium">No hay pedidos SD en este momento</p>
           <p className="text-teal-600 text-sm mt-1">
-            Los pedidos en reparto para Santo Domingo aparecerán aquí
+            Los pedidos nuevos y en reparto de Santo Domingo aparecerán aquí
           </p>
         </div>
       )}
 
       {/* ── Tabla principal ── */}
-      {(loading || activeOrders.length > 0 || allDelivered.length > 0) && (
+      {(loading || totalActive > 0 || allDelivered.length > 0) && (
         <div className="bg-white rounded-xl border-2 border-teal-200 overflow-hidden shadow-sm">
 
           {/* Buscador */}
@@ -870,12 +1072,12 @@ export default function SdDeliveryPage() {
                   className={`flex items-center gap-1.5 px-4 py-2.5 min-h-[44px] text-xs font-semibold
                               border-b-2 transition-colors whitespace-nowrap shrink-0
                     ${activeTab === tab
-                      ? 'border-teal-500 text-teal-700 bg-teal-50/60'
+                      ? tabActiveColors(tab)
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
                 >
                   {label}
                   <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full
-                    ${activeTab === tab ? 'bg-teal-500 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                    ${tabBadgeColors(tab, activeTab === tab)}`}>
                     {tabCounts[tab]}
                   </span>
                 </button>
@@ -891,24 +1093,24 @@ export default function SdDeliveryPage() {
           )}
 
           {/* Vista vacía */}
-          {!loading && displayedOrders.length === 0 && (activeOrders.length > 0 || allDelivered.length > 0) && (
+          {!loading && totalDisplay === 0 && (totalActive > 0 || allDelivered.length > 0) && (
             <div className="px-5 py-10 text-center">
               <p className="text-gray-500 font-medium">
                 {searchQuery
                   ? `Sin resultados para "${searchQuery}"`
                   : 'No hay pedidos en esta categoría'}
               </p>
-              <button onClick={() => { setActiveTab('pendientes'); setSearchQuery('') }}
+              <button onClick={() => { setActiveTab('nuevos'); setSearchQuery('') }}
                 className="text-teal-600 text-sm mt-2 hover:underline">
-                Ver pendientes
+                Ver nuevos
               </button>
             </div>
           )}
 
-          {/* ── Cards móvil ── */}
-          {!loading && displayedOrders.length > 0 && (
+          {/* ── Cards móvil — tabs activos (no entregados) ── */}
+          {!loading && activeTab !== 'entregados' && pagedPooled.length > 0 && (
             <div className="md:hidden divide-y divide-teal-50">
-              {pagedOrders.map(order => {
+              {pagedPooled.map(({ order, pool }) => {
                 const accion      = actionMap[order.id]
                 const busy        = !!loadingRow[order.id]
                 const isDelivered = accion === 'delivered' || deliveredDbIds.has(order.id)
@@ -916,12 +1118,14 @@ export default function SdDeliveryPage() {
                   <SdCard
                     key={order.id}
                     order={order}
+                    pool={pool}
                     accion={accion}
                     busy={busy}
                     isDelivered={isDelivered}
                     onWA={() => postAction(order.id, 'contacted', 'contacted')}
                     onLlamar={() => postAction(order.id, 'contacted', 'contacted')}
                     onConfirmarRuta={() => confirmRoute(order.id)}
+                    onClienteConfirma={() => confirmClient(order.id)}
                     onNoAnswer={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
                     onEntregado={() => markDelivered(order.id)}
                     onReprogramar={() => setReModal({ orderId: order.id, name: order.customer_name ?? '' })}
@@ -932,12 +1136,36 @@ export default function SdDeliveryPage() {
             </div>
           )}
 
-          {/* ── Tabla desktop ── */}
-          {!loading && displayedOrders.length > 0 && (
+          {/* ── Cards móvil — tab Entregados ── */}
+          {!loading && activeTab === 'entregados' && pagedEntregados.length > 0 && (
+            <div className="md:hidden divide-y divide-teal-50">
+              {pagedEntregados.map(({ order }) => (
+                <SdCard
+                  key={order.id}
+                  order={order}
+                  pool="confirmado"
+                  accion="delivered"
+                  busy={false}
+                  isDelivered={true}
+                  onWA={() => {}}
+                  onLlamar={() => {}}
+                  onConfirmarRuta={() => {}}
+                  onClienteConfirma={() => {}}
+                  onNoAnswer={() => {}}
+                  onEntregado={() => {}}
+                  onReprogramar={() => {}}
+                  onNota={() => {}}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* ── Tabla desktop — tabs activos ── */}
+          {!loading && activeTab !== 'entregados' && pagedPooled.length > 0 && (
             <table className="hidden md:table w-full text-sm">
               <thead className="bg-teal-50/60 border-b border-teal-100">
                 <tr>
-                  {['Guía', 'Cliente', 'Ubicación', 'Tiempo', 'Contactar', 'Acciones', ''].map(h => (
+                  {['Pedido', 'Cliente', 'Ubicación', 'Estado/Tiempo', 'Contactar', 'Acciones', ''].map(h => (
                     <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-teal-800 whitespace-nowrap">
                       {h}
                     </th>
@@ -945,35 +1173,45 @@ export default function SdDeliveryPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-teal-50">
-                {pagedOrders.map(order => {
-                  const nombre     = order.customer_name ?? ''
-                  const waUrl      = whatsAppUrl(order.customer_phone, buildWaMsg(nombre, order.product_summary))
-                  const telUrl     = callUrl(order.customer_phone)
-                  const hasPhone   = !!order.customer_phone
-                  const accion     = actionMap[order.id]
-                  const busy       = !!loadingRow[order.id]
+                {pagedPooled.map(({ order, pool }) => {
+                  const nombre      = order.customer_name ?? ''
+                  const waMsg       = pool === 'nuevo'
+                    ? buildWaMsgNuevo(nombre, order.product_summary)
+                    : buildWaMsg(nombre, order.product_summary)
+                  const waUrl       = whatsAppUrl(order.customer_phone, waMsg)
+                  const telUrl      = callUrl(order.customer_phone)
+                  const hasPhone    = !!order.customer_phone
+                  const accion      = actionMap[order.id]
+                  const busy        = !!loadingRow[order.id]
                   const isDelivered = accion === 'delivered' || deliveredDbIds.has(order.id)
-                  const estado     = isDelivered ? 'entregado' : localEstado(accion)
-                  const isEnRuta   = estado === 'en_ruta'
-                  const isNoResp   = estado === 'no_responde'
-                  const crit       = criticalityLabel(order)
-                  const ubicacion  = order.city || order.province || (order.customer_address?.slice(0, 20))
+                  const ds          = computeDisplayState(pool, accion, isDelivered)
+                  const crit        = criticalityLabel(order)
+                  const ubicacion   = order.city || order.province || (order.customer_address?.slice(0, 20))
 
-                  const rowBg = isDelivered ? 'bg-green-50/30'
-                    : isEnRuta  ? 'bg-teal-50/20 hover:bg-teal-50/40'
-                    : crit === 'critico' ? 'bg-red-50/20 hover:bg-red-50/40'
-                    : crit === 'riesgo'  ? 'bg-orange-50/15 hover:bg-orange-50/30'
+                  const rowBg =
+                    ds === 'entregado'        ? 'bg-green-50/30'
+                    : ds === 'en_ruta'        ? 'bg-teal-50/20 hover:bg-teal-50/40'
+                    : ds === 'nuevo'          ? 'bg-blue-50/20 hover:bg-blue-50/40'
+                    : ds === 'espera_despacho'? 'bg-purple-50/10 hover:bg-purple-50/30'
+                    : crit === 'critico'      ? 'bg-red-50/20 hover:bg-red-50/40'
+                    : crit === 'riesgo'       ? 'bg-orange-50/15 hover:bg-orange-50/30'
                     : 'hover:bg-teal-50/30'
 
                   return (
                     <tr key={order.id} className={`transition-colors ${rowBg}`}>
-                      {/* Guía */}
+                      {/* Pedido */}
                       <td className="px-3 py-2.5">
                         <p className="font-mono text-xs font-semibold text-gray-900 whitespace-nowrap">
-                          {order.tracking_number ?? '—'}
+                          {order.tracking_number ?? order.order_number ?? '—'}
                         </p>
-                        {order.order_number && (
+                        {order.tracking_number && order.order_number && (
                           <p className="font-mono text-[10px] text-gray-400 mt-0.5">{order.order_number}</p>
+                        )}
+                        {pool === 'nuevo' && (
+                          <span className="inline-flex items-center gap-0.5 text-[9px] font-bold
+                                           px-1 py-0.5 rounded bg-blue-100 text-blue-700 mt-0.5">
+                            <Clock className="w-2.5 h-2.5" />Por confirmar
+                          </span>
                         )}
                       </td>
 
@@ -999,9 +1237,21 @@ export default function SdDeliveryPage() {
                         )}
                       </td>
 
-                      {/* Tiempo */}
+                      {/* Estado/Tiempo */}
                       <td className="px-3 py-2.5">
-                        {!isDelivered ? (
+                        {ds === 'nuevo' ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold
+                                           px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 border border-blue-200">
+                            <Clock className="w-3 h-3" />Por confirmar
+                          </span>
+                        ) : ds === 'espera_despacho' ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold
+                                           px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 border border-purple-200">
+                            <UserCheck className="w-3 h-3" />Confirmado
+                          </span>
+                        ) : ds === 'entregado' ? (
+                          <span className="text-[10px] text-green-600 font-semibold">Entregado</span>
+                        ) : (
                           <>
                             <span className={`inline-flex items-center gap-1 text-[10px] font-semibold
                                               px-1.5 py-0.5 rounded-full border whitespace-nowrap
@@ -1015,14 +1265,12 @@ export default function SdDeliveryPage() {
                               {tiempoLabel(order)}
                             </p>
                           </>
-                        ) : (
-                          <span className="text-[10px] text-green-600 font-semibold">Entregado</span>
                         )}
                       </td>
 
-                      {/* Contactar — siempre visible */}
+                      {/* Contactar */}
                       <td className="px-3 py-2.5">
-                        {hasPhone && !isDelivered ? (
+                        {hasPhone && ds !== 'entregado' && ds !== 'espera_despacho' ? (
                           <div className="flex items-center gap-1.5">
                             {waUrl && (
                               <a href={waUrl} target="_blank" rel="noopener noreferrer"
@@ -1046,16 +1294,29 @@ export default function SdDeliveryPage() {
                         )}
                       </td>
 
-                      {/* Acciones según estado */}
+                      {/* Acciones */}
                       <td className="px-3 py-2.5">
-                        {isDelivered ? (
-                          <span className="inline-flex items-center gap-1 text-xs font-semibold
-                                           px-2 py-1 rounded-full bg-green-100 text-green-700">
-                            <CheckCircle2 className="w-3 h-3" />Entregado
-                          </span>
-                        ) : busy ? (
+                        {busy ? (
                           <Spinner className="w-4 h-4 text-teal-500" />
-                        ) : estado === 'pendiente' ? (
+                        ) : ds === 'nuevo' ? (
+                          <div className="flex flex-wrap gap-1">
+                            <button onClick={() => confirmClient(order.id)}
+                              className="flex items-center gap-1 bg-blue-600 hover:bg-blue-700
+                                         text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
+                              <UserCheck className="w-3 h-3" />Cliente confirma
+                            </button>
+                            <button onClick={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
+                              className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
+                                         text-amber-700 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
+                              <PhoneMissed className="w-3 h-3" />No resp.
+                            </button>
+                          </div>
+                        ) : ds === 'espera_despacho' ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold
+                                           px-2 py-1 rounded-full bg-purple-100 text-purple-700">
+                            <UserCheck className="w-3 h-3" />Esperando despacho
+                          </span>
+                        ) : ds === 'confirmado_listo' ? (
                           <div className="flex flex-wrap gap-1">
                             <button onClick={() => confirmRoute(order.id)}
                               className="flex items-center gap-1 bg-teal-500 hover:bg-teal-600
@@ -1069,11 +1330,11 @@ export default function SdDeliveryPage() {
                             </button>
                             <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
                               className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
-                                         text-gray-600 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <FileText className="w-3 h-3" />Nota
+                                         text-gray-600 text-[11px] font-medium px-2 py-1.5 rounded transition-colors">
+                              <FileText className="w-3 h-3" />
                             </button>
                           </div>
-                        ) : isEnRuta ? (
+                        ) : ds === 'en_ruta' ? (
                           <div className="flex flex-wrap gap-1">
                             <button onClick={() => markDelivered(order.id)}
                               className="flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600
@@ -1092,23 +1353,35 @@ export default function SdDeliveryPage() {
                             </button>
                             <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
                               className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
-                                         text-gray-600 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <FileText className="w-3 h-3" />Nota
+                                         text-gray-600 text-[11px] font-medium px-2 py-1.5 rounded transition-colors">
+                              <FileText className="w-3 h-3" />
                             </button>
                           </div>
-                        ) : isNoResp ? (
-                          <div className="flex items-center gap-1.5">
+                        ) : ds === 'no_responde' ? (
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="inline-flex items-center gap-1 text-xs font-semibold
                                              px-2 py-1 rounded-full bg-amber-100 text-amber-700">
                               <PhoneMissed className="w-3 h-3" />No responde
                             </span>
+                            {pool === 'nuevo' && (
+                              <button onClick={() => confirmClient(order.id)}
+                                className="flex items-center gap-1 bg-blue-100 hover:bg-blue-200
+                                           text-blue-700 text-[11px] font-medium px-2 py-1 rounded transition-colors whitespace-nowrap">
+                                <UserCheck className="w-3 h-3" />Confirma ahora
+                              </button>
+                            )}
                             <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
                               className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
                                          text-gray-600 text-[11px] font-medium px-1.5 py-1 rounded transition-colors">
                               <FileText className="w-3 h-3" />
                             </button>
                           </div>
-                        ) : null}
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs font-semibold
+                                           px-2 py-1 rounded-full bg-green-100 text-green-700">
+                            <CheckCircle2 className="w-3 h-3" />Entregado
+                          </span>
+                        )}
                       </td>
 
                       {/* Ver detalle */}
@@ -1126,6 +1399,47 @@ export default function SdDeliveryPage() {
             </table>
           )}
 
+          {/* ── Tabla desktop — tab Entregados ── */}
+          {!loading && activeTab === 'entregados' && pagedEntregados.length > 0 && (
+            <table className="hidden md:table w-full text-sm">
+              <thead className="bg-emerald-50/60 border-b border-teal-100">
+                <tr>
+                  {['Guía', 'Cliente', 'Teléfono', 'Entregado', ''].map(h => (
+                    <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-emerald-800 whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-teal-50">
+                {pagedEntregados.map(({ order, reported_at }) => (
+                  <tr key={order.id} className="bg-green-50/20 hover:bg-green-50/40 transition-colors">
+                    <td className="px-3 py-2.5 font-mono text-xs font-semibold text-gray-900">
+                      {order.tracking_number ?? order.order_number ?? '—'}
+                    </td>
+                    <td className="px-3 py-2.5 font-medium text-gray-900 truncate max-w-[160px]">
+                      {order.customer_name || '—'}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-xs text-gray-500">
+                      {order.customer_phone || '—'}
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-emerald-700 font-semibold whitespace-nowrap">
+                      <CheckCircle2 className="inline w-3 h-3 mr-1" />
+                      {new Date(reported_at).toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' })}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <Link href={`/orders/${order.id}`}
+                        className="inline-flex items-center gap-1 text-xs font-medium
+                                   text-teal-600 hover:text-teal-800 whitespace-nowrap hover:underline">
+                        <ExternalLink className="w-3 h-3" />Ver
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
           {/* Paginación */}
           {!loading && totalPages > 1 && (
             <div className="flex items-center justify-between px-4 py-3 border-t border-teal-100 bg-teal-50/40">
@@ -1139,8 +1453,10 @@ export default function SdDeliveryPage() {
                 <ChevronLeft className="w-3.5 h-3.5" />Anterior
               </button>
               <span className="text-xs text-gray-500 tabular-nums">
-                <span className="font-bold text-gray-800">{currentPage}</span> / <span className="font-bold text-gray-800">{totalPages}</span>
-                <span className="hidden md:inline text-gray-400"> · {displayedOrders.length} resultados</span>
+                <span className="font-bold text-gray-800">{currentPage}</span>
+                {' / '}
+                <span className="font-bold text-gray-800">{totalPages}</span>
+                <span className="hidden md:inline text-gray-400"> · {totalDisplay} resultados</span>
               </span>
               <button
                 onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
@@ -1159,11 +1475,11 @@ export default function SdDeliveryPage() {
       {/* ── Flujo operativo ── */}
       <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-4 md:px-5">
         <p className="text-xs text-gray-500 leading-relaxed">
-          <strong className="text-gray-700">Flujo:</strong>{' '}
-          WhatsApp / Llamar para confirmar disponibilidad →{' '}
-          <strong className="text-teal-700">Confirmar ruta</strong> cuando salgas a entregar →{' '}
-          <strong className="text-emerald-700">Marcar entregado</strong> al completar la entrega →{' '}
-          Si no responde: <strong className="text-amber-700">No responde</strong> o <strong className="text-indigo-700">Reprogramar</strong>.
+          <strong className="text-gray-700">Flujo nuevo:</strong>{' '}
+          <strong className="text-blue-700">Nuevos</strong> → llamar/WA → <strong className="text-blue-700">Cliente confirma</strong> → el admin asigna a ruta →{' '}
+          aparece en <strong className="text-teal-700">Confirmados</strong> → <strong className="text-teal-700">Confirmar ruta</strong> al salir →{' '}
+          <strong className="text-emerald-700">Marcar entregado</strong>.
+          Si no responde: <strong className="text-amber-700">No responde</strong> (queda en seguimiento).
         </p>
       </div>
 

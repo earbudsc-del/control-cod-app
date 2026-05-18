@@ -68,6 +68,16 @@ export async function GET(request: Request) {
       query = query.ilike('raw_status', `%${rawStatus}%`)
     }
 
+    const confirmationStatus = searchParams.get('confirmationStatus')
+    if (confirmationStatus === 'pending') {
+      query = query
+        .eq('confirmation_status', 'pending')
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned')
+    } else if (confirmationStatus === 'confirmed') {
+      query = query.eq('confirmation_status', 'confirmed')
+    }
+
     const { data, error, count } = await query
     if (error) throw error
 
