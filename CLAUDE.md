@@ -4,6 +4,53 @@
 
 ---
 
+## FIX: Separación SD local vs EFI/courier en /sd-delivery (2026-05-19)
+
+### Bugs corregidos
+
+**Bug 1 — SD confirmada desaparece de Confirmados/Listos**
+
+Causa raíz: `filteredPooled` aplica `dateFilter='hoy'` usando `order.created_at` para órdenes `pool='nuevo'`. Si un pedido se creó ayer (pending overnight) y el agente lo confirma hoy, entra al `confirmedOrderCache` con `pool='nuevo'` pero `isToday(created_at)` → false → excluido de `filteredPooled` → desaparece de Confirmados/Listos aunque esté cacheado.
+
+**Bug 2 — Pedido EFI/Gintracom (ej. 900552631) aparece en Confirmados/Listos y Rutas**
+
+Causa raíz: `sdEnReparto` y `sdNuevos` solo filtraban por `isSantoDomingoOrder`. Un pedido EFI con `normalized_status='en_reparto'` en DB (aún no actualizado por el cron a `novedad`) y dirección en SD pasaba ambos filtros. Con `pool='confirmado'` y sin `actionMap`, `computeDisplayState` retorna `confirmado_listo` → aparece en Confirmados/Listos y Rutas sin haber pasado nunca por el flujo SD local.
+
+### Invariante documentada
+
+**SD local vs EFI son mutuamente excluyentes:**
+- Órdenes SD local: `tracking_number IS NULL` (el mensajero entrega directamente, sin guía EFI)
+- Órdenes EFI: `tracking_number IS NOT NULL` (guía asignada al courier externo)
+
+No existe un pedido que sea simultáneamente SD local delivery Y EFI courier. Si se asigna tracking, sale del flujo SD local.
+
+### Cambios en `src/app/(app)/sd-delivery/page.tsx`
+
+| Memo | Cambio |
+|---|---|
+| `sdEnReparto` | Agrega `&& !o.tracking_number` al filtro. Excluye órdenes EFI con `en_reparto` stale que tienen dirección SD. |
+| `sdNuevos` | Agrega `&& !o.tracking_number` al filtro. Excluye órdenes EFI con `confirmation_status='pending'` que tienen dirección SD. |
+| `filteredPooled` | Agrega `if (confirmedOrderCache.has(order.id)) return true` antes del check de fecha. Órdenes recién confirmadas localmente siempre visibles, independiente del filtro hoy/ayer. |
+
+### Cómo probar
+
+1. Abrir `/sd-delivery`
+2. Verificar que 900552631 (u otra guía EFI de Gintracom/SD) **NO aparece** en ningún tab
+3. Confirmar una orden SD nueva → aparece en Confirmados/Listos → refrescar (3 min o manual) → **sigue visible**
+4. Confirmar una orden SD de **ayer** (creada ayer, aún pending) → aparece en Confirmados/Listos con filtro "hoy" → **no desaparece**
+5. `npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Flujo EFI sync / tracking cron (no modificado)
+- Shopify sync (no modificado)
+- Órdenes SD creadas hoy sin tracking siguen apareciendo normalmente
+- Rutas / confirmZoneRoute siguen funcionando (solo con pedidos SD locales)
+
+---
+
+---
+
 ## FIX: Tarifas SD + bonificaciones + zona especial (2026-05-19)
 
 ### Cambios

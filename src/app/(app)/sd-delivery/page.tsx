@@ -603,8 +603,12 @@ export default function SdDeliveryPage() {
 
   // ── Órdenes SD filtradas por zona ─────────────────────────────────────────
 
+  // Solo órdenes SD sin tracking EFI: el mensajero local nunca maneja guías de courier.
+  // Órdenes con tracking_number pertenecen al flujo EFI y no al despacho local SD.
   const sdEnReparto = useMemo(
-    () => allEnReparto.filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address)),
+    () => allEnReparto.filter(o =>
+      isSantoDomingoOrder(o.city, o.province, o.customer_address) && !o.tracking_number,
+    ),
     [allEnReparto],
   )
 
@@ -612,7 +616,8 @@ export default function SdDeliveryPage() {
     const enRepartoIds = new Set(allEnReparto.map(o => o.id))
     return allNuevos.filter(o =>
       isSantoDomingoOrder(o.city, o.province, o.customer_address) &&
-      !enRepartoIds.has(o.id),
+      !enRepartoIds.has(o.id) &&
+      !o.tracking_number,  // excluir órdenes EFI del flujo SD local
     )
   }, [allNuevos, allEnReparto])
 
@@ -656,12 +661,15 @@ export default function SdDeliveryPage() {
     if (dateFilter === 'todos') return allPooled
     const check = dateFilter === 'hoy' ? isToday : isYesterday
     return allPooled.filter(({ order, pool }) => {
+      // Órdenes recién confirmadas localmente siempre visibles — evita que filtro de fecha
+      // las oculte si el pedido fue creado ayer pero confirmado hoy.
+      if (confirmedOrderCache.has(order.id)) return true
       const ts = pool === 'nuevo'
         ? order.created_at
         : (order.status_since ?? order.last_tracking_update ?? order.updated_at)
       return check(ts)
     })
-  }, [allPooled, dateFilter])
+  }, [allPooled, dateFilter, confirmedOrderCache])
 
   // ── Listas por tab ─────────────────────────────────────────────────────────
 
