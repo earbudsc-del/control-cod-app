@@ -4,6 +4,61 @@
 
 ---
 
+## FEATURE: Despacho local SD desde /confirmados (2026-05-19)
+
+### Flujo implementado
+
+```
+Cliente confirma (sd-delivery)
+  → confirmation_status = 'confirmed', tracking_number = NULL
+  → aparece en /confirmados "Sin guía" con badge "SD / Transporte local"
+  → Admin pulsa "Despachar local"
+  → normalized_status = 'en_reparto', status_since = now()
+  → desaparece de /confirmados
+  → aparece en /sd-delivery "Confirmados/Listos" (pool='confirmado')
+  → SD agent confirma ruta → En ruta → Marcar entregado
+```
+
+### Invariante SD local vs EFI (refuerzo)
+
+- SD local: `tracking_number IS NULL` → botón "Despachar local" en /confirmados
+- EFI: `tracking_number IS NOT NULL` → input + botón "# Guía EFI" en /confirmados (sin cambios)
+- Mutuamente excluyentes. Nunca mezclar lógica de despacho.
+
+### Archivos creados
+
+| Archivo | Descripción |
+|---|---|
+| `src/app/api/orders/[id]/dispatch-local/route.ts` | **NUEVO.** `POST` admin-only. Valida: `confirmation_status=confirmed`, `tracking_number IS NULL`, `normalized_status != en_reparto`. Setea `normalized_status='en_reparto'`, `status_since=now()`. Registra `agent_actions` con `status_updated`. |
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/confirmados/route.ts` | Agrega `.neq('normalized_status', 'en_reparto')` en query principal y en stats hoy/ayer. Excluye pedidos SD ya despachados localmente. |
+| `src/app/api/confirmacion/stats/route.ts` | Agrega `.neq('normalized_status', 'en_reparto')` en `confirmadosSinGuia` y `santoDomingoConfirmadosSinGuia`. Evita que el pipeline nav los cuente como pendientes de despacho. |
+| `src/app/(app)/confirmados/page.tsx` | Detecta SD con `isSantoDomingoOrder`. SD orders: badge "SD / Transporte local" en columna Cliente + botón "Despachar local" (púrpura) en columna Acción. EFI orders: flujo original sin cambios. |
+
+### NO se rompió
+
+- Botón "# Guía EFI" (assign-tracking) — intacto para pedidos EFI/Gintracom
+- Tracking sync / cron EFI — no modificados
+- Shopify sync — no modificado
+- Flujo EFI de despacho normal — no modificado
+- `/sd-delivery` page — no modificada (recibe el pedido vía en_reparto como siempre)
+
+### Cómo probar
+
+1. Confirmar un pedido SD local en `/sd-delivery` → "Cliente confirma"
+2. Ir a `/confirmados` → pedido aparece con badge púrpura "SD / Transporte local"
+3. Ver que la columna Acción muestra "Despachar local" (sin input de guía)
+4. Pulsar "Despachar local" → pedido desaparece de /confirmados
+5. Ir a `/sd-delivery` → pedido aparece en tab "Confirmados/Listos" (pool=confirmado)
+6. Verificar que pedidos EFI normales siguen mostrando input + botón "Asignar" sin cambios
+7. `npx tsc --noEmit` → sin errores ✅
+
+---
+
 ## FIX: Separación SD local vs EFI/courier en /sd-delivery (2026-05-19)
 
 ### Bugs corregidos

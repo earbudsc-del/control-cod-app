@@ -124,7 +124,8 @@ export async function GET() {
       // Total cola de confirmación (para pipeline nav)
       pendingBase(),
 
-      // Confirmados sin guía (para pipeline nav)
+      // Confirmados sin guía pendientes de despacho (para pipeline nav).
+      // Excluye en_reparto: pedidos SD ya despachados localmente que siguen sin tracking EFI.
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
@@ -132,7 +133,8 @@ export async function GET() {
         .eq('confirmation_status', 'confirmed')
         .is('tracking_number', null)
         .neq('normalized_status', 'delivered')
-        .neq('normalized_status', 'returned'),
+        .neq('normalized_status', 'returned')
+        .neq('normalized_status', 'en_reparto'),
 
       // Despachados con guía activa (para pipeline nav)
       supabase
@@ -147,7 +149,8 @@ export async function GET() {
       // Santo Domingo pendientes (transporte local)
       pendingBase().or(sdFilter),
 
-      // Santo Domingo confirmados sin guía (transporte local)
+      // Santo Domingo confirmados sin guía pendientes de despacho (transporte local).
+      // Excluye en_reparto: ya despachados.
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
@@ -156,6 +159,7 @@ export async function GET() {
         .is('tracking_number', null)
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned')
+        .neq('normalized_status', 'en_reparto')
         .or(sdFilter),
     ])
 

@@ -1,0 +1,67 @@
+warning: in the working copy of 'CLAUDE.md', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/CLAUDE.md b/CLAUDE.md[m
+[1mindex 0153d6c..dfa1f95 100644[m
+[1m--- a/CLAUDE.md[m
+[1m+++ b/CLAUDE.md[m
+[36m@@ -4,6 +4,61 @@[m
+ [m
+ ---[m
+ [m
+[32m+[m[32m## FEATURE: Despacho local SD desde /confirmados (2026-05-19)[m
+[32m+[m
+[32m+[m[32m### Flujo implementado[m
+[32m+[m
+[32m+[m[32m```[m
+[32m+[m[32mCliente confirma (sd-delivery)[m
+[32m+[m[32m  → confirmation_status = 'confirmed', tracking_number = NULL[m
+[32m+[m[32m  → aparece en /confirmados "Sin guía" con badge "SD / Transporte local"[m
+[32m+[m[32m  → Admin pulsa "Despachar local"[m
+[32m+[m[32m  → normalized_status = 'en_reparto', status_since = now()[m
+[32m+[m[32m  → desaparece de /confirmados[m
+[32m+[m[32m  → aparece en /sd-delivery "Confirmados/Listos" (pool='confirmado')[m
+[32m+[m[32m  → SD agent confirma ruta → En ruta → Marcar entregado[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m### Invariante SD local vs EFI (refuerzo)[m
+[32m+[m
+[32m+[m[32m- SD local: `tracking_number IS NULL` → botón "Despachar local" en /confirmados[m
+[32m+[m[32m- EFI: `tracking_number IS NOT NULL` → input + botón "# Guía EFI" en /confirmados (sin cambios)[m
+[32m+[m[32m- Mutuamente excluyentes. Nunca mezclar lógica de despacho.[m
+[32m+[m
+[32m+[m[32m### Archivos creados[m
+[32m+[m
+[32m+[m[32m| Archivo | Descripción |[m
+[32m+[m[32m|---|---|[m
+[32m+[m[32m| `src/app/api/orders/[id]/dispatch-local/route.ts` | **NUEVO.** `POST` admin-only. Valida: `confirmation_status=confirmed`, `tracking_number IS NULL`, `normalized_status != en_reparto`. Setea `normalized_status='en_reparto'`, `status_since=now()`. Registra `agent_actions` con `status_updated`. |[m
+[32m+[m
+[32m+[m[32m### Archivos modificados[m
+[32m+[m
+[32m+[m[32m| Archivo | Cambio |[m
+[32m+[m[32m|---|---|[m
+[32m+[m[32m| `src/app/api/confirmados/route.ts` | Agrega `.neq('normalized_status', 'en_reparto')` en query principal y en stats hoy/ayer. Excluye pedidos SD ya despachados localmente. |[m
+[32m+[m[32m| `src/app/api/confirmacion/stats/route.ts` | Agrega `.neq('normalized_status', 'en_reparto')` en `confirmadosSinGuia` y `santoDomingoConfirmadosSinGuia`. Evita que el pipeline nav los cuente como pendientes de despacho. |[m
+[32m+[m[32m| `src/app/(app)/confirmados/page.tsx` | Detecta SD con `isSantoDomingoOrder`. SD orders: badge "SD / Transporte local" en columna Cliente + botón "Despachar local" (púrpura) en columna Acción. EFI orders: flujo original sin cambios. |[m
+[32m+[m
+[32m+[m[32m### NO se rompió[m
+[32m+[m
+[32m+[m[32m- Botón "# Guía EFI" (assign-tracking) — intacto para pedidos EFI/Gintracom[m
+[32m+[m[32m- Tracking sync / cron EFI — no modificados[m
+[32m+[m[32m- Shopify sync — no modificado[m
+[32m+[m[32m- Flujo EFI de despacho normal — no modificado[m
+[32m+[m[32m- `/sd-delivery` page — no modificada (recibe el pedido vía en_reparto como siempre)[m
+[32m+[m
+[32m+[m[32m### Cómo probar[m
+[32m+[m
+[32m+[m[32m1. Confirmar un pedido SD local en `/sd-delivery` → "Cliente confirma"[m
+[32m+[m[32m2. Ir a `/confirmados` → pedido aparece con badge púrpura "SD / Transporte local"[m
+[32m+[m[32m3. Ver que la columna Acción muestra "Despachar local" (sin input de guía)[m
+[32m+[m[32m4. Pulsar "Despachar local" → pedido desaparece de /confirmados[m
+[32m+[m[32m5. Ir a `/sd-delivery` → pedido aparece en tab "Confirmados/Listos" (pool=confirmado)[m
+[32m+[m[32m6. Verificar que pedidos EFI normales siguen mostrando input + botón "Asignar" sin cambios[m
+[32m+[m[32m7. `npx tsc --noEmit` → sin errores ✅[m
+[32m+[m
+[32m+[m[32m---[m
+[32m+[m
+ ## FIX: Separación SD local vs EFI/courier en /sd-delivery (2026-05-19)[m
+ [m
+ ### Bugs corregidos[m

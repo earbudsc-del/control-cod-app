@@ -9,6 +9,7 @@ import {
   CheckCircle2, RefreshCw, Package, Search,
   Calendar, Truck, MapPin, AlertTriangle,
   ChevronLeft, ChevronRight, ClipboardList, ShoppingCart,
+  Navigation,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
@@ -86,6 +87,8 @@ export default function ConfirmadosPage() {
   const [trackingInputs, setTrackingInputs] = useState<Record<string, string>>({})
   const [assigning, setAssigning]           = useState<Record<string, boolean>>({})
   const [assignErrors, setAssignErrors]     = useState<Record<string, string>>({})
+  const [dispatching, setDispatching]       = useState<Record<string, boolean>>({})
+  const [dispatchErrors, setDispatchErrors] = useState<Record<string, string>>({})
   const [alertFilter, setAlertFilter] = useState<AlertFilter>('todos')
   const [currentPage, setCurrentPage] = useState(1)
 
@@ -203,6 +206,24 @@ export default function ConfirmadosPage() {
       setAssignErrors(prev => ({ ...prev, [orderId]: 'Error de red' }))
     } finally {
       setAssigning(prev => ({ ...prev, [orderId]: false }))
+    }
+  }
+
+  async function dispatchLocal(orderId: string) {
+    setDispatching(prev => ({ ...prev, [orderId]: true }))
+    setDispatchErrors(prev => ({ ...prev, [orderId]: '' }))
+    try {
+      const res = await fetch(`/api/orders/${orderId}/dispatch-local`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) {
+        setDispatchErrors(prev => ({ ...prev, [orderId]: data.error ?? 'Error al despachar' }))
+      } else {
+        setOrders(prev => prev.filter(o => o.id !== orderId))
+      }
+    } catch {
+      setDispatchErrors(prev => ({ ...prev, [orderId]: 'Error de red' }))
+    } finally {
+      setDispatching(prev => ({ ...prev, [orderId]: false }))
     }
   }
 
@@ -632,6 +653,14 @@ export default function ConfirmadosPage() {
                           customerAddress={order.customer_address}
                           city={order.city}
                         />
+                        {isSD && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold
+                                           px-2 py-0.5 rounded-full mt-0.5
+                                           bg-purple-100 text-purple-700 border border-purple-200">
+                            <Navigation className="w-2.5 h-2.5 shrink-0" />
+                            SD / Transporte local
+                          </span>
+                        )}
                         {isRecovered && order.recovered_cart_id && order.recovered_cart_source && (
                           <RecoveredBadge
                             source={order.recovered_cart_source}
@@ -685,39 +714,64 @@ export default function ConfirmadosPage() {
 
                       {/* Acción */}
                       <td className="px-3 py-2.5">
-                        <div className="flex flex-col gap-1">
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="text"
-                              value={trackingInputs[order.id] ?? ''}
-                              onChange={e => setTrackingInputs(prev => ({ ...prev, [order.id]: e.target.value }))}
-                              onKeyDown={e => { if (e.key === 'Enter') assignTracking(order.id) }}
-                              placeholder="# Guía EFI"
-                              disabled={assigning[order.id]}
-                              className="w-24 px-2 py-1 text-xs border border-gray-200 rounded-lg
-                                         focus:outline-none focus:ring-1 focus:ring-green-300
-                                         disabled:opacity-50"
-                            />
+                        {isSD ? (
+                          /* SD / Transporte local — despacho sin guía EFI */
+                          <div className="flex flex-col gap-1">
                             <button
-                              onClick={() => assignTracking(order.id)}
-                              disabled={assigning[order.id] || !(trackingInputs[order.id] ?? '').trim()}
-                              className="flex items-center gap-1 bg-green-600 hover:bg-green-700
+                              onClick={() => dispatchLocal(order.id)}
+                              disabled={dispatching[order.id]}
+                              className="flex items-center gap-1 bg-purple-600 hover:bg-purple-700
                                          text-white text-[11px] font-semibold px-2.5 py-1.5 rounded-lg
                                          transition-colors shadow-sm whitespace-nowrap
                                          disabled:opacity-40 disabled:cursor-not-allowed"
                             >
-                              {assigning[order.id]
+                              {dispatching[order.id]
                                 ? <Spinner className="w-3 h-3" />
-                                : <Truck className="w-3 h-3 shrink-0" />}
-                              {assigning[order.id] ? 'Asignando…' : 'Asignar'}
+                                : <Navigation className="w-3 h-3 shrink-0" />}
+                              {dispatching[order.id] ? 'Despachando…' : 'Despachar local'}
                             </button>
+                            {dispatchErrors[order.id] && (
+                              <p className="text-[10px] text-red-600 leading-tight max-w-[140px]">
+                                {dispatchErrors[order.id]}
+                              </p>
+                            )}
                           </div>
-                          {assignErrors[order.id] && (
-                            <p className="text-[10px] text-red-600 leading-tight max-w-[160px]">
-                              {assignErrors[order.id]}
-                            </p>
-                          )}
-                        </div>
+                        ) : (
+                          /* EFI / Gintracom — requiere guía de tracking */
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="text"
+                                value={trackingInputs[order.id] ?? ''}
+                                onChange={e => setTrackingInputs(prev => ({ ...prev, [order.id]: e.target.value }))}
+                                onKeyDown={e => { if (e.key === 'Enter') assignTracking(order.id) }}
+                                placeholder="# Guía EFI"
+                                disabled={assigning[order.id]}
+                                className="w-24 px-2 py-1 text-xs border border-gray-200 rounded-lg
+                                           focus:outline-none focus:ring-1 focus:ring-green-300
+                                           disabled:opacity-50"
+                              />
+                              <button
+                                onClick={() => assignTracking(order.id)}
+                                disabled={assigning[order.id] || !(trackingInputs[order.id] ?? '').trim()}
+                                className="flex items-center gap-1 bg-green-600 hover:bg-green-700
+                                           text-white text-[11px] font-semibold px-2.5 py-1.5 rounded-lg
+                                           transition-colors shadow-sm whitespace-nowrap
+                                           disabled:opacity-40 disabled:cursor-not-allowed"
+                              >
+                                {assigning[order.id]
+                                  ? <Spinner className="w-3 h-3" />
+                                  : <Truck className="w-3 h-3 shrink-0" />}
+                                {assigning[order.id] ? 'Asignando…' : 'Asignar'}
+                              </button>
+                            </div>
+                            {assignErrors[order.id] && (
+                              <p className="text-[10px] text-red-600 leading-tight max-w-[160px]">
+                                {assignErrors[order.id]}
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </td>
 
                     </tr>
