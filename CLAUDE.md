@@ -4,6 +4,58 @@
 
 ---
 
+## FEATURE: Soporte Excel + columnas EFI completas en efi-import (2026-05-19)
+
+### Objetivo
+
+Aceptar el archivo Excel descargado directamente desde EFI sin ninguna preparación manual. El sistema detecta y mapea automáticamente las columnas del export real de EFI.
+
+### Cambios
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/efi-import/page.tsx` | XLSX support, 4 nuevas claves de columna, 4 nuevos campos en parser/preview/handleProcess |
+| `src/app/api/admin/reconcile-efi-import/route.ts` | Candidate/processItem extienden con raw_status, shipment_created_at, status_since, product_summary, cod_amount |
+| `src/app/api/admin/backfill-imported-order-data/route.ts` | BackfillItem y fill-logic extienden con raw_status, shipped_at, final_status_at, product_name, cod_amount |
+
+### Columnas EFI ahora reconocidas
+
+| Columna EFI (export directo) | Campo interno | Destino DB |
+|---|---|---|
+| `Guía transportadora` | `tracking_number` | — |
+| `Teléfonos destinatario` | `phone` | `customer_phone` |
+| `Dirección destinatario` | `address` | `customer_address` |
+| `Destinatario` | `nombre` | `customer_name` |
+| `Estado guía inicial` | `estado` | `raw_status` / `normalized_status` |
+| `Fecha de envío` | `shipped_at` | `shipment_created_at` |
+| `Fecha de estado final` | `final_status_at` | `status_since` |
+| `Valor recaudo` | `cod_amount` | `cod_amount` |
+| `Contenido` | `product_name` | `product_summary` |
+
+### XLSX/XLS support
+
+`handleFile()` detecta extensión `.xlsx`/`.xls` → usa `XLSX.read(arrayBuffer, { dateNF: 'yyyy-mm-dd' })` + `XLSX.utils.sheet_to_csv(ws, { FS: '\t' })` → alimenta el parser existente (auto-detecta delimitador TAB). CSV/TSV sigue igual.
+
+El input `accept` es ahora `.csv,.tsv,.txt,.xlsx,.xls`.
+
+### handleProcess() — nuevos campos enviados al backend
+
+**Modo import** (`reconcile-efi-import`): agrega `shipped_at`, `final_status_at`, `product_name`, `cod_amount` (Number).
+
+**Modo backfill** (`backfill-imported-order-data`): agrega `raw_status` (de `estado`), `shipped_at`, `final_status_at`, `product_name`, `cod_amount` (Number).
+
+### Preview — tarjeta de detección
+
+Ahora muestra todas las columnas detectadas: Fecha envío, Fecha estado, Recaudo, Producto. Agrega warning si en modo backfill no se detectaron ni teléfono ni dirección.
+
+### Reglas de fill
+
+- Nunca sobrescribe campos ya existentes en DB (solo NULL → valor)
+- `cod_amount` se convierte a Number antes de enviar (strip de símbolos de moneda)
+- `already_assigned` en modo import: rellena campos vacíos Y actualiza `normalized_status` solo si no está en estado terminal (`delivered`, `returned`, `cancelled`)
+
+---
+
 ## FIX: Mapeo de columna `raw_status` en efi-import (2026-05-18)
 
 ### Problema raíz

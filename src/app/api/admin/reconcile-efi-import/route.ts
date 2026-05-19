@@ -15,7 +15,11 @@ export interface ImportItem {
   estado?:         string
   nombre?:         string
   ciudad?:         string
-  address?:        string  // Dirección destinatario — se guarda si el campo está vacío en DB
+  address?:        string    // Dirección destinatario — se guarda si el campo está vacío en DB
+  shipped_at?:     string    // Fecha de envío EFI → shipment_created_at
+  final_status_at?: string   // Fecha de estado final EFI → status_since
+  product_name?:   string    // Contenido → product_summary
+  cod_amount?:     number    // Valor recaudo → cod_amount
 }
 
 export type ImportOutcome =
@@ -34,6 +38,11 @@ interface Candidate {
   customer_address:    string | null
   city:                string | null
   confirmation_status: string | null
+  raw_status?:         string | null
+  shipment_created_at?: string | null
+  status_since?:       string | null
+  product_summary?:    string | null
+  cod_amount?:         number | null
 }
 
 export interface ImportResult {
@@ -61,10 +70,13 @@ export interface ImportSummary {
 }
 
 export interface ImportInputCoverage {
-  rows_with_phone:   number
-  rows_with_address: number
-  rows_with_ciudad:  number
-  rows_with_estado:  number
+  rows_with_phone:      number
+  rows_with_address:    number
+  rows_with_ciudad:     number
+  rows_with_estado:     number
+  rows_with_shipped_at: number
+  rows_with_product:    number
+  rows_with_cod:        number
 }
 
 export interface ImportResponse {
@@ -98,9 +110,13 @@ function mapEstadoToNormalized(estado: string | undefined | null): string {
 
 function buildContactUpdates(
   item:    ImportItem,
-  current: { customer_name: string | null; customer_address: string | null; city: string | null },
-): { updates: Record<string, string>; fieldsFilled: string[] } {
-  const updates: Record<string, string> = {}
+  current: {
+    customer_name: string | null; customer_address: string | null; city: string | null
+    raw_status?: string | null; shipment_created_at?: string | null
+    status_since?: string | null; product_summary?: string | null; cod_amount?: number | null
+  },
+): { updates: Record<string, unknown>; fieldsFilled: string[] } {
+  const updates: Record<string, unknown> = {}
   const fieldsFilled: string[] = []
 
   // Dirección
@@ -122,6 +138,40 @@ function buildContactUpdates(
   if (nombre && !current.customer_name) {
     updates.customer_name = nombre
     fieldsFilled.push('customer_name')
+  }
+
+  // raw_status — solo si vacío en DB
+  const rawStatus = item.estado?.trim()
+  if (rawStatus && !current.raw_status) {
+    updates.raw_status = rawStatus
+    fieldsFilled.push('raw_status')
+  }
+
+  // shipment_created_at — fecha de envío EFI
+  const shippedAt = item.shipped_at?.trim()
+  if (shippedAt && !current.shipment_created_at) {
+    updates.shipment_created_at = shippedAt
+    fieldsFilled.push('shipment_created_at')
+  }
+
+  // status_since — fecha de estado final EFI
+  const finalStatusAt = item.final_status_at?.trim()
+  if (finalStatusAt && !current.status_since) {
+    updates.status_since = finalStatusAt
+    fieldsFilled.push('status_since')
+  }
+
+  // product_summary — contenido del paquete
+  const productName = item.product_name?.trim()
+  if (productName && !current.product_summary) {
+    updates.product_summary = productName
+    fieldsFilled.push('product_summary')
+  }
+
+  // cod_amount — solo si vacío en DB y el CSV lo provee
+  if (item.cod_amount != null && current.cod_amount == null) {
+    updates.cod_amount = item.cod_amount
+    fieldsFilled.push('cod_amount')
   }
 
   return { updates, fieldsFilled }
@@ -146,20 +196,35 @@ async function processItem(
   // 1. Verificar que la guía no esté ya asignada en otra orden
   const { data: existing } = await supabase
     .from('orders')
-    .select('id, order_number, customer_name, customer_phone, customer_address, city')
+    .select('id, order_number, customer_name, customer_phone, customer_address, city, normalized_status, raw_status, shipment_created_at, status_since, product_summary, cod_amount')
     .eq('tracking_number', tn)
     .limit(1)
     .maybeSingle()
 
   if (existing) {
-    // Intentar rellenar campos de contacto vacíos aunque la guía ya esté asignada
-    const { updates: contactUpdates, fieldsFilled } = buildContactUpdates(item, existing)
+    const contactUpdates: Record<string, unknown> = {}
+    const fieldsFilled: string[] = []
 
-    // Para phone: la orden ya tiene tracking; si no tiene phone, intentar llenar
+    // Rellenar campos de contacto vacíos
+    const { updates: builtUpdates, fieldsFilled: builtFields } = buildContactUpdates(item, existing)
+    Object.assign(contactUpdates, builtUpdates)
+    fieldsFilled.push(...builtFields)
+
+    // Para phone: si no tiene phone, intentar llenar
     const phoneForFill = normalizePhone(item.phone)
     if (phoneForFill && phoneForFill.length >= 7 && !existing.customer_phone) {
       contactUpdates.customer_phone = phoneForFill
       fieldsFilled.push('customer_phone')
+    }
+
+    // Actualizar normalized_status solo si el estado actual no es terminal
+    const TERMINAL_STATUSES = ['delivered', 'returned', 'cancelled']
+    const newStatus = mapEstadoToNormalized(item.estado)
+    if (item.estado && !TERMINAL_STATUSES.includes(existing.normalized_status)) {
+      contactUpdates.normalized_status    = newStatus
+      contactUpdates.last_tracking_update = new Date().toISOString()
+      if (!fieldsFilled.includes('normalized_status')) fieldsFilled.push('normalized_status')
+      if (newStatus === 'novedad') contactUpdates.last_novedad_at = new Date().toISOString()
     }
 
     if (fieldsFilled.length > 0) {
@@ -180,7 +245,7 @@ async function processItem(
   // 2. Buscar confirmed + tracking=NULL + teléfono exacto
   const { data: confirmedRaw } = await supabase
     .from('orders')
-    .select('id, order_number, customer_name, customer_phone, customer_address, city, confirmation_status')
+    .select('id, order_number, customer_name, customer_phone, customer_address, city, confirmation_status, raw_status, shipment_created_at, status_since, product_summary, cod_amount')
     .eq('confirmation_status', 'confirmed')
     .is('tracking_number', null)
     .ilike('customer_phone', `%${last7}%`)
@@ -232,7 +297,7 @@ async function processItem(
   // 3. Buscar pending + tracking=NULL + teléfono exacto (force_pending automático)
   const { data: pendingRaw } = await supabase
     .from('orders')
-    .select('id, order_number, customer_name, customer_phone, customer_address, city, confirmation_status')
+    .select('id, order_number, customer_name, customer_phone, customer_address, city, confirmation_status, raw_status, shipment_created_at, status_since, product_summary, cod_amount')
     .eq('confirmation_status', 'pending')
     .is('tracking_number', null)
     .ilike('customer_phone', `%${last7}%`)
@@ -316,13 +381,19 @@ export async function POST(request: Request) {
 
     const items: ImportItem[] = rawItems.map((item: unknown) => {
       const i = item as Record<string, unknown>
+      const rawCod = i.cod_amount
+      const codAmount = rawCod != null && rawCod !== '' ? Number(rawCod) : undefined
       return {
-        tracking_number: String(i.tracking_number ?? '').trim(),
-        phone:           String(i.phone           ?? '').trim(),
-        estado:          i.estado  ? String(i.estado).trim()  : undefined,
-        nombre:          i.nombre  ? String(i.nombre).trim()  : undefined,
-        ciudad:          i.ciudad  ? String(i.ciudad).trim()  : undefined,
-        address:         i.address ? String(i.address).trim() : undefined,
+        tracking_number:  String(i.tracking_number  ?? '').trim(),
+        phone:            String(i.phone             ?? '').trim(),
+        estado:           i.estado          ? String(i.estado).trim()          : undefined,
+        nombre:           i.nombre          ? String(i.nombre).trim()          : undefined,
+        ciudad:           i.ciudad          ? String(i.ciudad).trim()          : undefined,
+        address:          i.address         ? String(i.address).trim()         : undefined,
+        shipped_at:       i.shipped_at      ? String(i.shipped_at).trim()      : undefined,
+        final_status_at:  i.final_status_at ? String(i.final_status_at).trim() : undefined,
+        product_name:     i.product_name    ? String(i.product_name).trim()    : undefined,
+        cod_amount:       codAmount != null && !isNaN(codAmount) ? codAmount : undefined,
       }
     })
 
@@ -345,16 +416,20 @@ export async function POST(request: Request) {
     }
 
     const coverage: ImportInputCoverage = {
-      rows_with_phone:   items.filter(i => !!i.phone?.trim()).length,
-      rows_with_address: items.filter(i => !!i.address?.trim()).length,
-      rows_with_ciudad:  items.filter(i => !!i.ciudad?.trim()).length,
-      rows_with_estado:  items.filter(i => !!i.estado?.trim()).length,
+      rows_with_phone:      items.filter(i => !!i.phone?.trim()).length,
+      rows_with_address:    items.filter(i => !!i.address?.trim()).length,
+      rows_with_ciudad:     items.filter(i => !!i.ciudad?.trim()).length,
+      rows_with_estado:     items.filter(i => !!i.estado?.trim()).length,
+      rows_with_shipped_at: items.filter(i => !!i.shipped_at?.trim()).length,
+      rows_with_product:    items.filter(i => !!i.product_name?.trim()).length,
+      rows_with_cod:        items.filter(i => i.cod_amount != null).length,
     }
 
     console.log(
       `[efi-import] coverage phone=${coverage.rows_with_phone} ` +
       `address=${coverage.rows_with_address} ciudad=${coverage.rows_with_ciudad} ` +
-      `estado=${coverage.rows_with_estado} / total=${items.length}`,
+      `estado=${coverage.rows_with_estado} shipped=${coverage.rows_with_shipped_at} ` +
+      `product=${coverage.rows_with_product} cod=${coverage.rows_with_cod} / total=${items.length}`,
     )
 
     const results: ImportResult[] = []

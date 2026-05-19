@@ -14,6 +14,11 @@ interface BackfillItem {
   customer_address?: string
   customer_city?:   string
   customer_name?:   string
+  raw_status?:      string
+  shipped_at?:      string
+  final_status_at?: string
+  product_name?:    string
+  cod_amount?:      number
 }
 
 type BackfillOutcome = 'updated' | 'skipped' | 'not_found' | 'error'
@@ -71,12 +76,19 @@ export async function POST(request: Request) {
 
     const items: BackfillItem[] = rawItems.map((raw: unknown) => {
       const i = raw as Record<string, unknown>
+      const rawCod = i.cod_amount
+      const codAmount = rawCod != null && rawCod !== '' ? Number(rawCod) : undefined
       return {
         tracking_number:  String(i.tracking_number ?? '').trim(),
         customer_phone:   i.customer_phone   ? String(i.customer_phone).trim()   : undefined,
         customer_address: i.customer_address ? String(i.customer_address).trim() : undefined,
         customer_city:    i.customer_city    ? String(i.customer_city).trim()    : undefined,
         customer_name:    i.customer_name    ? String(i.customer_name).trim()    : undefined,
+        raw_status:       i.raw_status       ? String(i.raw_status).trim()       : undefined,
+        shipped_at:       i.shipped_at       ? String(i.shipped_at).trim()       : undefined,
+        final_status_at:  i.final_status_at  ? String(i.final_status_at).trim()  : undefined,
+        product_name:     i.product_name     ? String(i.product_name).trim()     : undefined,
+        cod_amount:       codAmount != null && !isNaN(codAmount) ? codAmount : undefined,
       }
     })
 
@@ -99,7 +111,7 @@ export async function POST(request: Request) {
       // Buscar orden por tracking_number
       const { data: order, error: fetchErr } = await supabase
         .from('orders')
-        .select('id, order_number, customer_name, customer_phone, customer_address, city')
+        .select('id, order_number, customer_name, customer_phone, customer_address, city, raw_status, shipment_created_at, status_since, product_summary, cod_amount')
         .eq('tracking_number', item.tracking_number)
         .maybeSingle()
 
@@ -116,7 +128,7 @@ export async function POST(request: Request) {
       }
 
       // Construir updates — solo llenar campos vacíos
-      const updates: Record<string, string> = {}
+      const updates: Record<string, unknown> = {}
       const fieldsFilled: string[] = []
 
       if (item.customer_phone && !order.customer_phone) {
@@ -140,6 +152,31 @@ export async function POST(request: Request) {
       if (item.customer_name && !order.customer_name) {
         updates.customer_name = item.customer_name
         fieldsFilled.push('customer_name')
+      }
+
+      if (item.raw_status && !order.raw_status) {
+        updates.raw_status = item.raw_status
+        fieldsFilled.push('raw_status')
+      }
+
+      if (item.shipped_at && !order.shipment_created_at) {
+        updates.shipment_created_at = item.shipped_at
+        fieldsFilled.push('shipment_created_at')
+      }
+
+      if (item.final_status_at && !order.status_since) {
+        updates.status_since = item.final_status_at
+        fieldsFilled.push('status_since')
+      }
+
+      if (item.product_name && !order.product_summary) {
+        updates.product_summary = item.product_name
+        fieldsFilled.push('product_summary')
+      }
+
+      if (item.cod_amount != null && order.cod_amount == null) {
+        updates.cod_amount = item.cod_amount
+        fieldsFilled.push('cod_amount')
       }
 
       if (fieldsFilled.length === 0) {

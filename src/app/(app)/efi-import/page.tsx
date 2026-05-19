@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useRef, useCallback, useEffect } from 'react'
+import * as XLSX from 'xlsx'
 import {
   Upload, CheckCircle2, AlertTriangle, X,
   ChevronDown, ChevronUp, Link2, FileText, RefreshCw,
@@ -14,6 +15,7 @@ import type { BackfillResponse, BackfillResult, BackfillSummary } from '@/app/ap
 const TRACKING_KEYS = [
   'tracking number', 'tracking', 'guide number', 'guide',
   'numero de guia', 'no. guia', 'no guia', '# guia', 'guia', 'numero guia',
+  'guia transportadora',  // columna EFI directa "Guía transportadora"
 ]
 const PHONE_KEYS = [
   'phone', 'phone number',
@@ -25,6 +27,7 @@ const ESTADO_KEYS = [
   'status',
   'raw status',              // raw_status — columna del export EFI histórico
   'estado', 'estatus', 'novedad', 'ultima novedad',
+  'estado guia inicial',     // columna EFI "Estado guía inicial"
 ]
 const NOMBRE_KEYS = [
   'customer name', 'customer', 'name',
@@ -44,29 +47,53 @@ const ADDRESS_KEYS = [
   'direccion',
   'direccion del destinatario',
 ]
+const SHIPPED_AT_KEYS = [
+  'fecha de envio', 'fecha envio', 'shipped at', 'shipped at', 'shippedat',
+  'fecha despacho', 'fecha salida', 'shipment created at',
+]
+const FINAL_STATUS_AT_KEYS = [
+  'fecha de estado final', 'fecha estado final', 'final status at', 'final status at',
+  'fecha finalizacion', 'fecha fin', 'status since',
+]
+const COD_AMOUNT_KEYS = [
+  'valor recaudo', 'recaudo', 'cod amount', 'cod amount', 'valor cod',
+  'monto', 'total', 'valor', 'cod',
+]
+const PRODUCT_KEYS = [
+  'contenido', 'producto', 'product name', 'product name', 'products summary',
+  'products summary', 'descripcion', 'item', 'product summary',
+]
 
 const WHITESPACE_DELIM = 'WHITESPACE'
 
 interface ParsedRow {
-  tracking_number: string
-  phone:           string
-  estado?:         string
-  nombre?:         string
-  ciudad?:         string
-  address?:        string
-  _rowIndex:       number
-  _parseError?:    string
+  tracking_number:  string
+  phone:            string
+  estado?:          string
+  nombre?:          string
+  ciudad?:          string
+  address?:         string
+  shipped_at?:      string
+  final_status_at?: string
+  cod_amount?:      string
+  product_name?:    string
+  _rowIndex:        number
+  _parseError?:     string
 }
 
 interface ColumnDetection {
-  trackingCol: string | null
-  phoneCol:    string | null
-  estadoCol:   string | null
-  nombreCol:   string | null
-  ciudadCol:   string | null
-  addressCol:  string | null
-  delimiter:   string
-  allHeaders:  string[]
+  trackingCol:      string | null
+  phoneCol:         string | null
+  estadoCol:        string | null
+  nombreCol:        string | null
+  ciudadCol:        string | null
+  addressCol:       string | null
+  shippedAtCol:     string | null
+  finalStatusAtCol: string | null
+  codAmountCol:     string | null
+  productCol:       string | null
+  delimiter:        string
+  allHeaders:       string[]
 }
 
 function norm(s: string): string {
@@ -121,14 +148,18 @@ function detectBestDelimiter(headerLine: string, mode: Mode): string {
 function detectColumns(headers: string[], delimiter: string): ColumnDetection {
   const find = (keys: string[]) => headers.find(h => keys.includes(norm(h))) ?? null
   return {
-    trackingCol: find(TRACKING_KEYS),
-    phoneCol:    find(PHONE_KEYS),
-    estadoCol:   find(ESTADO_KEYS),
-    nombreCol:   find(NOMBRE_KEYS),
-    ciudadCol:   find(CIUDAD_KEYS),
-    addressCol:  find(ADDRESS_KEYS),
+    trackingCol:      find(TRACKING_KEYS),
+    phoneCol:         find(PHONE_KEYS),
+    estadoCol:        find(ESTADO_KEYS),
+    nombreCol:        find(NOMBRE_KEYS),
+    ciudadCol:        find(CIUDAD_KEYS),
+    addressCol:       find(ADDRESS_KEYS),
+    shippedAtCol:     find(SHIPPED_AT_KEYS),
+    finalStatusAtCol: find(FINAL_STATUS_AT_KEYS),
+    codAmountCol:     find(COD_AMOUNT_KEYS),
+    productCol:       find(PRODUCT_KEYS),
     delimiter,
-    allHeaders:  headers,
+    allHeaders:       headers,
   }
 }
 
@@ -139,6 +170,7 @@ function parseCSVText(
   const empty: ColumnDetection = {
     trackingCol: null, phoneCol: null, estadoCol: null,
     nombreCol: null, ciudadCol: null, addressCol: null,
+    shippedAtCol: null, finalStatusAtCol: null, codAmountCol: null, productCol: null,
     delimiter: ',', allHeaders: [],
   }
 
@@ -165,12 +197,16 @@ function parseCSVText(
     }
   }
 
-  const trackingIdx = headers.indexOf(detection.trackingCol)
-  const phoneIdx    = detection.phoneCol  ? headers.indexOf(detection.phoneCol)  : -1
-  const estadoIdx   = detection.estadoCol ? headers.indexOf(detection.estadoCol) : -1
-  const nombreIdx   = detection.nombreCol ? headers.indexOf(detection.nombreCol) : -1
-  const ciudadIdx   = detection.ciudadCol ? headers.indexOf(detection.ciudadCol) : -1
-  const addressIdx  = detection.addressCol ? headers.indexOf(detection.addressCol) : -1
+  const trackingIdx      = headers.indexOf(detection.trackingCol)
+  const phoneIdx         = detection.phoneCol         ? headers.indexOf(detection.phoneCol)         : -1
+  const estadoIdx        = detection.estadoCol        ? headers.indexOf(detection.estadoCol)        : -1
+  const nombreIdx        = detection.nombreCol        ? headers.indexOf(detection.nombreCol)        : -1
+  const ciudadIdx        = detection.ciudadCol        ? headers.indexOf(detection.ciudadCol)        : -1
+  const addressIdx       = detection.addressCol       ? headers.indexOf(detection.addressCol)       : -1
+  const shippedAtIdx     = detection.shippedAtCol     ? headers.indexOf(detection.shippedAtCol)     : -1
+  const finalStatusAtIdx = detection.finalStatusAtCol ? headers.indexOf(detection.finalStatusAtCol) : -1
+  const codAmountIdx     = detection.codAmountCol     ? headers.indexOf(detection.codAmountCol)     : -1
+  const productIdx       = detection.productCol       ? headers.indexOf(detection.productCol)       : -1
 
   const rows: ParsedRow[] = []
 
@@ -185,13 +221,17 @@ function parseCSVText(
     const missingPhone    = mode === 'import' && !phone
 
     rows.push({
-      tracking_number: tracking,
+      tracking_number:  tracking,
       phone,
-      estado:  estadoIdx  >= 0 ? cleanCell(cols[estadoIdx]  ?? '') || undefined : undefined,
-      nombre:  nombreIdx  >= 0 ? cleanCell(cols[nombreIdx]  ?? '') || undefined : undefined,
-      ciudad:  ciudadIdx  >= 0 ? cleanCell(cols[ciudadIdx]  ?? '') || undefined : undefined,
-      address: addressIdx >= 0 ? cleanCell(cols[addressIdx] ?? '') || undefined : undefined,
-      _rowIndex:   i,
+      estado:          estadoIdx        >= 0 ? cleanCell(cols[estadoIdx]        ?? '') || undefined : undefined,
+      nombre:          nombreIdx        >= 0 ? cleanCell(cols[nombreIdx]        ?? '') || undefined : undefined,
+      ciudad:          ciudadIdx        >= 0 ? cleanCell(cols[ciudadIdx]        ?? '') || undefined : undefined,
+      address:         addressIdx       >= 0 ? cleanCell(cols[addressIdx]       ?? '') || undefined : undefined,
+      shipped_at:      shippedAtIdx     >= 0 ? cleanCell(cols[shippedAtIdx]     ?? '') || undefined : undefined,
+      final_status_at: finalStatusAtIdx >= 0 ? cleanCell(cols[finalStatusAtIdx] ?? '') || undefined : undefined,
+      cod_amount:      codAmountIdx     >= 0 ? cleanCell(cols[codAmountIdx]     ?? '') || undefined : undefined,
+      product_name:    productIdx       >= 0 ? cleanCell(cols[productIdx]       ?? '') || undefined : undefined,
+      _rowIndex:       i,
       _parseError: (missingTracking || missingPhone)
         ? `guía="${tracking}"${missingPhone ? ` o teléfono="${phone}" vacío` : ' vacía'}`
         : undefined,
@@ -397,9 +437,19 @@ export default function EfiImportPage() {
   }, [])
 
   const handleFile = useCallback(async (file: File) => {
-    const text = await file.text()
-    setCsvText(text)
-    handleParse(text, mode)
+    const ext = file.name.split('.').pop()?.toLowerCase()
+    if (ext === 'xlsx' || ext === 'xls') {
+      const buf = await file.arrayBuffer()
+      const wb  = XLSX.read(buf, { type: 'array', dateNF: 'yyyy-mm-dd' })
+      const ws  = wb.Sheets[wb.SheetNames[0]!]
+      const tsv = XLSX.utils.sheet_to_csv(ws, { FS: '\t' })
+      setCsvText(tsv)
+      handleParse(tsv, mode)
+    } else {
+      const text = await file.text()
+      setCsvText(text)
+      handleParse(text, mode)
+    }
   }, [handleParse, mode])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -425,14 +475,21 @@ export default function EfiImportPage() {
     if (mode === 'import') {
       const validItems = validRows
         .filter(r => r.tracking_number && r.phone && !r._parseError)
-        .map(r => ({
-          tracking_number: r.tracking_number,
-          phone:           r.phone,
-          estado:          r.estado,
-          nombre:          r.nombre,
-          ciudad:          r.ciudad,
-          address:         r.address,
-        }))
+        .map(r => {
+          const codNum = r.cod_amount ? Number(r.cod_amount.replace(/[^\d.]/g, '')) : undefined
+          return {
+            tracking_number:  r.tracking_number,
+            phone:            r.phone,
+            estado:           r.estado,
+            nombre:           r.nombre,
+            ciudad:           r.ciudad,
+            address:          r.address,
+            shipped_at:       r.shipped_at,
+            final_status_at:  r.final_status_at,
+            product_name:     r.product_name,
+            cod_amount:       codNum != null && !isNaN(codNum) ? codNum : undefined,
+          }
+        })
 
       try {
         const res  = await fetch('/api/admin/reconcile-efi-import', {
@@ -452,13 +509,21 @@ export default function EfiImportPage() {
       // Backfill mode
       const validItems = validRows
         .filter(r => r.tracking_number && !r._parseError)
-        .map(r => ({
-          tracking_number:  r.tracking_number,
-          customer_phone:   r.phone   || undefined,
-          customer_address: r.address || undefined,
-          customer_city:    r.ciudad  || undefined,
-          customer_name:    r.nombre  || undefined,
-        }))
+        .map(r => {
+          const codNum = r.cod_amount ? Number(r.cod_amount.replace(/[^\d.]/g, '')) : undefined
+          return {
+            tracking_number:  r.tracking_number,
+            customer_phone:   r.phone   || undefined,
+            customer_address: r.address || undefined,
+            customer_city:    r.ciudad  || undefined,
+            customer_name:    r.nombre  || undefined,
+            raw_status:       r.estado  || undefined,
+            shipped_at:       r.shipped_at,
+            final_status_at:  r.final_status_at,
+            product_name:     r.product_name,
+            cod_amount:       codNum != null && !isNaN(codNum) ? codNum : undefined,
+          }
+        })
 
       try {
         const res  = await fetch('/api/admin/backfill-imported-order-data', {
@@ -604,13 +669,13 @@ export default function EfiImportPage() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".csv,.tsv,.txt"
+              accept=".csv,.tsv,.txt,.xlsx,.xls"
               className="hidden"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f) }}
             />
             <Upload className={`w-10 h-10 mx-auto mb-3 ${isBackfill ? 'text-teal-400' : 'text-orange-400'}`} />
-            <p className="text-gray-700 font-semibold mb-1">Arrastra el archivo CSV de EFI aquí</p>
-            <p className="text-gray-500 text-sm">o haz click para seleccionarlo</p>
+            <p className="text-gray-700 font-semibold mb-1">Arrastra el archivo CSV o Excel de EFI aquí</p>
+            <p className="text-gray-500 text-sm">CSV, TSV, XLSX, XLS — o haz click para seleccionarlo</p>
           </div>
 
           {/* Paste area */}
@@ -708,13 +773,22 @@ export default function EfiImportPage() {
               <div className={`rounded-xl border p-4 ${isBackfill ? 'bg-teal-50 border-teal-200' : 'bg-orange-50 border-orange-200'}`}>
                 <p className={`text-xs font-semibold mb-1 ${isBackfill ? 'text-teal-800' : 'text-orange-800'}`}>Detectado</p>
                 <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Guía: <strong>{detection.trackingCol ?? '—'}</strong></p>
-                {detection.phoneCol   && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Tel: <strong>{detection.phoneCol}</strong></p>}
-                {detection.addressCol && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Dir: <strong>{detection.addressCol}</strong></p>}
-                {detection.ciudadCol  && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Ciudad: <strong>{detection.ciudadCol}</strong></p>}
-                {detection.estadoCol  && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Estado: <strong>{detection.estadoCol}</strong></p>}
+                {detection.phoneCol          && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Tel: <strong>{detection.phoneCol}</strong></p>}
+                {detection.addressCol        && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Dir: <strong>{detection.addressCol}</strong></p>}
+                {detection.ciudadCol         && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Ciudad: <strong>{detection.ciudadCol}</strong></p>}
+                {detection.estadoCol         && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Estado: <strong>{detection.estadoCol}</strong></p>}
+                {detection.shippedAtCol      && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Fecha envío: <strong>{detection.shippedAtCol}</strong></p>}
+                {detection.finalStatusAtCol  && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Fecha estado: <strong>{detection.finalStatusAtCol}</strong></p>}
+                {detection.codAmountCol      && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Recaudo: <strong>{detection.codAmountCol}</strong></p>}
+                {detection.productCol        && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Producto: <strong>{detection.productCol}</strong></p>}
                 {!detection.estadoCol && !isBackfill && (
                   <p className="text-xs text-amber-700 font-semibold mt-1">
-                    ⚠ Sin columna de estado detectada — se usará &quot;tránsito&quot; por defecto en todas las guías
+                    ⚠ Sin columna de estado — se usará &quot;tránsito&quot; por defecto
+                  </p>
+                )}
+                {isBackfill && !detection.phoneCol && !detection.addressCol && (
+                  <p className="text-xs text-amber-700 font-semibold mt-1">
+                    ⚠ Sin teléfono ni dirección detectados — solo se podrán rellenar otros campos
                   </p>
                 )}
                 <p className={`text-xs mt-1 ${isBackfill ? 'text-teal-500' : 'text-orange-500'}`}>Delim: {delimLabel(detection.delimiter)}</p>
