@@ -15,6 +15,7 @@ export interface ImportItem {
   estado?:         string
   nombre?:         string
   ciudad?:         string
+  address?:        string  // Dirección destinatario — se guarda si el campo está vacío en DB
 }
 
 export type ImportOutcome =
@@ -30,20 +31,23 @@ interface Candidate {
   order_number:        string | null
   customer_name:       string | null
   customer_phone:      string | null
+  customer_address:    string | null
+  city:                string | null
   confirmation_status: string | null
 }
 
 export interface ImportResult {
-  tracking_number:   string
-  phone:             string
-  estado?:           string
-  outcome:           ImportOutcome
-  order_number?:     string | null
-  customer_name?:    string | null
-  normalized_status?: string
-  candidates?:       Candidate[]
-  existing_order?:   { id: string; order_number: string | null }
-  error?:            string
+  tracking_number:      string
+  phone:                string
+  estado?:              string
+  outcome:              ImportOutcome
+  order_number?:        string | null
+  customer_name?:       string | null
+  normalized_status?:   string
+  candidates?:          Candidate[]
+  existing_order?:      { id: string; order_number: string | null }
+  contact_fields_filled?: string[]   // campos de contacto rellenados en esta pasada
+  error?:               string
 }
 
 export interface ImportSummary {
@@ -66,7 +70,6 @@ export interface ImportResponse {
 
 // ── Status mapping ─────────────────────────────────────────────────────────────
 // Mapea texto de estado EFI (CSV export) → normalized_status interno.
-// Datos vienen del propio EFI, el cron sincronizará el estado exacto en el próximo ciclo.
 
 function mapEstadoToNormalized(estado: string | undefined | null): string {
   if (!estado) return 'in_transit'
@@ -79,6 +82,41 @@ function mapEstadoToNormalized(estado: string | undefined | null): string {
   if (s.includes('entreg'))                          return 'delivered'
   if (s.includes('devolu') || s.includes('devuelt')) return 'returned'
   return 'in_transit'
+}
+
+// ── Fill contact data helper ───────────────────────────────────────────────────
+// Recibe el item del CSV y los campos actuales de la orden en DB.
+// Devuelve { updates, fieldsFilled } — solo campos que estaban vacíos.
+
+function buildContactUpdates(
+  item:    ImportItem,
+  current: { customer_name: string | null; customer_address: string | null; city: string | null },
+): { updates: Record<string, string>; fieldsFilled: string[] } {
+  const updates: Record<string, string> = {}
+  const fieldsFilled: string[] = []
+
+  // Dirección
+  const address = item.address?.trim()
+  if (address && !current.customer_address) {
+    updates.customer_address = address
+    fieldsFilled.push('customer_address')
+  }
+
+  // Ciudad
+  const ciudad = item.ciudad?.trim()
+  if (ciudad && !current.city) {
+    updates.city = ciudad
+    fieldsFilled.push('city')
+  }
+
+  // Nombre (solo si el CSV lo provee y la orden no tiene)
+  const nombre = item.nombre?.trim()
+  if (nombre && !current.customer_name) {
+    updates.customer_name = nombre
+    fieldsFilled.push('customer_name')
+  }
+
+  return { updates, fieldsFilled }
 }
 
 // ── Process single item ────────────────────────────────────────────────────────
@@ -100,16 +138,32 @@ async function processItem(
   // 1. Verificar que la guía no esté ya asignada en otra orden
   const { data: existing } = await supabase
     .from('orders')
-    .select('id, order_number')
+    .select('id, order_number, customer_name, customer_phone, customer_address, city')
     .eq('tracking_number', tn)
     .limit(1)
     .maybeSingle()
 
   if (existing) {
+    // Intentar rellenar campos de contacto vacíos aunque la guía ya esté asignada
+    const { updates: contactUpdates, fieldsFilled } = buildContactUpdates(item, existing)
+
+    // Para phone: la orden ya tiene tracking; si no tiene phone, intentar llenar
+    const phoneForFill = normalizePhone(item.phone)
+    if (phoneForFill && phoneForFill.length >= 7 && !existing.customer_phone) {
+      contactUpdates.customer_phone = phoneForFill
+      fieldsFilled.push('customer_phone')
+    }
+
+    if (fieldsFilled.length > 0) {
+      await supabase.from('orders').update(contactUpdates).eq('id', existing.id)
+      console.log(`[efi-import] already_assigned fill tn=${tn} fields=${fieldsFilled.join(',')}`)
+    }
+
     return {
       tracking_number: tn, phone, estado: item.estado,
-      outcome: 'already_assigned',
+      outcome:        'already_assigned',
       existing_order: { id: existing.id, order_number: existing.order_number },
+      contact_fields_filled: fieldsFilled.length > 0 ? fieldsFilled : undefined,
     }
   }
 
@@ -118,7 +172,7 @@ async function processItem(
   // 2. Buscar confirmed + tracking=NULL + teléfono exacto
   const { data: confirmedRaw } = await supabase
     .from('orders')
-    .select('id, order_number, customer_name, customer_phone, confirmation_status')
+    .select('id, order_number, customer_name, customer_phone, customer_address, city, confirmation_status')
     .eq('confirmation_status', 'confirmed')
     .is('tracking_number', null)
     .ilike('customer_phone', `%${last7}%`)
@@ -129,11 +183,14 @@ async function processItem(
   )
 
   if (confirmed.length === 1) {
-    const target  = confirmed[0]!
+    const target = confirmed[0]!
+
+    const { updates: contactUpdates, fieldsFilled } = buildContactUpdates(item, target)
     const updates: Record<string, unknown> = {
       tracking_number:      tn,
       normalized_status:    effectiveStatus,
       last_tracking_update: new Date().toISOString(),
+      ...contactUpdates,
     }
     if (item.estado) updates.raw_status = item.estado
     if (effectiveStatus === 'novedad') updates.last_novedad_at = new Date().toISOString()
@@ -145,13 +202,14 @@ async function processItem(
       return { tracking_number: tn, phone, estado: item.estado, outcome: 'error', error: updateErr.message }
     }
 
-    console.log(`[efi-import] assigned tn=${tn} order=${target.order_number} status=${effectiveStatus}`)
+    console.log(`[efi-import] assigned tn=${tn} order=${target.order_number} status=${effectiveStatus}${fieldsFilled.length ? ` filled=${fieldsFilled.join(',')}` : ''}`)
     return {
       tracking_number: tn, phone, estado: item.estado,
       outcome: 'assigned',
-      order_number:      target.order_number,
-      customer_name:     target.customer_name,
-      normalized_status: effectiveStatus,
+      order_number:         target.order_number,
+      customer_name:        target.customer_name,
+      normalized_status:    effectiveStatus,
+      contact_fields_filled: fieldsFilled.length > 0 ? fieldsFilled : undefined,
     }
   }
 
@@ -166,7 +224,7 @@ async function processItem(
   // 3. Buscar pending + tracking=NULL + teléfono exacto (force_pending automático)
   const { data: pendingRaw } = await supabase
     .from('orders')
-    .select('id, order_number, customer_name, customer_phone, confirmation_status')
+    .select('id, order_number, customer_name, customer_phone, customer_address, city, confirmation_status')
     .eq('confirmation_status', 'pending')
     .is('tracking_number', null)
     .ilike('customer_phone', `%${last7}%`)
@@ -177,12 +235,15 @@ async function processItem(
   )
 
   if (pending.length === 1) {
-    const target  = pending[0]!
+    const target = pending[0]!
+
+    const { updates: contactUpdates, fieldsFilled } = buildContactUpdates(item, target)
     const updates: Record<string, unknown> = {
       tracking_number:      tn,
       normalized_status:    effectiveStatus,
       confirmation_status:  'confirmed',
       last_tracking_update: new Date().toISOString(),
+      ...contactUpdates,
     }
     if (item.estado) updates.raw_status = item.estado
     if (effectiveStatus === 'novedad') updates.last_novedad_at = new Date().toISOString()
@@ -194,13 +255,14 @@ async function processItem(
       return { tracking_number: tn, phone, estado: item.estado, outcome: 'error', error: updateErr.message }
     }
 
-    console.log(`[efi-import] assigned_pending_forced tn=${tn} order=${target.order_number} status=${effectiveStatus}`)
+    console.log(`[efi-import] assigned_pending_forced tn=${tn} order=${target.order_number} status=${effectiveStatus}${fieldsFilled.length ? ` filled=${fieldsFilled.join(',')}` : ''}`)
     return {
       tracking_number: tn, phone, estado: item.estado,
       outcome: 'assigned_pending_forced',
-      order_number:      target.order_number,
-      customer_name:     target.customer_name,
-      normalized_status: effectiveStatus,
+      order_number:         target.order_number,
+      customer_name:        target.customer_name,
+      normalized_status:    effectiveStatus,
+      contact_fields_filled: fieldsFilled.length > 0 ? fieldsFilled : undefined,
     }
   }
 
@@ -249,9 +311,10 @@ export async function POST(request: Request) {
       return {
         tracking_number: String(i.tracking_number ?? '').trim(),
         phone:           String(i.phone           ?? '').trim(),
-        estado:          i.estado ? String(i.estado).trim() : undefined,
-        nombre:          i.nombre ? String(i.nombre).trim() : undefined,
-        ciudad:          i.ciudad ? String(i.ciudad).trim() : undefined,
+        estado:          i.estado  ? String(i.estado).trim()  : undefined,
+        nombre:          i.nombre  ? String(i.nombre).trim()  : undefined,
+        ciudad:          i.ciudad  ? String(i.ciudad).trim()  : undefined,
+        address:         i.address ? String(i.address).trim() : undefined,
       }
     })
 

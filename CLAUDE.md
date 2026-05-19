@@ -4,6 +4,119 @@
 
 ---
 
+## FIX: Datos faltantes (teléfono/dirección) en órdenes importadas (2026-05-18)
+
+### Problema
+
+Muchas órdenes importadas desde EFI aparecen en Novedad sin teléfono, dirección o ciudad.
+Causa: el webhook de Shopify puede crear la orden sin esos datos; `reconcile-efi-import` solo guardaba tracking + estado, nunca rellenaba contact data.
+
+### Qué se hizo
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/debug/incomplete-imported-orders/route.ts` | **NUEVO.** `GET /api/debug/incomplete-imported-orders`. Solo admin. Diagnóstico de órdenes con tracking pero sin phone/address/city. |
+| `src/app/api/admin/backfill-imported-order-data/route.ts` | **NUEVO.** `POST /api/admin/backfill-imported-order-data`. Solo admin. Acepta CSV/items con tracking + datos de contacto. Rellena campos vacíos sin sobrescribir. |
+| `src/app/api/admin/reconcile-efi-import/route.ts` | **MODIFICADO.** `ImportItem` agrega campo `address`. En `processItem`: cuando asigna tracking (confirmed / pending_forced), también rellena `customer_address`, `city`, `customer_name` si están vacíos en DB. En `already_assigned`: rellena campos vacíos incluyendo `customer_phone`. `ImportResult` agrega `contact_fields_filled[]`. |
+| `src/app/(app)/efi-import/page.tsx` | **MODIFICADO.** Agrega `ADDRESS_KEYS` y nuevos nombres de columna para phone/city. Modo **"Actualizar datos faltantes"** (modo backfill): botón toggle en la UI, validación solo requiere tracking, llama a `/api/admin/backfill-imported-order-data`. Resultados muestran campos rellenados. |
+
+### Endpoint `GET /api/debug/incomplete-imported-orders`
+
+**Auth:** 401 sin sesión · 403 para no-admin · solo lectura
+
+**Response:**
+```json
+{
+  "generatedAt": "...",
+  "totals": { "without_phone": 45, "without_address": 120, "without_city": 98 },
+  "by_source": { "shopify_webhook": 110, "csv_import": 10 },
+  "sample_count": 30,
+  "sample": [
+    {
+      "id": "...", "tracking_number": "9000555918", "order_number": "#1234",
+      "customer_name": "Juan Pérez", "customer_phone": null,
+      "customer_address": null, "customer_city": null,
+      "normalized_status": "novedad", "raw_status": "Novedad",
+      "source": "shopify_webhook", "created_at": "..."
+    }
+  ]
+}
+```
+
+### Endpoint `POST /api/admin/backfill-imported-order-data`
+
+**Auth:** 401 sin sesión · 403 para no-admin
+
+**Body:**
+```json
+{
+  "items": [
+    {
+      "tracking_number": "9000555918",
+      "customer_phone":   "8098344999",
+      "customer_address": "Calle 1 #2-3",
+      "customer_city":    "Santo Domingo",
+      "customer_name":    "Juan Pérez"
+    }
+  ]
+}
+```
+
+**Lógica por item:**
+1. Buscar orden por `tracking_number`
+2. Si no existe → `not_found`
+3. Si existe, para cada campo provisto: si está vacío en DB → llenar (normalizePhone para teléfono)
+4. Si ningún campo estaba vacío → `skipped`
+5. Si se llenó al menos uno → `updated`
+
+**Reglas:** NO sobrescribe campos no vacíos · phone normalizado a solo dígitos · trim de todos los strings · idempotente
+
+**Response:**
+```json
+{
+  "summary": { "scanned": 100, "updated": 78, "skipped": 15, "not_found": 5, "errors": 2 },
+  "sample_updated": [{ "tracking_number": "...", "outcome": "updated", "order_number": "#1234", "fields_filled": ["customer_phone", "customer_address"] }],
+  "sample_missing": [{ "tracking_number": "...", "outcome": "not_found" }]
+}
+```
+
+### Mejora reconcile-efi-import
+
+Nuevas columnas CSV reconocidas:
+- **Teléfono:** `customer_phone`, `Teléfonos destinatario` (nuevos; antes no detectados)
+- **Dirección:** `Dirección destinatario`, `customer_address`, `address`, `direccion` (nuevos)
+- **Ciudad:** `customer_city`, `ciudad/provincia`, `provincia` (nuevos)
+
+Cuando asigna tracking a una orden confirmada/pendiente, también escribe `customer_address`, `city`, `customer_name` si estaban vacíos. El campo `contact_fields_filled` en la respuesta muestra qué se rellenó.
+
+Para órdenes `already_assigned`: también rellena `customer_phone`, `customer_address`, `city`, `customer_name` si están vacíos.
+
+### UI `/efi-import` — modo backfill
+
+Toggle en la pantalla de input:
+- **"Importar guías nuevas"** (modo original, requiere tracking + teléfono)
+- **"Actualizar datos faltantes"** (modo backfill, solo tracking obligatorio)
+
+En modo backfill: llama a `/api/admin/backfill-imported-order-data`, muestra resultados con campos rellenados por guía.
+
+### Flujo de uso recomendado
+
+1. `GET /api/debug/incomplete-imported-orders` → ver cuántas órdenes tienen datos faltantes y por qué source
+2. Si `totals.without_phone > 0`: ir a `/efi-import` → modo "Actualizar datos faltantes" → subir CSV de EFI con columnas de contacto
+3. Revisar resultados: `updated` = campos rellenados, `skipped` = ya tenían datos, `not_found` = guías no están en DB
+4. Re-ejecutar debug para confirmar que los totales bajaron
+
+### Seguridad / qué NO hace
+
+- No sobrescribe campos de contacto existentes (solo NULL → valor)
+- No modifica estados logísticos (`normalized_status`, `raw_status`)
+- No toca financiero ni Shopify sync
+- No llama a EFI
+- Solo admin puede ejecutar ambos endpoints
+- Idempotente: ejecutar dos veces no duplica ni sobreescribe
+
+---
+
 ## DIAGNÓSTICO RAÍZ: Por qué guías activas en EFI no existen en DB (2026-05-16)
 
 ### Causa raíz confirmada: el paso de asignación de tracking está roto/ausente
