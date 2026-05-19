@@ -60,8 +60,16 @@ export interface ImportSummary {
   errors:                  number
 }
 
+export interface ImportInputCoverage {
+  rows_with_phone:   number
+  rows_with_address: number
+  rows_with_ciudad:  number
+  rows_with_estado:  number
+}
+
 export interface ImportResponse {
   summary:          ImportSummary
+  input_coverage:   ImportInputCoverage
   auto_assigned:    ImportResult[]
   needs_review:     ImportResult[]
   already_assigned: ImportResult[]
@@ -336,6 +344,19 @@ export async function POST(request: Request) {
       errors:                  0,
     }
 
+    const coverage: ImportInputCoverage = {
+      rows_with_phone:   items.filter(i => !!i.phone?.trim()).length,
+      rows_with_address: items.filter(i => !!i.address?.trim()).length,
+      rows_with_ciudad:  items.filter(i => !!i.ciudad?.trim()).length,
+      rows_with_estado:  items.filter(i => !!i.estado?.trim()).length,
+    }
+
+    console.log(
+      `[efi-import] coverage phone=${coverage.rows_with_phone} ` +
+      `address=${coverage.rows_with_address} ciudad=${coverage.rows_with_ciudad} ` +
+      `estado=${coverage.rows_with_estado} / total=${items.length}`,
+    )
+
     const results: ImportResult[] = []
 
     for (const item of items) {
@@ -360,6 +381,7 @@ export async function POST(request: Request) {
 
     const response: ImportResponse = {
       summary,
+      input_coverage:   coverage,
       auto_assigned:    results.filter(r => r.outcome === 'assigned' || r.outcome === 'assigned_pending_forced'),
       needs_review:     results.filter(r => r.outcome === 'multiple_candidates' || r.outcome === 'no_match'),
       already_assigned: results.filter(r => r.outcome === 'already_assigned'),

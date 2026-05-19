@@ -4,6 +4,63 @@
 
 ---
 
+## FIX: Mapeo de columna `raw_status` en efi-import (2026-05-18)
+
+### Problema raíz
+
+La función `norm()` en `efi-import/page.tsx` convierte guiones bajos a espacios (`raw_status` → `"raw status"`).
+`ESTADO_KEYS` **no** incluía `'raw status'`, por lo que el CSV viejo con columna `raw_status` nunca detectaba `estadoCol`.
+
+Consecuencia:
+- `estadoCol = null` → `item.estado = undefined` en todas las filas
+- `mapEstadoToNormalized(undefined) = 'in_transit'` → todas las órdenes importadas quedaban con `normalized_status = 'in_transit'`
+- `raw_status` nunca se guardaba en DB (condición `if (item.estado)` fallaba)
+
+### Cambios (2026-05-18)
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/efi-import/page.tsx` | `ESTADO_KEYS` ahora incluye `'raw status'` (para `raw_status` del formato EFI histórico). Warning en preview cuando `estadoCol = null` en modo import. Ciudad también visible en tarjeta de detección. |
+| `src/app/api/admin/reconcile-efi-import/route.ts` | Nuevo tipo `ImportInputCoverage`. `ImportResponse` incluye `input_coverage` con conteo de filas que aportaron cada campo (`phone`, `address`, `ciudad`, `estado`). Log de cobertura al inicio del procesamiento. |
+| `src/app/api/debug/contact-fields-health/route.ts` | Totales ahora incluyen `tracking_without_raw_status` (guías sin raw_status → confirma volumen afectado por el bug) y `tracking_without_phone_and_address` (casos más críticos). Diagnóstico actualizado con nota del bug y fix. |
+
+### Formato CSV histórico reconocido
+
+```
+tracking_number  → guía
+customer_name    → nombre del destinatario
+customer_phone   → teléfono
+customer_address → dirección
+customer_city    → ciudad
+cod_amount       → (ignorado)
+product_name     → (ignorado)
+raw_status       → estado logístico  ← AHORA DETECTADO
+shipped_at       → (ignorado)
+final_status_at  → (ignorado)
+```
+
+### `ImportInputCoverage` en response de `/api/admin/reconcile-efi-import`
+
+```json
+{
+  "input_coverage": {
+    "rows_with_phone":   150,
+    "rows_with_address": 148,
+    "rows_with_ciudad":  145,
+    "rows_with_estado":  150
+  }
+}
+```
+
+`rows_with_estado = 0` indica que la columna de estado no fue detectada en el CSV (ver warning en preview UI).
+
+### Indicadores de diagnóstico en `contact-fields-health`
+
+- `tracking_without_raw_status`: órdenes CON guía asignada pero sin `raw_status` → indican importaciones hechas antes del fix (el estado quedó `in_transit` por default). Usar backfill del CSV original para corregir.
+- `tracking_without_phone_and_address`: casos más críticos — guías sin teléfono NI dirección.
+
+---
+
 ## DIAGNÓSTICO GLOBAL: contact-fields-health (2026-05-18)
 
 ### Problema diagnosticado

@@ -23,6 +23,7 @@ const PHONE_KEYS = [
 ]
 const ESTADO_KEYS = [
   'status',
+  'raw status',              // raw_status — columna del export EFI histórico
   'estado', 'estatus', 'novedad', 'ultima novedad',
 ]
 const NOMBRE_KEYS = [
@@ -709,7 +710,13 @@ export default function EfiImportPage() {
                 <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Guía: <strong>{detection.trackingCol ?? '—'}</strong></p>
                 {detection.phoneCol   && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Tel: <strong>{detection.phoneCol}</strong></p>}
                 {detection.addressCol && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Dir: <strong>{detection.addressCol}</strong></p>}
+                {detection.ciudadCol  && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Ciudad: <strong>{detection.ciudadCol}</strong></p>}
                 {detection.estadoCol  && <p className={`text-xs ${isBackfill ? 'text-teal-700' : 'text-orange-700'}`}>Estado: <strong>{detection.estadoCol}</strong></p>}
+                {!detection.estadoCol && !isBackfill && (
+                  <p className="text-xs text-amber-700 font-semibold mt-1">
+                    ⚠ Sin columna de estado detectada — se usará &quot;tránsito&quot; por defecto en todas las guías
+                  </p>
+                )}
                 <p className={`text-xs mt-1 ${isBackfill ? 'text-teal-500' : 'text-orange-500'}`}>Delim: {delimLabel(detection.delimiter)}</p>
               </div>
             )}

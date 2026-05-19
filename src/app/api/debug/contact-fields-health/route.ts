@@ -94,13 +94,17 @@ export async function GET() {
     // ── Todas las queries en paralelo ──────────────────────────────────────────
     const [globalResults, statusResults, sourceResults, confirmResults, sampleResults] =
       await Promise.all([
-        // ── 1. Totales globales (5 queries) ──────────────────────────────────
+        // ── 1. Totales globales (7 queries) ──────────────────────────────────
         Promise.all([
           supabase.from('orders').select('id', { count: 'exact', head: true }),
           supabase.from('orders').select('id', { count: 'exact', head: true }).not('tracking_number', 'is', null),
           supabase.from('orders').select('id', { count: 'exact', head: true }).is('customer_phone', null),
           supabase.from('orders').select('id', { count: 'exact', head: true }).is('customer_address', null),
           supabase.from('orders').select('id', { count: 'exact', head: true }).is('city', null),
+          // Órdenes con tracking asignado pero sin raw_status — indica import sin columna de estado
+          supabase.from('orders').select('id', { count: 'exact', head: true }).not('tracking_number', 'is', null).is('raw_status', null),
+          // Órdenes con tracking pero sin teléfono Y sin dirección (casos más críticos)
+          supabase.from('orders').select('id', { count: 'exact', head: true }).not('tracking_number', 'is', null).is('customer_phone', null).is('customer_address', null),
         ]),
 
         // ── 2. Breakdown por normalized_status (9 × 4 = 36 queries) ─────────
@@ -153,7 +157,7 @@ export async function GET() {
       ])
 
     // ── Procesar totales globales ────────────────────────────────────────────
-    const [totalRes, withTrackingRes, noPhoneRes, noAddressRes, noCityRes] = globalResults
+    const [totalRes, withTrackingRes, noPhoneRes, noAddressRes, noCityRes, trackingNoRawStatusRes, trackingNoContactRes] = globalResults
 
     // ── Procesar breakdown por normalized_status ─────────────────────────────
     const byNormalizedStatus: Record<string, BreakdownEntry> = {}
@@ -224,11 +228,13 @@ export async function GET() {
     return NextResponse.json({
       generatedAt: new Date().toISOString(),
       totals: {
-        total_orders:    totalRes.count       ?? 0,
-        with_tracking:   withTrackingRes.count ?? 0,
-        without_phone:   noPhoneRes.count     ?? 0,
-        without_address: noAddressRes.count   ?? 0,
-        without_city:    noCityRes.count      ?? 0,
+        total_orders:                       totalRes.count                 ?? 0,
+        with_tracking:                      withTrackingRes.count          ?? 0,
+        without_phone:                      noPhoneRes.count               ?? 0,
+        without_address:                    noAddressRes.count             ?? 0,
+        without_city:                       noCityRes.count                ?? 0,
+        tracking_without_raw_status:        trackingNoRawStatusRes.count   ?? 0,
+        tracking_without_phone_and_address: trackingNoContactRes.count     ?? 0,
       },
       by_normalized_status:   byNormalizedStatus,
       by_source:               bySource,
@@ -245,8 +251,10 @@ export async function GET() {
         if_data_is_null: [
           '1. Órdenes shopify_webhook: el webhook llena estos campos desde shipping_address/billing_address/customer. Si Shopify no envía esos datos, quedan NULL.',
           '2. Órdenes csv_import: el import lee columnas del CSV. Si el CSV no tiene esas columnas, quedan NULL.',
-          '3. Fix disponible: POST /api/admin/backfill-imported-order-data (llena campos vacíos sin sobrescribir).',
-          '4. Fix en efi-import: modo "Actualizar datos faltantes" para subir CSV con datos de contacto.',
+          '3. Bug corregido (2026-05-18): columna raw_status del CSV viejo no se detectaba como estado (normalized_status quedaba in_transit por defecto). Fix: añadido "raw status" a ESTADO_KEYS.',
+          '4. Si tracking_without_raw_status > 0: indica órdenes importadas antes del fix — su normalized_status puede estar mal (forzado a in_transit). Usar backfill para corregir.',
+          '5. Fix disponible: POST /api/admin/backfill-imported-order-data (llena campos vacíos sin sobrescribir).',
+          '6. Fix en efi-import: modo "Actualizar datos faltantes" para subir CSV con datos de contacto.',
         ],
       },
     })
