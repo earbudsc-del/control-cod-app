@@ -557,6 +557,7 @@ export default function SdDeliveryPage() {
   const [currentPage, setCurrentPage]   = useState(1)
 
   const [actionMap, setActionMap]       = useState<Record<string, string>>({})
+  const [confirmedOrderCache, setConfirmedOrderCache] = useState<Map<string, Order>>(new Map())
   const [loadingRow, setLoadingRow]     = useState<Record<string, boolean>>({})
   const [noteModal, setNoteModal]       = useState<{ orderId: string; name: string } | null>(null)
   const [reModal, setReModal]           = useState<{ orderId: string; name: string } | null>(null)
@@ -579,6 +580,14 @@ export default function SdDeliveryPage() {
       setDeliveredDb(Array.isArray(deliveredRes) ? deliveredRes : [])
       setPerf(perfRes)
       setLastRefresh(new Date())
+      // Remove from cache any order that now appears in en_reparto (admin dispatched it)
+      const freshEnRepartoIds = new Set((enRepartoRes.data ?? []).map((o: Order) => o.id))
+      setConfirmedOrderCache(prev => {
+        if (prev.size === 0) return prev
+        const next = new Map(prev)
+        for (const id of freshEnRepartoIds) next.delete(id)
+        return next
+      })
     } catch (err) {
       console.error('[sd-delivery/fetchData]', err)
     } finally {
@@ -628,8 +637,18 @@ export default function SdDeliveryPage() {
     const nuevosPool: PooledOrder[] = sdNuevos
       .filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id))
       .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
-    return [...nuevosPool, ...confirmedPool]
-  }, [sdEnReparto, sdNuevos, actionMap, deliveredDbIds])
+    // Locally-confirmed orders that haven't been dispatched to en_reparto yet;
+    // these disappear from sdNuevos after next fetch but need to stay visible.
+    const enRepartoIds = new Set(sdEnReparto.map(o => o.id))
+    const nuevosIds    = new Set(sdNuevos.map(o => o.id))
+    const cachedPool: PooledOrder[] = Array.from(confirmedOrderCache.values())
+      .filter(o =>
+        !enRepartoIds.has(o.id) && !nuevosIds.has(o.id) &&
+        actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id),
+      )
+      .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
+    return [...nuevosPool, ...cachedPool, ...confirmedPool]
+  }, [sdEnReparto, sdNuevos, confirmedOrderCache, actionMap, deliveredDbIds])
 
   // ── Filtro de fecha ────────────────────────────────────────────────────────
 
@@ -675,6 +694,14 @@ export default function SdDeliveryPage() {
     [filteredPooled, actionMap],
   )
 
+  // Rutas: only confirmado_listo orders — no date filter so all pending routes are visible
+  const rutasList = useMemo(
+    () => allPooled.filter(({ order, pool }) =>
+      computeDisplayState(pool, actionMap[order.id], deliveredDbIds.has(order.id)) === 'confirmado_listo',
+    ),
+    [allPooled, actionMap, deliveredDbIds],
+  )
+
   // ── Entregados ─────────────────────────────────────────────────────────────
 
   const sessionDelivered = useMemo(() => {
@@ -707,16 +734,17 @@ export default function SdDeliveryPage() {
     en_ruta:      enRutaList.length,
     no_responden: noRespondenList.length,
     entregados:   entregadosFiltrados.length,
-    rutas:        allPooled.length,
-  }), [nuevosList, confirmadosList, enRutaList, noRespondenList, entregadosFiltrados, allPooled])
+    rutas:        rutasList.length,
+  }), [nuevosList, confirmadosList, enRutaList, noRespondenList, entregadosFiltrados, rutasList])
 
   const totalActive = allPooled.length
 
   // ── Agrupación por zona ────────────────────────────────────────────────────
+  // Only groups confirmado_listo orders — same source as Rutas tab
 
   const zoneGroups = useMemo(
-    () => groupOrdersByZone(allPooled.map(p => p.order)),
-    [allPooled],
+    () => groupOrdersByZone(rutasList.map(p => p.order)),
+    [rutasList],
   )
 
   // ── Ganancias estimadas hoy ────────────────────────────────────────────────
@@ -846,6 +874,10 @@ export default function SdDeliveryPage() {
         return
       }
       setActionMap(prev => ({ ...prev, [orderId]: 'client_confirmed' }))
+      // Cache the order so it stays visible in Confirmados/Listos even after the next fetch
+      // (the order leaves sdNuevos once confirmation_status changes, before admin dispatches it)
+      const orderToCache = sdNuevos.find(o => o.id === orderId)
+      if (orderToCache) setConfirmedOrderCache(prev => new Map(prev).set(orderId, orderToCache))
       showToast('✓ Cliente confirmado — el admin asignará a ruta', true)
       fetch('/api/sd-delivery/performance').then(r => r.json()).then(setPerf).catch(() => null)
     } catch {
@@ -870,6 +902,13 @@ export default function SdDeliveryPage() {
     }
   }
 
+  async function confirmZoneRoute(zoneId: string, orderIds: string[]) {
+    for (const id of orderIds) {
+      if (!loadingRow[id]) await confirmRoute(id)
+    }
+    showToast(`✓ Ruta ${zoneId} iniciada`, true)
+  }
+
   async function saveNote(orderId: string, note: string) {
     await postAction(orderId, 'note_added', 'note_added', undefined, note)
     showToast('Nota guardada', true)
@@ -883,9 +922,9 @@ export default function SdDeliveryPage() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const TAB_META: { tab: Tab; label: string }[] = [
-    { tab: 'rutas',        label: 'Rutas'                  },
     { tab: 'nuevos',       label: 'Nuevos / Por confirmar' },
     { tab: 'confirmados',  label: 'Confirmados / Listos'   },
+    { tab: 'rutas',        label: 'Rutas'                  },
     { tab: 'en_ruta',      label: 'En ruta'               },
     { tab: 'no_responden', label: 'No responden'           },
     { tab: 'entregados',   label: 'Entregados'             },
@@ -1170,18 +1209,40 @@ export default function SdDeliveryPage() {
           {/* ── Tab Rutas — agrupación por zona ── */}
           {!loading && activeTab === 'rutas' && (
             <div className="divide-y divide-indigo-50">
+
+              {/* Banner explicativo */}
+              <div className="px-4 py-3 bg-indigo-50/60 border-b border-indigo-100 flex items-start gap-2.5">
+                <Route className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs font-bold text-indigo-700">Pedidos agrupados listos para salir</p>
+                  <p className="text-[11px] text-indigo-500 mt-0.5">
+                    Generadas automáticamente desde <strong>Confirmados/Listos</strong>.
+                    Expande una zona y pulsa <strong>Iniciar ruta</strong> para confirmar la salida de todos sus pedidos.
+                  </p>
+                </div>
+              </div>
+
               {zoneGroups.length === 0 ? (
                 <div className="px-5 py-10 text-center">
                   <Route className="w-8 h-8 text-gray-200 mx-auto mb-3" />
-                  <p className="text-gray-500 font-medium text-sm">No hay pedidos activos por zona</p>
+                  <p className="text-gray-500 font-medium text-sm">No hay pedidos confirmados/listos por zona</p>
+                  <button
+                    onClick={() => setActiveTab('confirmados')}
+                    className="text-teal-600 text-sm mt-2 hover:underline"
+                  >
+                    Ver Confirmados/Listos →
+                  </button>
                 </div>
               ) : (
                 zoneGroups.map(group => {
-                  const zc        = ZONE_COLORS[group.zone.id as ZoneId] ?? ZONE_COLORS['otro']
+                  const zc         = ZONE_COLORS[group.zone.id as ZoneId] ?? ZONE_COLORS['otro']
                   const isExpanded = expandedZones.has(group.zone.id)
+                  const zoneOrderIds = group.orders.map(o => o.id)
+                  const anyBusy      = zoneOrderIds.some(id => !!loadingRow[id])
                   return (
                     <div key={group.zone.id}>
-                      {/* Cabecera de zona */}
+
+                      {/* Cabecera de zona — toggle */}
                       <button
                         onClick={() => setExpandedZones(prev => {
                           const next = new Set(prev)
@@ -1192,14 +1253,12 @@ export default function SdDeliveryPage() {
                         className={`w-full flex items-center justify-between px-4 py-3
                                     ${zc.bg} hover:brightness-95 transition-all`}
                       >
-                        <div className="flex items-center gap-3">
-                          <div className={`flex items-center gap-2 ${zc.text}`}>
-                            <Route className="w-4 h-4 shrink-0" />
-                            <span className="font-black text-sm">{group.zone.routeLabel}</span>
-                            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${zc.badge}`}>
-                              {group.zone.label}
-                            </span>
-                          </div>
+                        <div className="flex items-center gap-2.5">
+                          <Route className={`w-4 h-4 shrink-0 ${zc.text}`} />
+                          <span className={`font-black text-sm ${zc.text}`}>{group.zone.routeLabel}</span>
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${zc.badge}`}>
+                            {group.zone.label}
+                          </span>
                         </div>
                         <div className="flex items-center gap-3">
                           <div className="text-right">
@@ -1217,73 +1276,89 @@ export default function SdDeliveryPage() {
                         </div>
                       </button>
 
-                      {/* Lista de pedidos de la zona */}
+                      {/* Barra colapsada: COD + ganancia */}
+                      {!isExpanded && group.codTotal > 0 && (
+                        <div className="px-4 py-1.5 border-t border-gray-50 flex items-center gap-3 text-[11px] text-gray-400">
+                          <span>COD: <strong className="text-gray-600">RD${group.codTotal.toLocaleString('es-DO')}</strong></span>
+                          <span>·</span>
+                          <span>Ganancia: <strong className={zc.text}>RD${group.gananciaEstimada.toLocaleString('es-DO')}</strong></span>
+                        </div>
+                      )}
+
+                      {/* Vista expandida */}
                       {isExpanded && (
-                        <div className="border-t border-gray-100 divide-y divide-gray-50">
-                          {group.orders.map(order => {
-                            const pool = allPooled.find(p => p.order.id === order.id)?.pool ?? 'confirmado'
-                            const accion  = actionMap[order.id]
-                            const busy    = !!loadingRow[order.id]
-                            const isDel   = accion === 'delivered' || deliveredDbIds.has(order.id)
-                            const ds      = computeDisplayState(pool, accion, isDel)
-                            const ubicacion = order.city || order.province || order.customer_address?.slice(0, 24)
-                            return (
-                              <div key={order.id} className="px-4 py-3 flex items-center justify-between gap-2">
-                                <div className="min-w-0 flex-1">
-                                  <p className="font-mono text-xs font-bold text-gray-900 truncate">
-                                    {order.tracking_number ?? order.order_number ?? '—'}
-                                  </p>
-                                  <p className="text-sm font-medium text-gray-700 truncate">
-                                    {order.customer_name ?? '—'}
-                                  </p>
-                                  {ubicacion && (
-                                    <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
-                                      <MapPin className="w-3 h-3 shrink-0" />
-                                      <span className="truncate">{ubicacion}</span>
+                        <div className="border-t border-gray-100">
+
+                          {/* Acción de zona: totales + Iniciar ruta */}
+                          <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-100
+                                          flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-3 text-[11px] text-gray-500 flex-wrap">
+                              <span>
+                                COD total:{' '}
+                                <strong className="text-gray-700">
+                                  RD${group.codTotal.toLocaleString('es-DO')}
+                                </strong>
+                              </span>
+                              <span>·</span>
+                              <span>
+                                Ganancia est.:{' '}
+                                <strong className={zc.text}>
+                                  RD${group.gananciaEstimada.toLocaleString('es-DO')}
+                                </strong>
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => confirmZoneRoute(group.zone.routeLabel, zoneOrderIds)}
+                              disabled={anyBusy}
+                              className="flex items-center gap-1.5 px-3 py-2 rounded-lg
+                                         bg-teal-500 hover:bg-teal-600 active:bg-teal-700
+                                         text-white text-xs font-bold transition-colors
+                                         disabled:opacity-50 shrink-0"
+                            >
+                              {anyBusy
+                                ? <Spinner className="w-3.5 h-3.5 text-white" />
+                                : <Truck className="w-3.5 h-3.5" />
+                              }
+                              Iniciar ruta
+                            </button>
+                          </div>
+
+                          {/* Lista de pedidos */}
+                          <div className="divide-y divide-gray-50">
+                            {group.orders.map(order => {
+                              const ubicacion = order.city || order.province || order.customer_address?.slice(0, 24)
+                              return (
+                                <div key={order.id} className="px-4 py-3 flex items-center justify-between gap-2">
+                                  <div className="min-w-0 flex-1">
+                                    <p className="font-mono text-xs font-bold text-gray-900 truncate">
+                                      {order.tracking_number ?? order.order_number ?? '—'}
                                     </p>
-                                  )}
-                                </div>
-                                <div className="flex items-center gap-2 shrink-0">
-                                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
-                                    ${ds === 'entregado'        ? 'bg-green-100 text-green-700'
-                                    : ds === 'en_ruta'          ? 'bg-teal-100 text-teal-700'
-                                    : ds === 'no_responde'      ? 'bg-amber-100 text-amber-700'
-                                    : ds === 'nuevo'            ? 'bg-blue-100 text-blue-700'
-                                    : ds === 'espera_despacho'  ? 'bg-purple-100 text-purple-700'
-                                    : 'bg-gray-100 text-gray-500'}`}>
-                                    {ds === 'entregado'       ? 'Entregado'
-                                    : ds === 'en_ruta'        ? 'En ruta'
-                                    : ds === 'no_responde'    ? 'No resp.'
-                                    : ds === 'nuevo'          ? 'Por conf.'
-                                    : ds === 'espera_despacho'? 'Esperando'
-                                    : 'Listo'}
-                                  </span>
-                                  {!isDel && !busy && (
+                                    <p className="text-sm font-medium text-gray-700 truncate">
+                                      {order.customer_name ?? '—'}
+                                    </p>
+                                    {ubicacion && (
+                                      <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
+                                        <MapPin className="w-3 h-3 shrink-0" />
+                                        <span className="truncate">{ubicacion}</span>
+                                      </p>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full
+                                                     bg-gray-100 text-gray-500">
+                                      Listo
+                                    </span>
                                     <button
-                                      onClick={() => setActiveTab(
-                                        ds === 'nuevo' ? 'nuevos'
-                                        : ds === 'en_ruta' ? 'en_ruta'
-                                        : ds === 'no_responde' ? 'no_responden'
-                                        : 'confirmados'
-                                      )}
+                                      onClick={() => setActiveTab('confirmados')}
                                       className="text-[10px] text-teal-600 hover:text-teal-800 font-medium whitespace-nowrap"
                                     >
                                       Ver →
                                     </button>
-                                  )}
+                                  </div>
                                 </div>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
-
-                      {/* Summary row cuando está colapsado */}
-                      {!isExpanded && group.codTotal > 0 && (
-                        <div className="px-4 py-1.5 border-t border-gray-50 flex items-center gap-3 text-[11px] text-gray-400">
-                          <span>COD total: <strong className="text-gray-600">RD${group.codTotal.toLocaleString('es-DO')}</strong></span>
-                          <span>·</span>
-                          <span>Ganancia est.: <strong className={zc.text}>RD${group.gananciaEstimada.toLocaleString('es-DO')}</strong></span>
+                              )
+                            })}
+                          </div>
                         </div>
                       )}
                     </div>

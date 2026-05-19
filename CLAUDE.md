@@ -4,6 +4,48 @@
 
 ---
 
+## FIX: UX/lógica del tab Rutas en /sd-delivery (2026-05-19)
+
+### Problema corregido
+
+El tab `Rutas` mostraba TODOS los pedidos activos (`allPooled`) incluyendo nuevos, no-responde, etc., lo que causaba confusión: el mensajero veía decenas de rutas pero pocos pedidos en `Confirmados/Listos`.
+
+Además, los pedidos confirmados con "Cliente confirma" desaparecían de `Confirmados/Listos` tras el siguiente fetch (la orden salía de `confirmationStatus=pending` pero aún no estaba en `en_reparto`).
+
+### Cambios en `src/app/(app)/sd-delivery/page.tsx`
+
+| Cambio | Descripción |
+|---|---|
+| `rutasList` memo | Filtra `allPooled` a solo `displayState === 'confirmado_listo'` (SD, en_reparto, sin route_confirmed, sin no_answer/rescheduled, sin delivered). Único origen de `zoneGroups`. |
+| `tabCounts.rutas` | Ahora usa `rutasList.length` (antes: `allPooled.length`). |
+| `zoneGroups` | Ahora usa `rutasList` en lugar de `allPooled`. |
+| Tab order | `Nuevos → Confirmados/Listos → Rutas → En ruta → No responden → Entregados`. |
+| `confirmedOrderCache` | Estado `Map<string, Order>` que persiste localmente los pedidos recién confirmados (post-`confirmClient()`). Evita que desaparezcan de `Confirmados/Listos` entre la API call y el siguiente fetch. Se limpia cuando el pedido aparece en `allEnReparto`. |
+| `confirmZoneRoute(zoneId, orderIds)` | Confirma ruta para todos los pedidos de una zona secuencialmente. |
+| Render Rutas | Banner explicativo ("Generadas desde Confirmados/Listos"). Zona colapsable con botón **Iniciar ruta** en la barra expandida (muestra COD total + ganancia estimada). |
+
+### Flujo correcto (documentado)
+
+```
+Nuevos / Por confirmar
+  → Cliente confirma → Confirmados / Listos (espera_despacho)
+                     → Admin despacha → en_reparto → confirmado_listo
+Confirmados / Listos (confirmado_listo)
+  → aparece en Rutas (agrupado por zona)
+  → Iniciar ruta (confirmZoneRoute) → route_confirmed → En ruta
+En ruta
+  → Marcar entregado → Entregados
+```
+
+### Invariantes del tab Rutas
+
+- Solo pedidos con `displayState === 'confirmado_listo'`
+- `confirmado_listo` = `pool='confirmado'` (en_reparto) + sin `route_confirmed` + sin `no_answer/rescheduled` + sin `delivered`
+- Sin filtro de fecha (muestra todos los pendientes de salir, independiente del día)
+- `tabCounts.rutas` coincide exactamente con los pedidos visibles
+
+---
+
 ## FEATURE: Sistema inteligente para mensajero SD — Rutas, ganancias y gamificación (2026-05-19)
 
 ### Objetivo
