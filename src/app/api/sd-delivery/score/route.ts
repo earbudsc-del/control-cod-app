@@ -1,6 +1,12 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
-import { SD_META_DIARIA, SD_META_SEMANAL, SD_ZONES, detectSdZone } from '@/lib/sd-zones'
+import {
+  SD_META_DIARIA, SD_META_SEMANAL, SD_TARIFA_PROMEDIO,
+  SD_ZONES, detectSdZone, calcBonuses,
+} from '@/lib/sd-zones'
+import type { SdBonus } from '@/lib/sd-zones'
+
+export type { SdBonus }
 
 type Level = 'Excelente' | 'Bueno' | 'Riesgo' | 'Deficiente'
 
@@ -47,6 +53,10 @@ export interface SdScoreData {
   coaching: string[]
   // Badges
   badges: SdBadge[]
+  // Bonificaciones
+  bonusHoy:    number          // RD$ bonos ganados hoy
+  bonusSemana: number          // RD$ bonos ganados esta semana
+  bonuses:     SdBonus[]       // detalle de cada bono con earned
 }
 
 // ── Helpers de fecha RD (UTC-4, sin DST) ───────────────────────────────────────
@@ -195,12 +205,11 @@ export async function GET() {
     }
 
     // ── Ganancias estimadas ──────────────────────────────────────────────────
-    // Usamos tarifa promedio de SD (RD$270) como fallback sin datos de zona
-    const TARIFA_PROMEDIO = 270
-    const gananciasHoy    = eHoy    * TARIFA_PROMEDIO
-    const gananciasAyer   = eAyer   * TARIFA_PROMEDIO
-    const gananciasSemana = eSemana * TARIFA_PROMEDIO
-    const promedioEntrega = TARIFA_PROMEDIO
+    // Tarifa promedio ponderada (mayoría en zonas RD$300, DN Centro RD$250)
+    const gananciasHoy    = eHoy    * SD_TARIFA_PROMEDIO
+    const gananciasAyer   = eAyer   * SD_TARIFA_PROMEDIO
+    const gananciasSemana = eSemana * SD_TARIFA_PROMEDIO
+    const promedioEntrega = SD_TARIFA_PROMEDIO
 
     // ── Progreso de metas ────────────────────────────────────────────────────
     const progresoMetaDiaria  = Math.min(Math.round((eHoy    / SD_META_DIARIA)  * 100), 100)
@@ -252,21 +261,31 @@ export async function GET() {
         }))
     }
 
+    // ── Bonificaciones ───────────────────────────────────────────────────────
+    const { bonusHoy, bonusSemana, bonuses } = calcBonuses({
+      entregadosHoy:      eHoy,
+      entregadosSemana:   eSemana,
+      eficiencia,
+      reprogramadosSemana: rSemana,
+      streak,
+    })
+
     // ── Coaching ─────────────────────────────────────────────────────────────
     const coaching: string[] = []
     const faltanMeta = Math.max(0, SD_META_DIARIA - eHoy)
     if (faltanMeta === 0) {
-      coaching.push(`¡Meta diaria cumplida! Llevas ${eHoy} entregas hoy. ¡Excelente día!`)
+      coaching.push(`¡Meta diaria cumplida! Llevas ${eHoy} entregas hoy.${bonusHoy > 0 ? ` +RD$${bonusHoy} bono.` : ''} ¡Excelente!`)
     } else if (faltanMeta <= 2) {
-      coaching.push(`¡Casi llegas! Te faltan solo ${faltanMeta} entrega${faltanMeta > 1 ? 's' : ''} para tu meta del día.`)
+      coaching.push(`¡Casi! Te faltan ${faltanMeta} entrega${faltanMeta > 1 ? 's' : ''} para tu meta del día${bonusHoy === 0 ? ` y el bono de RD$100` : ''}.`)
     } else {
-      coaching.push(`Hoy llevas ${eHoy} entregas. Meta: ${SD_META_DIARIA}. ¡Sigue adelante!`)
+      coaching.push(`Hoy llevas ${eHoy} entregas. Llega a ${SD_META_DIARIA} para tu meta y bono diario.`)
     }
-    if (streak >= 3)          coaching.push(`🔥 Llevas ${streak} días consecutivos cumpliendo tu meta. ¡Racha imparable!`)
-    if (eficiencia >= 90)     coaching.push(`⚡ Tu eficiencia es ${eficiencia}%. Eres de los mejores.`)
-    if (eficiencia >= 70 && eficiencia < 90) coaching.push(`Tu eficiencia es ${eficiencia}%. Reducir reprogramaciones la subirá más.`)
-    if (rSemana >= 3)         coaching.push(`Tienes ${rSemana} reprogramaciones esta semana. Intenta confirmar con el cliente antes de salir a ruta.`)
-    if (eSemana >= 20)        coaching.push(`¡${eSemana} entregas esta semana! Vas camino a tu meta semanal.`)
+    if (streak >= 3)          coaching.push(`🔥 Llevas ${streak} días seguidos cumpliendo tu meta. ¡Racha imparable!`)
+    if (eficiencia >= 90)     coaching.push(`⚡ Eficiencia ${eficiencia}%. ¡Bono de eficiencia desbloqueado!`)
+    if (eficiencia >= 70 && eficiencia < 90) coaching.push(`Eficiencia ${eficiencia}%. Sin reprogramaciones esta semana ganas +RD$300 de bono.`)
+    if (rSemana >= 3)         coaching.push(`${rSemana} reprogramaciones esta semana. Confirma con el cliente antes de salir para mantener tu bono.`)
+    if (eSemana >= 20)        coaching.push(`¡${eSemana} entregas esta semana! Vas por la meta semanal (+RD$500 de bono).`)
+    if (bonusSemana > 0)      coaching.push(`🎉 Llevas RD$${bonusSemana.toLocaleString()} en bonos esta semana. ¡Sigue así!`)
     if (coaching.length > 4)  coaching.splice(4)
 
     // ── Badges ───────────────────────────────────────────────────────────────
@@ -306,6 +325,9 @@ export async function GET() {
       eficiencia,
       coaching,
       badges,
+      bonusHoy,
+      bonusSemana,
+      bonuses,
     }
 
     return NextResponse.json(result)

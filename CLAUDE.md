@@ -4,6 +4,46 @@
 
 ---
 
+## FIX: Tarifas SD + bonificaciones + zona especial (2026-05-19)
+
+### Cambios
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/sd-zones.ts` | **Elimina** zona `san_cristobal`. **Agrega** zona `especial` (RD$350: Boca Chica, Caleta, San Isidro, periféricas). Tarifas corregidas: centro=250, norte/este/oeste=300, especial=350. `ZONA_OTRO` pasa a RD$300. `ZoneId` actualizado. Exporta `SD_TARIFA_PROMEDIO=290`, `SdBonus`, `SdBonusConfig`, `SD_BONUS_CONFIG`, `calcBonuses()`. |
+| `src/app/api/sd-delivery/score/route.ts` | `TARIFA_PROMEDIO` eliminada, usa `SD_TARIFA_PROMEDIO` de sd-zones. `SdScoreData` extiende con `bonusHoy`, `bonusSemana`, `bonuses: SdBonus[]`. Computa bonos via `calcBonuses()`. Coaching referencia bonos en mensajes. |
+| `src/app/(app)/sd-delivery/page.tsx` | `gananciasHoyEst` usa `SD_TARIFA_PROMEDIO` en lugar de `270` hardcoded. |
+| `src/components/rendimiento/RendimientoSD.tsx` | Nueva sección **Bonificaciones** con `BonusChip` (earned/locked). Guía de tarifas actualizada (sin San Cristóbal, con Zona Especial). |
+
+### Tarifas oficiales
+
+| Zona | Tarifa | Cobertura |
+|---|---|---|
+| DN Centro | RD$250 | Distrito Nacional (Naco, Piantini, Gazcue, etc.) |
+| SD Norte | RD$300 | Villa Mella, SDN, Los Guaricanos |
+| SD Oeste | RD$300 | SDO, Herrera, Los Alcarrizos, Km 12 |
+| SD Este | RD$300 | SDE, Los Mina, San Luis, Alma Rosa |
+| Zona Especial | RD$350 | Boca Chica, Caleta, San Isidro, periféricas |
+| Otra SD (fallback) | RD$300 | Sin match |
+| ~~San Cristóbal~~ | ~~eliminada~~ | No cubierta por mensajero local |
+
+`SD_TARIFA_PROMEDIO = 290` (promedio ponderado)
+
+### Sistema de bonificaciones (infraestructura lista, montos ajustables)
+
+| Bono | Monto default | Condición |
+|---|---|---|
+| Bono meta diaria | RD$100 | ≥8 entregas en el día |
+| Bono meta semanal | RD$500 | ≥40 entregas en la semana |
+| Bono eficiencia | RD$200 | Eficiencia ≥90% semanal |
+| Bono cero devoluciones | RD$300 | Semana sin reprogramaciones (y ≥5 entregas) |
+| Bono racha 3 días | RD$150 | 3 días consecutivos con meta cumplida |
+| Bono racha 5 días | RD$300 | 5 días consecutivos con meta cumplida |
+
+Ajustar montos en `SD_BONUS_CONFIG` en `src/lib/sd-zones.ts`.
+
+---
+
 ## FIX: UX/lógica del tab Rutas en /sd-delivery (2026-05-19)
 
 ### Problema corregido

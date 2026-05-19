@@ -9,8 +9,8 @@ import {
   Navigation, Package, PhoneMissed, RotateCcw,
 } from 'lucide-react'
 import type { SdScoreData, SdBadge } from '@/app/api/sd-delivery/score/route'
-import { ZONE_COLORS } from '@/lib/sd-zones'
-import type { ZoneId } from '@/lib/sd-zones'
+import { ZONE_COLORS, SD_TARIFA_PROMEDIO } from '@/lib/sd-zones'
+import type { ZoneId, SdBonus } from '@/lib/sd-zones'
 
 // ── Level config ───────────────────────────────────────────────────────────────
 
@@ -124,6 +124,38 @@ function BadgeChip({ badge }: { badge: SdBadge }) {
                     shadow-sm">
       <span>{badge.emoji}</span>
       {badge.label}
+    </div>
+  )
+}
+
+// ── Bonus chip ─────────────────────────────────────────────────────────────────
+
+function BonusChip({ bonus }: { bonus: SdBonus }) {
+  if (!bonus.earned) {
+    return (
+      <div className="flex items-start gap-2 px-3 py-2 rounded-xl
+                      bg-gray-50 border border-dashed border-gray-200 opacity-60">
+        <span className="text-base grayscale">{bonus.emoji}</span>
+        <div>
+          <p className="text-xs font-semibold text-gray-400">{bonus.label}</p>
+          <p className="text-[11px] text-gray-400 mt-0.5">{bonus.condition}</p>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-start gap-2 px-3 py-2 rounded-xl
+                    bg-amber-50 border border-amber-200 shadow-sm">
+      <span className="text-base">{bonus.emoji}</span>
+      <div>
+        <div className="flex items-center gap-2">
+          <p className="text-xs font-black text-amber-800">{bonus.label}</p>
+          <span className="text-xs font-black text-amber-700 tabular-nums">
+            +RD${bonus.amount.toLocaleString('es-DO')}
+          </span>
+        </div>
+        <p className="text-[11px] text-amber-600 mt-0.5">{bonus.condition}</p>
+      </div>
     </div>
   )
 }
@@ -475,6 +507,35 @@ export function RendimientoSD() {
         </div>
       </div>
 
+      {/* ── Bonificaciones ── */}
+      {data.bonuses && data.bonuses.length > 0 && (
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 md:p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-black text-gray-500 uppercase tracking-wider flex items-center gap-2">
+              <DollarSign className="w-4 h-4 text-amber-500" />
+              Bonificaciones
+            </h2>
+            {(data.bonusHoy > 0 || data.bonusSemana > 0) && (
+              <div className="flex items-center gap-2 text-xs">
+                {data.bonusHoy > 0 && (
+                  <span className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 font-bold">
+                    +RD${data.bonusHoy.toLocaleString('es-DO')} hoy
+                  </span>
+                )}
+                {data.bonusSemana > 0 && (
+                  <span className="px-2 py-1 rounded-full bg-amber-100 text-amber-700 font-bold">
+                    +RD${data.bonusSemana.toLocaleString('es-DO')} semana
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="space-y-2">
+            {data.bonuses.map(b => <BonusChip key={b.id} bonus={b} />)}
+          </div>
+        </div>
+      )}
+
       {/* ── Coaching / motivación ── */}
       {data.coaching.length > 0 && (
         <div className="space-y-2">
@@ -517,22 +578,24 @@ export function RendimientoSD() {
           <Clock className="w-3.5 h-3.5" />¿Cómo se calcula mi ganancia?
         </summary>
         <div className="px-4 pb-4 pt-1 space-y-1.5">
+          <p className="text-[11px] font-bold text-gray-600 mb-2">Tarifas por zona</p>
           {[
-            ['SD Norte (Villa Mella)',   'RD$300/entrega'],
-            ['SD Este (SDE)',            'RD$275/entrega'],
-            ['SD Oeste (Herrera, Km 12)','RD$280/entrega'],
-            ['DN Centro',               'RD$250/entrega'],
-            ['San Cristóbal',           'RD$350/entrega'],
-            ['Otras zonas',             'RD$260/entrega'],
+            ['DN Centro (Naco, Piantini, Gazcue…)',    'RD$250/entrega'],
+            ['SD Norte (Villa Mella, SDN)',             'RD$300/entrega'],
+            ['SD Oeste (Herrera, Km 12, SDO)',          'RD$300/entrega'],
+            ['SD Este (Los Mina, San Luis, SDE)',       'RD$300/entrega'],
+            ['Zona Especial (Boca Chica, Caleta…)',     'RD$350/entrega'],
+            [`Promedio estimado`,                       `RD$${SD_TARIFA_PROMEDIO}/entrega`],
           ].map(([zona, tarifa]) => (
-            <div key={zona} className="flex justify-between text-xs">
+            <div key={zona} className={`flex justify-between text-xs ${zona.startsWith('Promedio') ? 'border-t border-gray-200 pt-1.5 mt-1' : ''}`}>
               <span className="text-gray-600">{zona}</span>
-              <span className="font-bold text-teal-700">{tarifa}</span>
+              <span className={`font-bold ${zona.startsWith('Promedio') ? 'text-gray-700' : 'text-teal-700'}`}>{tarifa}</span>
             </div>
           ))}
           <p className="text-[10px] text-gray-400 mt-2">
-            Las ganancias son estimadas. El monto final puede variar según zonas específicas.
+            Las ganancias son estimadas con tarifa promedio. Las zonas especiales y periféricas pueden variar.
           </p>
+          <p className="text-[11px] font-bold text-amber-700 mt-2">+ Bonificaciones adicionales disponibles</p>
         </div>
       </details>
 

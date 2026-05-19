@@ -1,51 +1,24 @@
 // Zonas de entrega para santo_domingo_delivery_agent
 // Cada zona tiene una tarifa base, términos de detección y colores UI.
+//
+// Política de cobertura:
+//   DN Centro      → RD$250  (Distrito Nacional)
+//   Norte/Este/Oeste → RD$300  (Gran Santo Domingo estándar)
+//   Especial       → RD$350  (periféricas/alejadas: Boca Chica, Caleta, San Isidro…)
+//   NO se entrega a San Cristóbal ni provincias externas.
 
-export type ZoneId = 'norte' | 'este' | 'oeste' | 'centro' | 'san_cristobal' | 'otro'
+export type ZoneId = 'norte' | 'este' | 'oeste' | 'centro' | 'especial' | 'otro'
 
 export interface SdZone {
   id:         ZoneId
-  label:      string   // "SD Norte"
-  routeLabel: string   // "Ruta Norte"
-  color:      string   // tailwind color prefix (sin bg-/text-)
-  tarifa:     number   // RD$ por entrega
-  terms:      string[] // términos normalizados para detección
+  label:      string    // "SD Norte"
+  routeLabel: string    // "Ruta Norte"
+  color:      string    // tailwind color prefix
+  tarifa:     number    // RD$ por entrega
+  terms:      string[]  // términos normalizados para detección
 }
 
 export const SD_ZONES: SdZone[] = [
-  {
-    id:         'norte',
-    label:      'SD Norte',
-    routeLabel: 'Ruta Norte',
-    color:      'blue',
-    tarifa:     300,
-    terms: [
-      'villa mella', 'santo domingo norte', 'sdn', 'los guaricanos',
-      'villas agricolas', 'sabana perdida', 'boca de soco', 'guerra',
-    ],
-  },
-  {
-    id:         'este',
-    label:      'SD Este',
-    routeLabel: 'Ruta Este',
-    color:      'teal',
-    tarifa:     275,
-    terms: [
-      'santo domingo este', 'sde', 'los mina', 'san luis', 'alma rosa',
-      'ensanche isabelita', 'sabana larga sde', 'jardines del este',
-    ],
-  },
-  {
-    id:         'oeste',
-    label:      'SD Oeste',
-    routeLabel: 'Ruta Oeste',
-    color:      'violet',
-    tarifa:     280,
-    terms: [
-      'santo domingo oeste', 'sdo', 'herrera', 'los alcarrizos', 'km 12',
-      'manoguayabo', 'pantoja', 'mendoza sdo', 'hato nuevo',
-    ],
-  },
   {
     id:         'centro',
     label:      'DN Centro',
@@ -57,24 +30,67 @@ export const SD_ZONES: SdZone[] = [
       'zona colonial', 'bella vista', 'mirador norte', 'mirador sur',
       'paraiso', 'paraíso', 'miramar', 'evaristo morales', 'quisqueya',
       'ciudad universitaria', 'la feria', 'los prados', 'arroyo hondo',
+      'cacicazgos', 'los cacicazgos', 'ensanche ozama',
     ],
   },
   {
-    id:         'san_cristobal',
-    label:      'San Cristóbal',
-    routeLabel: 'Ruta Sur',
+    id:         'norte',
+    label:      'SD Norte',
+    routeLabel: 'Ruta Norte',
+    color:      'blue',
+    tarifa:     300,
+    terms: [
+      'villa mella', 'santo domingo norte', 'sdn', 'los guaricanos',
+      'villas agricolas', 'sabana perdida', 'boca de soco', 'guerra',
+      'sabana iglesia', 'el pedregal', 'palmarejo',
+    ],
+  },
+  {
+    id:         'oeste',
+    label:      'SD Oeste',
+    routeLabel: 'Ruta Oeste',
+    color:      'violet',
+    tarifa:     300,
+    terms: [
+      'santo domingo oeste', 'sdo', 'herrera', 'los alcarrizos', 'km 12',
+      'manoguayabo', 'pantoja', 'mendoza sdo', 'hato nuevo',
+      'monte san juan',
+    ],
+  },
+  {
+    // Zonas estándar del Este — SIN las áreas periféricas alejadas
+    id:         'este',
+    label:      'SD Este',
+    routeLabel: 'Ruta Este',
+    color:      'teal',
+    tarifa:     300,
+    terms: [
+      'santo domingo este', 'sde', 'los mina', 'san luis', 'alma rosa',
+      'ensanche isabelita', 'sabana larga', 'jardines del este',
+      'ozama', 'villa hermosa', 'las americas',
+    ],
+  },
+  {
+    // Zonas especiales: periféricas o de acceso más complejo → tarifa mayor
+    id:         'especial',
+    label:      'Zona Especial',
+    routeLabel: 'Ruta Especial',
     color:      'orange',
     tarifa:     350,
-    terms: ['san cristobal', 'san cristóbal', 'haina', 'nigua', 'villa altagracia'],
+    terms: [
+      'boca chica', 'caleta', 'san isidro', 'los tres brazos',
+      'sabana abajo', 'villa faro', 'manoguayabo km 18',
+      'hato viejo', 'palmar de ocoa', 'mata los indios',
+    ],
   },
 ]
 
 const ZONA_OTRO: SdZone = {
   id:         'otro',
-  label:      'Otra zona',
+  label:      'Otra SD',
   routeLabel: 'Ruta General',
   color:      'gray',
-  tarifa:     260,
+  tarifa:     300,
   terms:      [],
 }
 
@@ -83,9 +99,9 @@ function norm(s: string): string {
 }
 
 export function detectSdZone(
-  city?:    string | null,
+  city?:     string | null,
   province?: string | null,
-  address?: string | null,
+  address?:  string | null,
 ): SdZone {
   const hay = norm(`${city ?? ''} ${province ?? ''} ${address ?? ''}`)
   for (const zone of SD_ZONES) {
@@ -121,7 +137,6 @@ export function groupOrdersByZone<T extends {
   }
 
   const groups: ZoneGroup<T>[] = []
-  // Preserve zone order defined above (+ 'otro' at end)
   const orderedIds: ZoneId[] = [...SD_ZONES.map(z => z.id), 'otro']
   for (const id of orderedIds) {
     const list = map.get(id)
@@ -137,18 +152,127 @@ export function groupOrdersByZone<T extends {
   return groups
 }
 
-// Constantes de metas para el mensajero SD
+// ── Metas ──────────────────────────────────────────────────────────────────────
 export const SD_META_DIARIA  = 8
 export const SD_META_SEMANAL = 40
 
-// Colores Tailwind por zona (para uso en UI)
+// Promedio ponderado (mayoría de entregas en zonas RD$300)
+export const SD_TARIFA_PROMEDIO = 290
+
+// ── Bonificaciones e incentivos ────────────────────────────────────────────────
+// Infraestructura para motivar al mensajero. Los montos son ajustables.
+
+export interface SdBonus {
+  id:        string
+  label:     string
+  emoji:     string
+  amount:    number   // RD$ del bono
+  condition: string   // texto visible para el mensajero
+  earned:    boolean
+}
+
+export interface SdBonusConfig {
+  metaDiaria:       number   // RD$ por cumplir meta del día (≥8 entregas)
+  metaSemanal:      number   // RD$ por cumplir meta semanal (≥40 entregas)
+  eficiencia90:     number   // RD$ por eficiencia ≥90% semanal
+  sinReprogramacion:number   // RD$ por semana sin reprogramaciones
+  streak3:          number   // RD$ por 3 días consecutivos
+  streak5:          number   // RD$ por 5 días consecutivos
+}
+
+export const SD_BONUS_CONFIG: SdBonusConfig = {
+  metaDiaria:        100,   // RD$100 al cumplir 8 entregas en el día
+  metaSemanal:       500,   // RD$500 al cumplir 40 entregas en la semana
+  eficiencia90:      200,   // RD$200 si eficiencia ≥90% semanal
+  sinReprogramacion: 300,   // RD$300 si semana sin reprogramaciones
+  streak3:           150,   // RD$150 por 3 días consecutivos
+  streak5:           300,   // RD$300 por 5 días consecutivos
+}
+
+export function calcBonuses(params: {
+  entregadosHoy:      number
+  entregadosSemana:   number
+  eficiencia:         number
+  reprogramadosSemana:number
+  streak:             number
+}): { bonusHoy: number; bonusSemana: number; bonuses: SdBonus[] } {
+  const cfg = SD_BONUS_CONFIG
+  const { entregadosHoy, entregadosSemana, eficiencia, reprogramadosSemana, streak } = params
+
+  const earnMetaDiaria       = entregadosHoy    >= SD_META_DIARIA
+  const earnMetaSemanal      = entregadosSemana >= SD_META_SEMANAL
+  const earnEficiencia       = eficiencia       >= 90
+  const earnSinReprogramacion = reprogramadosSemana === 0 && entregadosSemana >= 5
+  const earnStreak3          = streak >= 3
+  const earnStreak5          = streak >= 5
+
+  const bonuses: SdBonus[] = [
+    {
+      id:        'meta_diaria_bonus',
+      label:     `Bono meta diaria`,
+      emoji:     '🎯',
+      amount:    cfg.metaDiaria,
+      condition: `RD$${cfg.metaDiaria} al completar ${SD_META_DIARIA} entregas hoy`,
+      earned:    earnMetaDiaria,
+    },
+    {
+      id:        'meta_semanal_bonus',
+      label:     'Bono meta semanal',
+      emoji:     '🏆',
+      amount:    cfg.metaSemanal,
+      condition: `RD$${cfg.metaSemanal} al completar ${SD_META_SEMANAL} entregas esta semana`,
+      earned:    earnMetaSemanal,
+    },
+    {
+      id:        'eficiencia_bonus',
+      label:     'Bono eficiencia',
+      emoji:     '⚡',
+      amount:    cfg.eficiencia90,
+      condition: `RD$${cfg.eficiencia90} por eficiencia ≥90% en la semana`,
+      earned:    earnEficiencia,
+    },
+    {
+      id:        'sin_reprogramacion_bonus',
+      label:     'Bono cero devoluciones',
+      emoji:     '✅',
+      amount:    cfg.sinReprogramacion,
+      condition: `RD$${cfg.sinReprogramacion} si no reprogramas ninguna entrega esta semana`,
+      earned:    earnSinReprogramacion,
+    },
+    {
+      id:        'streak3_bonus',
+      label:     'Bono racha 3 días',
+      emoji:     '🔥',
+      amount:    cfg.streak3,
+      condition: `RD$${cfg.streak3} por 3 días seguidos cumpliendo tu meta`,
+      earned:    earnStreak3 && !earnStreak5,
+    },
+    {
+      id:        'streak5_bonus',
+      label:     'Bono racha 5 días',
+      emoji:     '💪',
+      amount:    cfg.streak5,
+      condition: `RD$${cfg.streak5} por 5 días seguidos cumpliendo tu meta`,
+      earned:    earnStreak5,
+    },
+  ]
+
+  const bonusHoy    = earnMetaDiaria ? cfg.metaDiaria : 0
+  const bonusSemana = bonuses
+    .filter(b => b.earned && b.id !== 'meta_diaria_bonus')
+    .reduce((s, b) => s + b.amount, 0)
+
+  return { bonusHoy, bonusSemana, bonuses }
+}
+
+// ── Colores Tailwind por zona ───────────────────────────────────────────────────
 export const ZONE_COLORS: Record<ZoneId | 'otro', {
   bg: string; text: string; border: string; badge: string; bar: string
 }> = {
-  norte:        { bg: 'bg-blue-50',    text: 'text-blue-700',    border: 'border-blue-200',    badge: 'bg-blue-100 text-blue-700',    bar: 'bg-blue-500'    },
-  este:         { bg: 'bg-teal-50',    text: 'text-teal-700',    border: 'border-teal-200',    badge: 'bg-teal-100 text-teal-700',    bar: 'bg-teal-500'    },
-  oeste:        { bg: 'bg-violet-50',  text: 'text-violet-700',  border: 'border-violet-200',  badge: 'bg-violet-100 text-violet-700',  bar: 'bg-violet-500'  },
-  centro:       { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', badge: 'bg-emerald-100 text-emerald-700', bar: 'bg-emerald-500' },
-  san_cristobal:{ bg: 'bg-orange-50',  text: 'text-orange-700',  border: 'border-orange-200',  badge: 'bg-orange-100 text-orange-700',  bar: 'bg-orange-500'  },
-  otro:         { bg: 'bg-gray-50',    text: 'text-gray-600',    border: 'border-gray-200',    badge: 'bg-gray-100 text-gray-600',    bar: 'bg-gray-400'    },
+  centro:   { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', badge: 'bg-emerald-100 text-emerald-700', bar: 'bg-emerald-500' },
+  norte:    { bg: 'bg-blue-50',    text: 'text-blue-700',    border: 'border-blue-200',    badge: 'bg-blue-100 text-blue-700',    bar: 'bg-blue-500'    },
+  oeste:    { bg: 'bg-violet-50',  text: 'text-violet-700',  border: 'border-violet-200',  badge: 'bg-violet-100 text-violet-700',  bar: 'bg-violet-500'  },
+  este:     { bg: 'bg-teal-50',    text: 'text-teal-700',    border: 'border-teal-200',    badge: 'bg-teal-100 text-teal-700',    bar: 'bg-teal-500'    },
+  especial: { bg: 'bg-orange-50',  text: 'text-orange-700',  border: 'border-orange-200',  badge: 'bg-orange-100 text-orange-700',  bar: 'bg-orange-500'  },
+  otro:     { bg: 'bg-gray-50',    text: 'text-gray-600',    border: 'border-gray-200',    badge: 'bg-gray-100 text-gray-600',    bar: 'bg-gray-400'    },
 }

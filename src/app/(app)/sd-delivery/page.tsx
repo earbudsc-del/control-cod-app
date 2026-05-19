@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { Spinner } from '@/components/ui/spinner'
 import { whatsAppUrl, callUrl } from '@/lib/utils'
 import { isSantoDomingoOrder } from '@/lib/alert-helpers'
-import { groupOrdersByZone, SD_META_DIARIA, ZONE_COLORS } from '@/lib/sd-zones'
+import { groupOrdersByZone, SD_META_DIARIA, SD_TARIFA_PROMEDIO, ZONE_COLORS } from '@/lib/sd-zones'
 import type { ZoneId } from '@/lib/sd-zones'
 import type { Order } from '@/types'
 import {
@@ -751,7 +751,7 @@ export default function SdDeliveryPage() {
   // Promedio RD$270 × entregas del día (sdDeliveredDb + sessionDelivered)
 
   const gananciasHoyEst = useMemo(
-    () => allDelivered.filter(e => isToday(e.reported_at)).length * 270,
+    () => allDelivered.filter(e => isToday(e.reported_at)).length * SD_TARIFA_PROMEDIO,
     [allDelivered],
   )
 
