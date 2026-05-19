@@ -4,6 +4,104 @@
 
 ---
 
+## DIAGNÓSTICO GLOBAL: contact-fields-health (2026-05-18)
+
+### Problema diagnosticado
+
+Muchas órdenes en todos los módulos (Generadas, Tránsito, Reparto, Novedad, Indemnización, Entregadas) muestran "Sin teléfono" y ciudad/dirección vacíos en la UI.
+
+### Hallazgo de raíz
+
+**No hay mismatch de nombres de campo.** La UI lee los campos correctos:
+- `order.customer_phone` → teléfono
+- `order.customer_address` → dirección
+- `order.city` → ciudad (DB: `city`, no `customer_city`)
+- `order.province` → provincia (DB: `province`, no `customer_province`)
+
+El problema es que esos campos están **genuinamente NULL en DB** para muchas órdenes. Causas:
+1. Shopify webhook: órdenes creadas sin `shipping_address` completa (cliente no la llenó, o B2B/COD sin datos)
+2. CSV import: columnas de contacto no detectadas o no incluidas en el CSV subido
+3. Órdenes previas al feature de detección de columnas de contacto
+
+### Endpoint nuevo
+
+| Archivo | Endpoint |
+|---|---|
+| `src/app/api/debug/contact-fields-health/route.ts` | **NUEVO.** `GET /api/debug/contact-fields-health`. Solo admin. Solo lectura. |
+
+#### `GET /api/debug/contact-fields-health`
+
+**Auth:** 401 sin sesión · 403 para no-admin
+
+**Descripción:** Diagnóstico global de campos de contacto vacíos (teléfono, dirección, ciudad) en **todas** las órdenes. Más completo que `/api/debug/incomplete-imported-orders` (este solo cubre órdenes con tracking).
+
+**Response:**
+```json
+{
+  "generatedAt": "...",
+  "totals": {
+    "total_orders": 1200,
+    "with_tracking": 900,
+    "without_phone": 340,
+    "without_address": 580,
+    "without_city": 510
+  },
+  "by_normalized_status": {
+    "pending":       { "total": 300, "without_phone": 120, "without_address": 200, "without_city": 180 },
+    "in_transit":    { "total": 200, "without_phone": 50,  "without_address": 90,  "without_city": 80  },
+    "novedad":       { "total": 80,  "without_phone": 30,  "without_address": 60,  "without_city": 55  },
+    "indemnizacion": { "total": 12,  "without_phone": 5,   "without_address": 8,   "without_city": 7   },
+    "delivered":     { "total": 500, "without_phone": 110, "without_address": 200, "without_city": 175 }
+  },
+  "by_source": {
+    "shopify_webhook": { "total": 800, "without_phone": 200, "without_address": 350, "without_city": 310 },
+    "csv_import":      { "total": 350, "without_phone": 120, "without_address": 210, "without_city": 185 }
+  },
+  "by_confirmation_status": {
+    "pending":   { "total": 400, "without_phone": 150, "without_address": 250, "without_city": 220 },
+    "confirmed": { "total": 700, "without_phone": 170, "without_address": 300, "without_city": 270 }
+  },
+  "samples": {
+    "in_transit":    [{ "id": "...", "order_number": "#1234", "tracking_number": "9000555918", "customer_name": "Juan Pérez", "customer_phone": null, "customer_address": null, "customer_city": null, "customer_province": null, "source": "shopify_webhook", "confirmation_status": "confirmed", "normalized_status": "in_transit", "raw_status": "En tránsito", "created_at": "..." }],
+    "novedad":       [...],
+    "indemnizacion": [...],
+    "delivered":     [...],
+    "pending":       [...]
+  },
+  "diagnosis": {
+    "field_names": { "note": "Sin mismatch de nombres. La UI lee los campos con los nombres correctos de DB.", "city": "DB=city → UI usa order.city. Alias en response=customer_city.", "province": "DB=province → UI usa order.province. Alias en response=customer_province.", "phone": "DB=customer_phone → UI usa order.customer_phone.", "address": "DB=customer_address → UI usa order.customer_address." },
+    "if_data_is_null": ["1. Órdenes shopify_webhook: el webhook llena estos campos desde shipping_address/billing_address/customer. Si Shopify no envía esos datos, quedan NULL.", "2. Órdenes csv_import: el import lee columnas del CSV. Si el CSV no tiene esas columnas, quedan NULL.", "3. Fix disponible: POST /api/admin/backfill-imported-order-data (llena campos vacíos sin sobrescribir).", "4. Fix en efi-import: modo 'Actualizar datos faltantes' para subir CSV con datos de contacto."]
+  }
+}
+```
+
+**Muestra por estado:** hasta 10 órdenes por `normalized_status` que tengan al menos un campo de contacto vacío. Campos aliasados: `city` → `customer_city`, `province` → `customer_province`.
+
+**Implementación:** ~79 queries en paralelo (un único Promise.all externo con 4 grupos internos). Sin llamadas a EFI.
+
+### Fix disponible para datos faltantes
+
+Ver secciones anteriores:
+- `POST /api/admin/backfill-imported-order-data` — rellena por tracking_number, no sobrescribe
+- `/efi-import` modo "Actualizar datos faltantes" — upload CSV con columnas de EFI
+
+### Comparativa de endpoints de diagnóstico
+
+| Endpoint | Scope | Requiere tracking |
+|---|---|---|
+| `GET /api/debug/incomplete-imported-orders` | órdenes con tracking asignado | Sí |
+| `GET /api/debug/contact-fields-health` | **todas** las órdenes | No |
+
+### Seguridad / qué NO hace
+
+- Solo lectura (GET)
+- No modifica datos
+- No llama a EFI
+- Solo admin puede verlo
+- Sin limit artificial en totales — cuenta todas las órdenes
+
+---
+
 ## FIX: Datos faltantes (teléfono/dirección) en órdenes importadas (2026-05-18)
 
 ### Problema
