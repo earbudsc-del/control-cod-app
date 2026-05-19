@@ -4,6 +4,121 @@
 
 ---
 
+## FEATURE: Sistema inteligente para mensajero SD — Rutas, ganancias y gamificación (2026-05-19)
+
+### Objetivo
+
+Evolucionar el perfil `santo_domingo_delivery_agent` a un sistema estilo Uber/DoorDash con:
+- Rutas organizadas por zona geográfica
+- Ganancias estimadas visibles (SD agent PUEDE ver sus ganancias, diferente a otros roles)
+- Score de rendimiento dinámico
+- Gamificación: streaks, badges, barra de progreso, meta diaria/semanal
+- Vista `/mi-rendimiento` completa y motivadora
+
+### Archivos creados
+
+| Archivo | Descripción |
+|---|---|
+| `src/lib/sd-zones.ts` | **NUEVO.** Zonas de entrega SD (Norte/Este/Oeste/Centro/San Cristóbal/Otro). `detectSdZone()` detecta zona por city/province/address. `groupOrdersByZone()` agrupa pedidos. Tarifas por zona (RD$250–350). `ZONE_COLORS` con paleta Tailwind por zona. |
+| `src/app/api/sd-delivery/score/route.ts` | **NUEVO.** `GET /api/sd-delivery/score`. Solo `santo_domingo_delivery_agent` + admin. Retorna: score 0-100, level, ganancias hoy/ayer/semana, streak, badges, topZonas, eficiencia, coaching, metas. |
+| `src/components/rendimiento/RendimientoSD.tsx` | **NUEVO.** Componente `/mi-rendimiento` para SD agent. Hero de ganancias, score con ring animado, racha de fuego, badges, top zonas, eficiencia, coaching. Mobile-first, estilo delivery app. |
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/mi-rendimiento/page.tsx` | Agrega rama `santo_domingo_delivery_agent → <RendimientoSD />` |
+| `src/app/(app)/sd-delivery/page.tsx` | +Tab "Rutas" con agrupación por zona. +Ganancias estimadas en banner y strip Mi día. +Barra meta diaria en strip. +Tab badge azul índigo para Rutas. |
+
+### Zonas SD y tarifas
+
+| Zona | Sectores incluidos | Tarifa |
+|---|---|---|
+| SD Norte | Villa Mella, SDN, Los Guaricanos | RD$300 |
+| SD Este | SDE, Los Mina, San Luis | RD$275 |
+| SD Oeste | SDO, Herrera, Los Alcarrizos, Km 12 | RD$280 |
+| DN Centro | Distrito Nacional, Naco, Piantini, Gazcue | RD$250 |
+| San Cristóbal | San Cristóbal, Haina, Nigua | RD$350 |
+| Otra zona | Sin match | RD$260 |
+
+### Score SD — fórmula
+
+```
+base   = 40
++ min(entregadosSemana / 40, 1) × 30   → máx 30 (volumen vs meta semanal)
++ (eficiencia / 100) × 18              → máx 18 (entregas / total trabajados)
++ min(streak, 5) × 2                   → máx 10 (días consecutivos)
+− min(reprogramadosSemana, 5) × 2      → máx −10 (penalización)
+```
+
+| Nivel | Puntos |
+|---|---|
+| Excelente | ≥ 90 |
+| Bueno | 75–89 |
+| Riesgo | 60–74 |
+| Deficiente | < 60 |
+
+### Metas
+
+- **Meta diaria:** 8 entregas
+- **Meta semanal:** 40 entregas
+- **Streak:** días consecutivos con ≥ 8 entregas. Racha de fuego: 3+ días.
+
+### Badges
+
+| Badge | Condición |
+|---|---|
+| 📦 Primera entrega | ≥ 1 entrega hoy |
+| 🎯 Meta diaria | ≥ 8 entregas hoy |
+| 🔥 3 días de racha | streak ≥ 3 |
+| 💪 5 días de racha | streak ≥ 5 |
+| ⚡ Eficiencia 90%+ | eficiencia ≥ 90% |
+| 🚀 20 entregas semana | eSemana ≥ 20 |
+| 🏆 Meta semanal | eSemana ≥ 40 |
+
+### API `GET /api/sd-delivery/score` — response
+
+```json
+{
+  "entregadosHoy": 5, "entregadosAyer": 7, "enRutaHoy": 2,
+  "contactadosHoy": 8, "noRespondenHoy": 1, "reprogramadosHoy": 0,
+  "entregadosSemana": 22, "reprogramadosSemana": 1, "noRespondenSemana": 3,
+  "score": 78, "level": "Bueno",
+  "gananciasHoy": 1350, "gananciasAyer": 1890, "gananciasSemana": 5940,
+  "promedioEntrega": 270,
+  "metaDiaria": 8, "metaSemanal": 40,
+  "progresoMetaDiaria": 62, "progresoMetaSemanal": 55,
+  "streak": 2, "streakMejor": 5,
+  "topZonas": [{ "zonaId": "norte", "label": "SD Norte", "count": 9, "ganancia": 2700 }],
+  "eficiencia": 84,
+  "coaching": ["Hoy llevas 5 entregas. Meta: 8. ¡Sigue adelante!"],
+  "badges": [{ "id": "primera_entrega", "label": "Primera entrega", "emoji": "📦", "earned": true }]
+}
+```
+
+### Seguridad
+
+- `GET /api/sd-delivery/score`: solo `santo_domingo_delivery_agent` + admin (403 para otros)
+- Ganancias estimadas SÍ visibles para SD agent (diseño explícito, diferente a delivery_agent / novedad_agent)
+- No modifica datos, solo lectura de `agent_actions` + `orders`
+
+### Tab Rutas en /sd-delivery
+
+Nueva pestaña "Rutas" (primera de la lista) que agrupa todos los pedidos activos por zona:
+- Cada zona colapsable con botón toggle
+- Muestra: pedidos activos, ganancia estimada, COD total
+- Click en pedido lleva al tab correspondiente (Nuevos/En ruta/Confirmados)
+- Colores por zona (azul=Norte, teal=Este, violet=Oeste, emerald=Centro, naranja=San Cristóbal)
+
+### NO se rompió
+
+- Flujo operativo de entrega (mark-delivered, confirmClient, route_confirmed)
+- Shopify sync
+- EFI sync
+- Permisos existentes de otros roles
+
+---
+
 ## FEATURE: Soporte Excel + columnas EFI completas en efi-import (2026-05-19)
 
 ### Objetivo

@@ -5,6 +5,8 @@ import Link from 'next/link'
 import { Spinner } from '@/components/ui/spinner'
 import { whatsAppUrl, callUrl } from '@/lib/utils'
 import { isSantoDomingoOrder } from '@/lib/alert-helpers'
+import { groupOrdersByZone, SD_META_DIARIA, ZONE_COLORS } from '@/lib/sd-zones'
+import type { ZoneId } from '@/lib/sd-zones'
 import type { Order } from '@/types'
 import {
   MapPin, RefreshCw, MessageCircle, Phone,
@@ -12,12 +14,12 @@ import {
   Search, TrendingUp, Package2,
   CalendarDays, RotateCcw, FileText, X,
   ChevronLeft, ChevronRight, Truck, Navigation,
-  UserCheck, Clock,
+  UserCheck, Clock, Route, DollarSign, ChevronDown, ChevronUp,
 } from 'lucide-react'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
-type Tab        = 'nuevos' | 'confirmados' | 'en_ruta' | 'no_responden' | 'entregados'
+type Tab        = 'nuevos' | 'confirmados' | 'en_ruta' | 'no_responden' | 'entregados' | 'rutas'
 type DateFilter = 'hoy' | 'ayer' | 'todos'
 type OrderPool  = 'nuevo' | 'confirmado'
 type LocalAccion = string | undefined
@@ -705,9 +707,27 @@ export default function SdDeliveryPage() {
     en_ruta:      enRutaList.length,
     no_responden: noRespondenList.length,
     entregados:   entregadosFiltrados.length,
-  }), [nuevosList, confirmadosList, enRutaList, noRespondenList, entregadosFiltrados])
+    rutas:        allPooled.length,
+  }), [nuevosList, confirmadosList, enRutaList, noRespondenList, entregadosFiltrados, allPooled])
 
   const totalActive = allPooled.length
+
+  // ── Agrupación por zona ────────────────────────────────────────────────────
+
+  const zoneGroups = useMemo(
+    () => groupOrdersByZone(allPooled.map(p => p.order)),
+    [allPooled],
+  )
+
+  // ── Ganancias estimadas hoy ────────────────────────────────────────────────
+  // Promedio RD$270 × entregas del día (sdDeliveredDb + sessionDelivered)
+
+  const gananciasHoyEst = useMemo(
+    () => allDelivered.filter(e => isToday(e.reported_at)).length * 270,
+    [allDelivered],
+  )
+
+  const [expandedZones, setExpandedZones] = useState<Set<string>>(new Set())
 
   // ── displayedPooled / displayedEntregados ──────────────────────────────────
 
@@ -717,6 +737,7 @@ export default function SdDeliveryPage() {
     else if (activeTab === 'confirmados')   base = confirmadosList
     else if (activeTab === 'en_ruta')       base = enRutaList
     else if (activeTab === 'no_responden')  base = noRespondenList
+    else if (activeTab === 'rutas')         return []  // rutas has own render
     else return []
 
     if (!searchQuery.trim()) return base
@@ -742,7 +763,9 @@ export default function SdDeliveryPage() {
     )
   }, [activeTab, entregadosFiltrados, searchQuery])
 
-  const totalDisplay  = activeTab === 'entregados' ? displayedEntregados.length : displayedPooled.length
+  const totalDisplay  = activeTab === 'entregados' ? displayedEntregados.length
+    : activeTab === 'rutas' ? 0  // rutas has its own render, no pagination
+    : displayedPooled.length
   const totalPages    = Math.ceil(totalDisplay / PAGE_SIZE)
 
   const pagedPooled = useMemo(
@@ -860,6 +883,7 @@ export default function SdDeliveryPage() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const TAB_META: { tab: Tab; label: string }[] = [
+    { tab: 'rutas',        label: 'Rutas'                  },
     { tab: 'nuevos',       label: 'Nuevos / Por confirmar' },
     { tab: 'confirmados',  label: 'Confirmados / Listos'   },
     { tab: 'en_ruta',      label: 'En ruta'               },
@@ -870,6 +894,7 @@ export default function SdDeliveryPage() {
   // Ayuda visual: color del tab por estado
   function tabBadgeColors(tab: Tab, active: boolean) {
     if (!active) return 'bg-gray-100 text-gray-500'
+    if (tab === 'rutas')        return 'bg-indigo-500 text-white'
     if (tab === 'nuevos')       return 'bg-blue-500 text-white'
     if (tab === 'confirmados')  return 'bg-teal-500 text-white'
     if (tab === 'en_ruta')      return 'bg-teal-600 text-white'
@@ -878,6 +903,7 @@ export default function SdDeliveryPage() {
   }
 
   function tabActiveColors(tab: Tab) {
+    if (tab === 'rutas')        return 'border-indigo-500 text-indigo-700 bg-indigo-50/60'
     if (tab === 'nuevos')       return 'border-blue-500 text-blue-700 bg-blue-50/60'
     if (tab === 'confirmados')  return 'border-teal-500 text-teal-700 bg-teal-50/60'
     if (tab === 'en_ruta')      return 'border-teal-600 text-teal-800 bg-teal-50/80'
@@ -957,9 +983,17 @@ export default function SdDeliveryPage() {
           </div>
 
           <div className="flex items-center gap-2 md:gap-4 shrink-0">
-            {(perf?.entregadosHoy ?? 0) > 0 && (
-              <span className="text-xs md:text-sm text-emerald-200 font-semibold">
-                ✓ {perf!.entregadosHoy} entregados hoy
+            {gananciasHoyEst > 0 && (
+              <div className="flex flex-col items-end">
+                <span className="text-xs font-black text-white tabular-nums">
+                  RD${gananciasHoyEst.toLocaleString('es-DO')}
+                </span>
+                <span className="text-[10px] text-teal-200 font-medium">estimado hoy</span>
+              </div>
+            )}
+            {gananciasHoyEst === 0 && (perf?.entregadosHoy ?? 0) === 0 && (
+              <span className="hidden md:flex items-center gap-1 text-xs text-teal-100">
+                <DollarSign className="w-3 h-3" />Meta: {SD_META_DIARIA} entregas
               </span>
             )}
             <p className="hidden md:block text-teal-100 text-xs">
@@ -1000,7 +1034,33 @@ export default function SdDeliveryPage() {
                 </div>
               ))}
             </div>
+            {/* Ganancias estimadas */}
+            {gananciasHoyEst > 0 && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-600 text-white shrink-0">
+                <DollarSign className="w-3 h-3" />
+                <span className="text-sm font-black tabular-nums leading-none">
+                  RD${gananciasHoyEst.toLocaleString('es-DO')}
+                </span>
+              </div>
+            )}
           </div>
+          {/* Barra meta diaria */}
+          {perf.entregadosHoy > 0 && (
+            <div className="mt-2.5 space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-gray-400 font-medium">Meta del día</span>
+                <span className="text-gray-600 font-bold tabular-nums">
+                  {perf.entregadosHoy}/{SD_META_DIARIA}
+                </span>
+              </div>
+              <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-1.5 bg-teal-500 rounded-full transition-all duration-700"
+                  style={{ width: `${Math.min((perf.entregadosHoy / SD_META_DIARIA) * 100, 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1093,7 +1153,7 @@ export default function SdDeliveryPage() {
           )}
 
           {/* Vista vacía */}
-          {!loading && totalDisplay === 0 && (totalActive > 0 || allDelivered.length > 0) && (
+          {!loading && activeTab !== 'rutas' && totalDisplay === 0 && (totalActive > 0 || allDelivered.length > 0) && (
             <div className="px-5 py-10 text-center">
               <p className="text-gray-500 font-medium">
                 {searchQuery
@@ -1107,8 +1167,134 @@ export default function SdDeliveryPage() {
             </div>
           )}
 
+          {/* ── Tab Rutas — agrupación por zona ── */}
+          {!loading && activeTab === 'rutas' && (
+            <div className="divide-y divide-indigo-50">
+              {zoneGroups.length === 0 ? (
+                <div className="px-5 py-10 text-center">
+                  <Route className="w-8 h-8 text-gray-200 mx-auto mb-3" />
+                  <p className="text-gray-500 font-medium text-sm">No hay pedidos activos por zona</p>
+                </div>
+              ) : (
+                zoneGroups.map(group => {
+                  const zc        = ZONE_COLORS[group.zone.id as ZoneId] ?? ZONE_COLORS['otro']
+                  const isExpanded = expandedZones.has(group.zone.id)
+                  return (
+                    <div key={group.zone.id}>
+                      {/* Cabecera de zona */}
+                      <button
+                        onClick={() => setExpandedZones(prev => {
+                          const next = new Set(prev)
+                          if (next.has(group.zone.id)) next.delete(group.zone.id)
+                          else next.add(group.zone.id)
+                          return next
+                        })}
+                        className={`w-full flex items-center justify-between px-4 py-3
+                                    ${zc.bg} hover:brightness-95 transition-all`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`flex items-center gap-2 ${zc.text}`}>
+                            <Route className="w-4 h-4 shrink-0" />
+                            <span className="font-black text-sm">{group.zone.routeLabel}</span>
+                            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${zc.badge}`}>
+                              {group.zone.label}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <div className="text-right">
+                            <p className={`text-sm font-black tabular-nums ${zc.text}`}>
+                              {group.orders.length} pedido{group.orders.length !== 1 ? 's' : ''}
+                            </p>
+                            <p className="text-xs text-gray-500 font-medium">
+                              ≈ RD${group.gananciaEstimada.toLocaleString('es-DO')}
+                            </p>
+                          </div>
+                          {isExpanded
+                            ? <ChevronUp className="w-4 h-4 text-gray-400" />
+                            : <ChevronDown className="w-4 h-4 text-gray-400" />
+                          }
+                        </div>
+                      </button>
+
+                      {/* Lista de pedidos de la zona */}
+                      {isExpanded && (
+                        <div className="border-t border-gray-100 divide-y divide-gray-50">
+                          {group.orders.map(order => {
+                            const pool = allPooled.find(p => p.order.id === order.id)?.pool ?? 'confirmado'
+                            const accion  = actionMap[order.id]
+                            const busy    = !!loadingRow[order.id]
+                            const isDel   = accion === 'delivered' || deliveredDbIds.has(order.id)
+                            const ds      = computeDisplayState(pool, accion, isDel)
+                            const ubicacion = order.city || order.province || order.customer_address?.slice(0, 24)
+                            return (
+                              <div key={order.id} className="px-4 py-3 flex items-center justify-between gap-2">
+                                <div className="min-w-0 flex-1">
+                                  <p className="font-mono text-xs font-bold text-gray-900 truncate">
+                                    {order.tracking_number ?? order.order_number ?? '—'}
+                                  </p>
+                                  <p className="text-sm font-medium text-gray-700 truncate">
+                                    {order.customer_name ?? '—'}
+                                  </p>
+                                  {ubicacion && (
+                                    <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
+                                      <MapPin className="w-3 h-3 shrink-0" />
+                                      <span className="truncate">{ubicacion}</span>
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
+                                    ${ds === 'entregado'        ? 'bg-green-100 text-green-700'
+                                    : ds === 'en_ruta'          ? 'bg-teal-100 text-teal-700'
+                                    : ds === 'no_responde'      ? 'bg-amber-100 text-amber-700'
+                                    : ds === 'nuevo'            ? 'bg-blue-100 text-blue-700'
+                                    : ds === 'espera_despacho'  ? 'bg-purple-100 text-purple-700'
+                                    : 'bg-gray-100 text-gray-500'}`}>
+                                    {ds === 'entregado'       ? 'Entregado'
+                                    : ds === 'en_ruta'        ? 'En ruta'
+                                    : ds === 'no_responde'    ? 'No resp.'
+                                    : ds === 'nuevo'          ? 'Por conf.'
+                                    : ds === 'espera_despacho'? 'Esperando'
+                                    : 'Listo'}
+                                  </span>
+                                  {!isDel && !busy && (
+                                    <button
+                                      onClick={() => setActiveTab(
+                                        ds === 'nuevo' ? 'nuevos'
+                                        : ds === 'en_ruta' ? 'en_ruta'
+                                        : ds === 'no_responde' ? 'no_responden'
+                                        : 'confirmados'
+                                      )}
+                                      className="text-[10px] text-teal-600 hover:text-teal-800 font-medium whitespace-nowrap"
+                                    >
+                                      Ver →
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+
+                      {/* Summary row cuando está colapsado */}
+                      {!isExpanded && group.codTotal > 0 && (
+                        <div className="px-4 py-1.5 border-t border-gray-50 flex items-center gap-3 text-[11px] text-gray-400">
+                          <span>COD total: <strong className="text-gray-600">RD${group.codTotal.toLocaleString('es-DO')}</strong></span>
+                          <span>·</span>
+                          <span>Ganancia est.: <strong className={zc.text}>RD${group.gananciaEstimada.toLocaleString('es-DO')}</strong></span>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          )}
+
           {/* ── Cards móvil — tabs activos (no entregados) ── */}
-          {!loading && activeTab !== 'entregados' && pagedPooled.length > 0 && (
+          {!loading && activeTab !== 'entregados' && activeTab !== 'rutas' && pagedPooled.length > 0 && (
             <div className="md:hidden divide-y divide-teal-50">
               {pagedPooled.map(({ order, pool }) => {
                 const accion      = actionMap[order.id]
@@ -1161,7 +1347,7 @@ export default function SdDeliveryPage() {
           )}
 
           {/* ── Tabla desktop — tabs activos ── */}
-          {!loading && activeTab !== 'entregados' && pagedPooled.length > 0 && (
+          {!loading && activeTab !== 'entregados' && activeTab !== 'rutas' && pagedPooled.length > 0 && (
             <table className="hidden md:table w-full text-sm">
               <thead className="bg-teal-50/60 border-b border-teal-100">
                 <tr>
