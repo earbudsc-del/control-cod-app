@@ -48,7 +48,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       .select('*, profile:profiles!agent_id(full_name)')
       .single()
 
-    if (error) throw error
+    if (error) {
+      console.error(`[actions] DB insert failed — order=${order_id} action=${action_type} code=${error.code}:`, error.message)
+      throw error
+    }
 
     // ── Sincronización Shopify: crear fulfillment cuando el mensajero sale a ruta ──
     if (action_type === 'route_confirmed') {

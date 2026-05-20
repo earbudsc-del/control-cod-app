@@ -4,6 +4,94 @@
 
 ---
 
+## FIX CRÍTICO: Flujo SD local completo roto (2026-05-20)
+
+### Causa raíz exacta
+
+**Bug A — "Despachar local" fallaba / "Iniciar ruta" → error:**
+
+Dos bugs independientes en la DB, sin migración aplicada, que rompían toda la cadena SD local:
+
+#### Bug A1: `route_confirmed` no estaba en el CHECK constraint de `agent_actions.action_type`
+- Migración 001 define el CHECK: `('contacted','confirmed','rescheduled','recovered','courier_claim','note_added','status_updated','returned','delivered')`
+- `'route_confirmed'` fue añadido al tipo TypeScript (`ActionType`) pero **nunca se creó una migración DB**
+- Resultado: cualquier `POST /api/orders/[id]/actions` con `action_type='route_confirmed'` fallaba con violación de check constraint (PG code 23514) → HTTP 500 → toast "Error al confirmar ruta"
+
+#### Bug A2: `santo_domingo_delivery_agent` ausente de dos objetos DB clave
+- `profiles.role` CHECK constraint (migración 013): no incluía `'santo_domingo_delivery_agent'`
+  → No se podían crear perfiles con ese rol vía INSERT normal
+- `is_agent_or_above()` DB function (migración 013): no incluía `'santo_domingo_delivery_agent'`
+  → La política RLS `orders_update` bloqueaba silenciosamente el UPDATE en `confirm-client` (el orden no se confirmaba en DB aunque el endpoint respondía 201)
+  → La política RLS `actions_insert` devolvía error al INSERT en `confirm-client` y `postAction` para ese rol
+
+**Bug B — UX invisible:**
+Los errores del botón "Despachar local" en `/confirmados` se mostraban como texto `text-[10px]` rojo debajo del botón. El usuario no los notaba y describía el fallo como "no ocurre nada".
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `supabase/migrations/026_sd_delivery_fixes.sql` | **NUEVA** migración: agrega `route_confirmed` al CHECK de `agent_actions`, agrega `santo_domingo_delivery_agent` al CHECK de `profiles.role`, actualiza `is_agent_or_above()` |
+| `src/app/api/orders/[id]/dispatch-local/route.ts` | Usa `createServiceClient()` para bypass seguro de RLS edge cases; añade `.select('id')` al UPDATE para detectar 0 filas; mejor logging; verifica `store_id` manualmente |
+| `src/app/api/sd-delivery/orders/[id]/confirm-client/route.ts` | Usa `createServiceClient()` para que el rol SD agent pueda hacer UPDATE en `orders` e INSERT en `agent_actions` (respaldo inmediato antes de aplicar migración 026) |
+| `src/app/api/orders/[id]/actions/route.ts` | Agrega `console.error` con `code` y `message` al fallar el INSERT en `agent_actions` |
+| `src/app/(app)/confirmados/page.tsx` | Agrega toast flotante para errores/éxito de "Despachar local"; `showToast()`; `console.error` con status/body |
+
+### Endpoints revisados/modificados
+
+| Endpoint | Estado |
+|---|---|
+| `POST /api/orders/[id]/dispatch-local` | **Modificado** — service client, logging, 0-row detection |
+| `POST /api/orders/[id]/actions` | **Modificado** — mejor logging en error DB |
+| `POST /api/sd-delivery/orders/[id]/confirm-client` | **Modificado** — service client + store_id check |
+| `POST /api/sd-delivery/orders/[id]/mark-delivered` | Sin cambios — no reportado roto |
+
+### Cómo aplicar la migración DB
+
+**CRÍTICO**: ejecutar `026_sd_delivery_fixes.sql` en Supabase SQL Editor antes de probar:
+
+```sql
+-- contenido de supabase/migrations/026_sd_delivery_fixes.sql
+```
+
+Sin la migración, los service clients siguen siendo el respaldo funcional (no requieren el constraint).
+
+### Cómo probar el flujo completo
+
+1. **Cliente confirma** (en `/sd-delivery` tab "Nuevos"):
+   - Mensajero/admin pulsa "Cliente confirma"
+   - Toast: "✓ Cliente confirmado — el admin asignará a ruta"
+   - Pedido pasa a tab "Confirmados/Listos" con estado `espera_despacho`
+
+2. **Admin despacha local** (en `/confirmados`):
+   - Admin ve el pedido SD (badge morado "SD / Transporte local") con botón "Despachar local"
+   - Pulsa el botón → spinner breve
+   - Toast visible: "✓ Pedido despachado — aparecerá en SD Rutas"
+   - Pedido desaparece de `/confirmados`
+
+3. **Aparece en Rutas** (en `/sd-delivery` tab "Rutas"):
+   - Refrescar o esperar auto-refresh (3 min)
+   - Pedido aparece agrupado por zona con estado `confirmado_listo`
+
+4. **Iniciar ruta** (tab "Rutas"):
+   - Expandir la zona → "Iniciar ruta"
+   - Toast: "✓ Ruta [zona] iniciada"
+   - Pedido pasa a tab "En ruta"
+
+5. **Marcar entregado** (tab "En ruta"):
+   - "Marcar entregado" → pedido pasa a "Entregados"
+
+### NO se rompió
+
+- Pedidos EFI/Gintracom — sin cambios
+- Botón "# Guía EFI" (assign-tracking) — intacto
+- Shopify sync / EFI sync / tracking cron — no modificados
+- Roles existentes (admin, agent, confirmation_agent, etc.) — intactos
+- Filtros de /confirmados — intactos
+- TypeScript: `npx tsc --noEmit` → sin errores ✅
+
+---
+
 ## FIX: Filtro de fechas rango personalizado en /confirmados + contador (2026-05-20)
 
 ### Causa raíz del bug de fecha

@@ -89,6 +89,12 @@ export default function ConfirmadosPage() {
   const [assignErrors, setAssignErrors]     = useState<Record<string, string>>({})
   const [dispatching, setDispatching]       = useState<Record<string, boolean>>({})
   const [dispatchErrors, setDispatchErrors] = useState<Record<string, string>>({})
+  const [toast, setToast]                   = useState<{ msg: string; ok: boolean } | null>(null)
+
+  function showToast(msg: string, ok: boolean) {
+    setToast({ msg, ok })
+    setTimeout(() => setToast(null), 4000)
+  }
   const [alertFilter, setAlertFilter] = useState<AlertFilter>('todos')
   const [currentPage, setCurrentPage] = useState(1)
 
@@ -221,12 +227,19 @@ export default function ConfirmadosPage() {
       const res = await fetch(`/api/orders/${orderId}/dispatch-local`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) {
-        setDispatchErrors(prev => ({ ...prev, [orderId]: data.error ?? 'Error al despachar' }))
+        const msg = data.error ?? 'Error al despachar localmente'
+        console.error(`[dispatch-local] HTTP ${res.status}:`, msg)
+        setDispatchErrors(prev => ({ ...prev, [orderId]: msg }))
+        showToast(msg, false)
       } else {
         setOrders(prev => prev.filter(o => o.id !== orderId))
+        showToast('✓ Pedido despachado — aparecerá en SD Rutas', true)
       }
-    } catch {
-      setDispatchErrors(prev => ({ ...prev, [orderId]: 'Error de red' }))
+    } catch (err) {
+      const msg = 'Error de red al despachar'
+      console.error('[dispatch-local] network error:', err)
+      setDispatchErrors(prev => ({ ...prev, [orderId]: msg }))
+      showToast(msg, false)
     } finally {
       setDispatching(prev => ({ ...prev, [orderId]: false }))
     }
@@ -239,6 +252,15 @@ export default function ConfirmadosPage() {
 
   return (
     <div className="space-y-4">
+
+      {/* ── Toast flotante ── */}
+      {toast && (
+        <div className={`fixed left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl shadow-lg
+          text-sm font-semibold text-white transition-all bottom-6
+          ${toast.ok ? 'bg-green-600' : 'bg-red-600'}`}>
+          {toast.msg}
+        </div>
+      )}
 
       {/* ── Banner ── */}
       <div className="relative overflow-hidden rounded-2xl
