@@ -4,6 +4,67 @@
 
 ---
 
+## MEJORA: Mobile-first UX para Mensajero Santo Domingo (2026-05-20)
+
+### Objetivo
+
+Optimizar la experiencia en móvil del perfil `santo_domingo_delivery_agent` para operación con una mano mientras está en ruta real. Todos los cambios son **quirúrgicos** — sin refactor masivo, sin romper flujo existente.
+
+### Archivos modificados
+
+| Archivo | Cambios |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | Ver detalle abajo |
+
+### Cambios implementados
+
+| Mejora | Descripción |
+|---|---|
+| **COD amount en SdCard** | Chip verde `RD$xxx COD` visible debajo del teléfono. El mensajero sabe cuánto cobrar sin abrir el detalle. Usa `order.cod_amount` del tipo `Order`. |
+| **Link Google Maps** | Botón inline "Mapa" en el bloque de ubicación de cada card. Genera URL `https://maps.google.com/?q=` con address+city+province. Visible cuando hay al menos un campo de ubicación. También en la lista de órdenes dentro de Rutas expandidas. |
+| **Tabs cortos en móvil** | `TAB_META` tiene nuevo campo `shortLabel`. En pantallas `< sm` muestra el label corto; en `sm+` el largo. Labels cortos: Nuevos, Listos, Rutas, En ruta, N/Resp., Entregados. Elimina el scroll horizontal forzado en pantallas pequeñas. |
+| **Tabs sticky** | El contenedor de tabs tiene `sticky top-14 md:top-0 z-10 bg-white`. En móvil se ancla debajo del topbar (h-14 = 56px) para mantenerse visible al hacer scroll en listas largas. |
+| **Touch targets primarios** | Botones principales "Cliente confirma", "Confirmar ruta", "Marcar entregado": `py-3.5 min-h-[52px]` con iconos `w-5 h-5`. |
+| **Touch targets secundarios** | Botones de estado "No resp.", "Reprog.", "Nota" en grilla 3 cols: `py-3 min-h-[44px]`. Cumple mínimo iOS HIG (44×44pt). |
+| **Date filter min-h** | Botones Hoy/Ayer/Todos: `py-2.5 min-h-[44px]`. |
+| **iOS safe area — toast** | Toast flotante usa `bottom-[calc(env(safe-area-inset-bottom,_0px)_+_24px)]`. No queda tapado por la barra de inicio del iPhone. |
+| **iOS safe area — página** | Root `<div>` tiene `pb-[env(safe-area-inset-bottom,_0px)]`. En iPhones con notch el contenido no queda cortado al fondo. |
+| **COD en Rutas expandidas** | Cada fila de pedido dentro de zona expandida muestra `RD$xxx` COD (chip verde) + teléfono + Maps link. |
+
+### Helper agregado
+
+```typescript
+function mapsUrl(order: Order): string | null {
+  const parts = [order.customer_address, order.city, order.province].filter(Boolean)
+  if (!parts.length) return null
+  return `https://maps.google.com/?q=${encodeURIComponent(parts.join(', '))}`
+}
+```
+
+### NO se rompió
+
+- Flujo SD local (confirmClient, confirmRoute, markDelivered) — sin cambios
+- Tab Rutas, agrupación por zona — sin cambios (solo visual mejorado)
+- Confirmados/Listos, sdPendingDispatch — sin cambios
+- EFI flow, tracking cron — no modificados
+- Auth, roles, sidebar — no modificados
+- Tabla desktop (`hidden md:table`) — sin cambios
+- TypeScript: `npx tsc --noEmit` → sin errores ✅
+
+### Cómo probar en móvil
+
+1. Abrir `/sd-delivery` en Chrome DevTools → modo móvil (iPhone SE 375px o similar)
+2. Verificar que tabs muestran labels cortos sin overflow horizontal
+3. Hacer scroll hacia abajo → los tabs quedan fijos debajo del topbar
+4. Tap en cualquier card con COD > 0 → chip verde `RD$xxx COD` visible
+5. Card con dirección → botón "Mapa" → abre Google Maps con la dirección
+6. Tab Rutas → expandir zona → cada pedido muestra COD + teléfono + icono Maps
+7. Botones de acción → medir área táctil ≥ 44px de alto
+8. En iPhone real: toast aparece sobre la barra de inicio
+9. Probar orientación landscape → no hay overflow horizontal
+
+---
+
 ## FIX: Rol `santo_domingo_delivery_agent` en dropdown admin (2026-05-20)
 
 ### Problema

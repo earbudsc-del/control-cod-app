@@ -100,6 +100,12 @@ function criticalityLabel(order: Order): 'critico' | 'riesgo' | 'normal' {
   return 'normal'
 }
 
+function mapsUrl(order: Order): string | null {
+  const parts = [order.customer_address, order.city, order.province].filter(Boolean)
+  if (!parts.length) return null
+  return `https://maps.google.com/?q=${encodeURIComponent(parts.join(', '))}`
+}
+
 function buildWaMsg(nombre: string, product: string | null | undefined): string {
   const n = nombre.trim() || 'cliente'
   const p = (product ?? '').trim().slice(0, 32) || 'tu pedido'
@@ -364,7 +370,15 @@ function SdCard({
 
       {/* Cliente */}
       <p className="font-semibold text-gray-900 text-base leading-tight">{nombre || '—'}</p>
-      <p className="font-mono text-sm text-gray-500 mt-0.5">{order.customer_phone || '—'}</p>
+      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+        <p className="font-mono text-sm text-gray-500">{order.customer_phone || '—'}</p>
+        {order.cod_amount != null && order.cod_amount > 0 && (
+          <span className="text-sm font-black text-emerald-700 bg-emerald-50 border border-emerald-200
+                           px-2 py-0.5 rounded-lg tabular-nums">
+            RD${order.cod_amount.toLocaleString('es-DO')} COD
+          </span>
+        )}
+      </div>
 
       {/* Producto — visible para nuevos */}
       {ds === 'nuevo' && order.product_summary && (
@@ -377,7 +391,15 @@ function SdCard({
       {ubicacion && (
         <div className="flex items-center gap-1 mt-1.5 text-xs text-gray-500">
           <MapPin className="w-3 h-3 shrink-0 text-teal-500" />
-          <span className="truncate">{ubicacion}</span>
+          <span className="truncate flex-1">{ubicacion}</span>
+          {mapsUrl(order) && (
+            <a href={mapsUrl(order)!} target="_blank" rel="noopener noreferrer"
+               className="shrink-0 flex items-center gap-0.5 text-teal-600 font-semibold
+                          bg-teal-50 border border-teal-200 px-1.5 py-0.5 rounded-md
+                          active:bg-teal-100 -my-0.5">
+              <ExternalLink className="w-3 h-3" />Mapa
+            </a>
+          )}
         </div>
       )}
       {order.customer_address && (
@@ -431,13 +453,13 @@ function SdCard({
               onClick={onClienteConfirma}
               className="w-full flex items-center justify-center gap-2
                          bg-blue-600 active:bg-blue-700 text-white
-                         text-sm font-bold py-3 rounded-xl transition-colors">
-              <UserCheck className="w-4 h-4" />Cliente confirma
+                         text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
+              <UserCheck className="w-5 h-5" />Cliente confirma
             </button>
             <button onClick={onNoAnswer}
               className="w-full flex items-center justify-center gap-1.5
                          bg-amber-100 active:bg-amber-200 text-amber-700
-                         text-sm font-medium py-2.5 rounded-xl transition-colors">
+                         text-sm font-medium py-3 min-h-[44px] rounded-xl transition-colors">
               <PhoneMissed className="w-4 h-4" />No responde
             </button>
           </div>
@@ -454,20 +476,20 @@ function SdCard({
               onClick={onConfirmarRuta}
               className="w-full flex items-center justify-center gap-2
                          bg-teal-500 active:bg-teal-600 text-white
-                         text-sm font-bold py-3 rounded-xl transition-colors">
-              <Truck className="w-4 h-4" />Confirmar ruta
+                         text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
+              <Truck className="w-5 h-5" />Confirmar ruta
             </button>
             <div className="grid grid-cols-2 gap-2">
               <button onClick={onNoAnswer}
                 className="flex items-center justify-center gap-1.5
                            bg-amber-100 active:bg-amber-200 text-amber-700
-                           text-sm font-medium py-2.5 rounded-xl transition-colors">
+                           text-sm font-medium py-3 min-h-[44px] rounded-xl transition-colors">
                 <PhoneMissed className="w-4 h-4" />No responde
               </button>
               <button onClick={onNota}
                 className="flex items-center justify-center gap-1.5
                            bg-gray-100 active:bg-gray-200 text-gray-600
-                           text-sm font-medium py-2.5 rounded-xl transition-colors">
+                           text-sm font-medium py-3 min-h-[44px] rounded-xl transition-colors">
                 <FileText className="w-4 h-4" />Nota
               </button>
             </div>
@@ -479,27 +501,27 @@ function SdCard({
               onClick={onEntregado}
               className="w-full flex items-center justify-center gap-2
                          bg-emerald-500 active:bg-emerald-600 text-white
-                         text-sm font-bold py-3 rounded-xl transition-colors">
-              <CheckCircle2 className="w-4 h-4" />Marcar entregado
+                         text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
+              <CheckCircle2 className="w-5 h-5" />Marcar entregado
             </button>
             <div className="grid grid-cols-3 gap-2">
               <button onClick={onNoAnswer}
                 className="flex items-center justify-center gap-1 col-span-1
                            bg-amber-100 active:bg-amber-200 text-amber-700
-                           text-xs font-medium py-2.5 rounded-xl transition-colors">
-                <PhoneMissed className="w-3.5 h-3.5" />No resp.
+                           text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
+                <PhoneMissed className="w-3.5 h-3.5" /><span>No resp.</span>
               </button>
               <button onClick={onReprogramar}
                 className="flex items-center justify-center gap-1 col-span-1
                            bg-indigo-100 active:bg-indigo-200 text-indigo-700
-                           text-xs font-medium py-2.5 rounded-xl transition-colors">
-                <RotateCcw className="w-3.5 h-3.5" />Reprogram.
+                           text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
+                <RotateCcw className="w-3.5 h-3.5" /><span>Reprog.</span>
               </button>
               <button onClick={onNota}
                 className="flex items-center justify-center gap-1 col-span-1
                            bg-gray-100 active:bg-gray-200 text-gray-600
-                           text-xs font-medium py-2.5 rounded-xl transition-colors">
-                <FileText className="w-3.5 h-3.5" />Nota
+                           text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
+                <FileText className="w-3.5 h-3.5" /><span>Nota</span>
               </button>
             </div>
           </div>
@@ -987,13 +1009,13 @@ export default function SdDeliveryPage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  const TAB_META: { tab: Tab; label: string }[] = [
-    { tab: 'nuevos',       label: 'Nuevos / Por confirmar' },
-    { tab: 'confirmados',  label: 'Confirmados / Listos'   },
-    { tab: 'rutas',        label: 'Rutas'                  },
-    { tab: 'en_ruta',      label: 'En ruta'               },
-    { tab: 'no_responden', label: 'No responden'           },
-    { tab: 'entregados',   label: 'Entregados'             },
+  const TAB_META: { tab: Tab; label: string; shortLabel: string }[] = [
+    { tab: 'nuevos',       label: 'Nuevos / Por confirmar', shortLabel: 'Nuevos'     },
+    { tab: 'confirmados',  label: 'Confirmados / Listos',   shortLabel: 'Listos'     },
+    { tab: 'rutas',        label: 'Rutas',                  shortLabel: 'Rutas'      },
+    { tab: 'en_ruta',      label: 'En ruta',                shortLabel: 'En ruta'    },
+    { tab: 'no_responden', label: 'No responden',           shortLabel: 'N/Resp.'    },
+    { tab: 'entregados',   label: 'Entregados',             shortLabel: 'Entregados' },
   ]
 
   // Ayuda visual: color del tab por estado
@@ -1017,12 +1039,13 @@ export default function SdDeliveryPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-[env(safe-area-inset-bottom,_0px)]">
 
-      {/* ── Toast flotante ── */}
+      {/* ── Toast flotante — posición sobre safe area iOS ── */}
       {toast && (
-        <div className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl shadow-lg
+        <div className={`fixed left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl shadow-lg
           text-sm font-semibold text-white transition-all
+          bottom-[calc(env(safe-area-inset-bottom,_0px)_+_24px)]
           ${toast.ok ? 'bg-teal-600' : 'bg-red-600'}`}>
           {toast.msg}
         </div>
@@ -1179,7 +1202,7 @@ export default function SdDeliveryPage() {
           <button
             key={key}
             onClick={() => setDateFilter(key)}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold transition-colors
+            className={`flex items-center gap-1.5 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-semibold transition-colors
               ${dateFilter === key
                 ? 'bg-teal-600 text-white'
                 : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
@@ -1227,20 +1250,22 @@ export default function SdDeliveryPage() {
             </div>
           </div>
 
-          {/* Tabs */}
+          {/* Tabs — sticky en móvil para no perder orientación al hacer scroll */}
           {!loading && (
-            <div className="flex border-b border-teal-100 overflow-x-auto">
-              {TAB_META.map(({ tab, label }) => (
+            <div className="flex border-b border-teal-100 overflow-x-auto
+                            sticky top-14 md:top-0 z-10 bg-white">
+              {TAB_META.map(({ tab, label, shortLabel }) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
-                  className={`flex items-center gap-1.5 px-4 py-2.5 min-h-[44px] text-xs font-semibold
+                  className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 min-h-[44px] text-xs font-semibold
                               border-b-2 transition-colors whitespace-nowrap shrink-0
                     ${activeTab === tab
                       ? tabActiveColors(tab)
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
                 >
-                  {label}
+                  <span className="sm:hidden">{shortLabel}</span>
+                  <span className="hidden sm:inline">{label}</span>
                   <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full
                     ${tabBadgeColors(tab, activeTab === tab)}`}>
                     {tabCounts[tab]}
@@ -1393,33 +1418,47 @@ export default function SdDeliveryPage() {
                           <div className="divide-y divide-gray-50">
                             {group.orders.map(order => {
                               const ubicacion = order.city || order.province || order.customer_address?.slice(0, 24)
+                              const orderMap  = mapsUrl(order)
                               return (
-                                <div key={order.id} className="px-4 py-3 flex items-center justify-between gap-2">
-                                  <div className="min-w-0 flex-1">
-                                    <p className="font-mono text-xs font-bold text-gray-900 truncate">
-                                      {order.tracking_number ?? order.order_number ?? '—'}
-                                    </p>
-                                    <p className="text-sm font-medium text-gray-700 truncate">
-                                      {order.customer_name ?? '—'}
-                                    </p>
-                                    {ubicacion && (
-                                      <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
-                                        <MapPin className="w-3 h-3 shrink-0" />
-                                        <span className="truncate">{ubicacion}</span>
+                                <div key={order.id} className="px-4 py-3">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0 flex-1">
+                                      <p className="font-mono text-xs font-bold text-gray-900 truncate">
+                                        {order.tracking_number ?? order.order_number ?? '—'}
                                       </p>
-                                    )}
-                                  </div>
-                                  <div className="flex items-center gap-2 shrink-0">
-                                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full
-                                                     bg-gray-100 text-gray-500">
-                                      Listo
-                                    </span>
-                                    <button
-                                      onClick={() => setActiveTab('confirmados')}
-                                      className="text-[10px] text-teal-600 hover:text-teal-800 font-medium whitespace-nowrap"
-                                    >
-                                      Ver →
-                                    </button>
+                                      <p className="text-sm font-semibold text-gray-800 truncate">
+                                        {order.customer_name ?? '—'}
+                                      </p>
+                                      <p className="text-xs text-gray-500 font-mono mt-0.5">
+                                        {order.customer_phone || '—'}
+                                      </p>
+                                      {ubicacion && (
+                                        <div className="flex items-center gap-1 mt-0.5 text-xs text-gray-400">
+                                          <MapPin className="w-3 h-3 shrink-0" />
+                                          <span className="truncate">{ubicacion}</span>
+                                          {orderMap && (
+                                            <a href={orderMap} target="_blank" rel="noopener noreferrer"
+                                               className="shrink-0 text-teal-600 ml-0.5">
+                                              <ExternalLink className="w-3 h-3" />
+                                            </a>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="flex flex-col items-end gap-1.5 shrink-0">
+                                      {order.cod_amount != null && order.cod_amount > 0 && (
+                                        <span className="text-xs font-black text-emerald-700 bg-emerald-50
+                                                         border border-emerald-200 px-2 py-0.5 rounded-lg tabular-nums whitespace-nowrap">
+                                          RD${order.cod_amount.toLocaleString('es-DO')}
+                                        </span>
+                                      )}
+                                      <button
+                                        onClick={() => setActiveTab('confirmados')}
+                                        className="text-[10px] text-teal-600 hover:text-teal-800 font-medium whitespace-nowrap"
+                                      >
+                                        Ver →
+                                      </button>
+                                    </div>
                                   </div>
                                 </div>
                               )
