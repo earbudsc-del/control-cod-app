@@ -544,9 +544,10 @@ function SdCard({
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function SdDeliveryPage() {
-  const [allEnReparto, setAllEnReparto] = useState<Order[]>([])
-  const [allNuevos, setAllNuevos]       = useState<Order[]>([])
-  const [deliveredDb, setDeliveredDb]   = useState<DeliveredEntry[]>([])
+  const [allEnReparto, setAllEnReparto]             = useState<Order[]>([])
+  const [allNuevos, setAllNuevos]                   = useState<Order[]>([])
+  const [allConfirmedPending, setAllConfirmedPending] = useState<Order[]>([])
+  const [deliveredDb, setDeliveredDb]               = useState<DeliveredEntry[]>([])
   const [perf, setPerf]                 = useState<SdPerfData | null>(null)
   const [loading, setLoading]           = useState(true)
   const [lastRefresh, setLastRefresh]   = useState<Date>(new Date())
@@ -568,20 +569,44 @@ export default function SdDeliveryPage() {
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const [enRepartoRes, nuevosRes, deliveredRes, perfRes]:
-        [OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData] = await Promise.all([
+      const [enRepartoRes, nuevosRes, confirmedRes, deliveredRes, perfRes]:
+        [OrdersResponse, OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData] = await Promise.all([
           fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc').then(r => r.json()),
           fetch('/api/orders?confirmationStatus=pending&limit=300').then(r => r.json()),
+          fetch('/api/orders?confirmationStatus=confirmed&limit=200').then(r => r.json()),
           fetch('/api/reparto/entregados').then(r => r.json()),
           fetch('/api/sd-delivery/performance').then(r => r.json()),
         ])
-      setAllEnReparto(enRepartoRes.data ?? [])
+      const enRepartoData: Order[] = enRepartoRes.data ?? []
+      const confirmedData: Order[]  = confirmedRes.data ?? []
+
+      setAllEnReparto(enRepartoData)
       setAllNuevos(nuevosRes.data ?? [])
+      setAllConfirmedPending(confirmedData)
       setDeliveredDb(Array.isArray(deliveredRes) ? deliveredRes : [])
       setPerf(perfRes)
       setLastRefresh(new Date())
+
+      const freshEnRepartoIds = new Set(enRepartoData.map((o: Order) => o.id))
+
+      // Seed actionMap for SD orders confirmed by client but not yet dispatched.
+      // Ensures espera_despacho is visible after page refresh/deploy without relying on local cache.
+      setActionMap(prev => {
+        const next = { ...prev }
+        for (const order of confirmedData) {
+          if (
+            isSantoDomingoOrder(order.city, order.province, order.customer_address) &&
+            !order.tracking_number &&
+            !freshEnRepartoIds.has(order.id) &&
+            !next[order.id]  // preserve local session actions (delivered, rescheduled, etc.)
+          ) {
+            next[order.id] = 'client_confirmed'
+          }
+        }
+        return next
+      })
+
       // Remove from cache any order that now appears in en_reparto (admin dispatched it)
-      const freshEnRepartoIds = new Set((enRepartoRes.data ?? []).map((o: Order) => o.id))
       setConfirmedOrderCache(prev => {
         if (prev.size === 0) return prev
         const next = new Map(prev)
@@ -621,6 +646,20 @@ export default function SdDeliveryPage() {
     )
   }, [allNuevos, allEnReparto])
 
+  // SD orders confirmed by client but not yet dispatched by admin.
+  // DB state: confirmation_status='confirmed', tracking_number=NULL, normalized_status≠en_reparto.
+  // Needed because after refresh these orders aren't in sdNuevos (pending) nor sdEnReparto.
+  const sdPendingDispatch = useMemo(() => {
+    const enRepartoIds = new Set(allEnReparto.map(o => o.id))
+    const terminal     = new Set(['delivered', 'returned', 'cancelled'])
+    return allConfirmedPending.filter(o =>
+      isSantoDomingoOrder(o.city, o.province, o.customer_address) &&
+      !o.tracking_number &&
+      !enRepartoIds.has(o.id) &&
+      !terminal.has(o.normalized_status ?? '')
+    )
+  }, [allConfirmedPending, allEnReparto])
+
   const deliveredDbIds = useMemo(
     () => new Set(deliveredDb.map(e => e.order.id)),
     [deliveredDb],
@@ -642,34 +681,47 @@ export default function SdDeliveryPage() {
     const nuevosPool: PooledOrder[] = sdNuevos
       .filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id))
       .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
-    // Locally-confirmed orders that haven't been dispatched to en_reparto yet;
-    // these disappear from sdNuevos after next fetch but need to stay visible.
-    const enRepartoIds = new Set(sdEnReparto.map(o => o.id))
-    const nuevosIds    = new Set(sdNuevos.map(o => o.id))
+
+    const enRepartoIds       = new Set(sdEnReparto.map(o => o.id))
+    const nuevosIds          = new Set(sdNuevos.map(o => o.id))
+    const pendingDispatchIds = new Set(sdPendingDispatch.map(o => o.id))
+
+    // DB-confirmed SD orders (client confirmed, admin hasn't dispatched yet).
+    // actionMap is seeded with 'client_confirmed' for these in fetchData, so
+    // computeDisplayState returns 'espera_despacho' after page refresh/deploy.
+    const pendingDispatchPool: PooledOrder[] = sdPendingDispatch
+      .filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id))
+      .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
+
+    // Locally-confirmed orders not yet reflected in DB; exclude ones already in pendingDispatchPool.
     const cachedPool: PooledOrder[] = Array.from(confirmedOrderCache.values())
       .filter(o =>
         !enRepartoIds.has(o.id) && !nuevosIds.has(o.id) &&
+        !pendingDispatchIds.has(o.id) &&
         actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id),
       )
       .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
-    return [...nuevosPool, ...cachedPool, ...confirmedPool]
-  }, [sdEnReparto, sdNuevos, confirmedOrderCache, actionMap, deliveredDbIds])
+
+    return [...nuevosPool, ...pendingDispatchPool, ...cachedPool, ...confirmedPool]
+  }, [sdEnReparto, sdNuevos, sdPendingDispatch, confirmedOrderCache, actionMap, deliveredDbIds])
 
   // ── Filtro de fecha ────────────────────────────────────────────────────────
 
   const filteredPooled = useMemo(() => {
     if (dateFilter === 'todos') return allPooled
-    const check = dateFilter === 'hoy' ? isToday : isYesterday
+    const check          = dateFilter === 'hoy' ? isToday : isYesterday
+    const pendingIds     = new Set(sdPendingDispatch.map(o => o.id))
     return allPooled.filter(({ order, pool }) => {
-      // Órdenes recién confirmadas localmente siempre visibles — evita que filtro de fecha
-      // las oculte si el pedido fue creado ayer pero confirmado hoy.
+      // Recién confirmadas localmente: bypass para evitar que el filtro de fecha las oculte.
       if (confirmedOrderCache.has(order.id)) return true
+      // DB-confirmed pending dispatch: siempre visibles (cliente confirmó, admin no ha despachado).
+      if (pendingIds.has(order.id)) return true
       const ts = pool === 'nuevo'
         ? order.created_at
         : (order.status_since ?? order.last_tracking_update ?? order.updated_at)
       return check(ts)
     })
-  }, [allPooled, dateFilter, confirmedOrderCache])
+  }, [allPooled, dateFilter, confirmedOrderCache, sdPendingDispatch])
 
   // ── Listas por tab ─────────────────────────────────────────────────────────
 
@@ -713,15 +765,21 @@ export default function SdDeliveryPage() {
   // ── Entregados ─────────────────────────────────────────────────────────────
 
   const sessionDelivered = useMemo(() => {
-    const allSdIds = new Set([...sdEnReparto.map(o => o.id), ...sdNuevos.map(o => o.id)])
+    const allSdIds = new Set([
+      ...sdEnReparto.map(o => o.id),
+      ...sdNuevos.map(o => o.id),
+      ...sdPendingDispatch.map(o => o.id),
+    ])
     return Array.from(allSdIds)
       .filter(id => actionMap[id] === 'delivered' && !deliveredDbIds.has(id))
       .flatMap(id => {
-        const o = sdEnReparto.find(x => x.id === id) ?? sdNuevos.find(x => x.id === id)
+        const o = sdEnReparto.find(x => x.id === id)
+          ?? sdNuevos.find(x => x.id === id)
+          ?? sdPendingDispatch.find(x => x.id === id)
         if (!o) return []
         return [{ order: o, reported_at: new Date().toISOString(), local_confirmed: true }]
       })
-  }, [sdEnReparto, sdNuevos, actionMap, deliveredDbIds])
+  }, [sdEnReparto, sdNuevos, sdPendingDispatch, actionMap, deliveredDbIds])
 
   const allDelivered = useMemo(
     () => [...sdDeliveredDb, ...sessionDelivered],

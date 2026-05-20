@@ -59,6 +59,66 @@ Cliente confirma (sd-delivery)
 
 ---
 
+## FIX: Confirmados/Listos desaparece tras deploy/refresh (2026-05-19)
+
+### Causa raíz
+
+Cuando el SD agent presiona **"Cliente confirma"**, el endpoint `confirm-client` guarda en DB:
+- `confirmation_status = 'confirmed'`
+- `tracking_number` sigue en NULL
+- `normalized_status` no cambia (sigue como estaba, ej. `pending`)
+
+Pero la página solo fetcheaba DOS grupos:
+- `sdNuevos` → `?confirmationStatus=pending` → **NO incluye** el pedido (ya es `confirmed`)
+- `sdEnReparto` → `?status=en_reparto` → **NO incluye** el pedido (admin no ha despachado aún)
+
+El pedido solo quedaba visible por `confirmedOrderCache` (React state local). Después del deploy/refresh ese cache se vacía → pedido invisible.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | Ver detalle abajo |
+
+### Cambios en `src/app/(app)/sd-delivery/page.tsx`
+
+| Cambio | Descripción |
+|---|---|
+| Nuevo state `allConfirmedPending` | Almacena pedidos con `confirmation_status='confirmed'` de DB |
+| `fetchData` — 3er fetch paralelo | `?confirmationStatus=confirmed&limit=200`. Corre en paralelo con los otros dos. |
+| `fetchData` — seed `actionMap` | Por cada pedido SD confirmado (SD + no tracking + no en_reparto), si `actionMap[id]` está vacío, lo setea a `'client_confirmed'`. Esto garantiza que `computeDisplayState` retorne `'espera_despacho'` tras refresh, sin depender del cache. |
+| Nuevo useMemo `sdPendingDispatch` | Filtra `allConfirmedPending`: SD + no tracking + no en en_reparto + no terminal (delivered/returned/cancelled). Estos son los pedidos en el "gap" entre cliente confirmó y admin despacha. |
+| `allPooled` — nuevo `pendingDispatchPool` | Agrega `sdPendingDispatch` como `pool='nuevo'`. Con `actionMap` ya seedeado a `'client_confirmed'`, `computeDisplayState` retorna `'espera_despacho'`. También excluye del `cachedPool` los IDs ya en `pendingDispatchPool` (evita duplicados). |
+| `filteredPooled` | Agrega bypass: si `pendingIds.has(order.id)` → siempre visible, independiente del filtro hoy/ayer. |
+| `sessionDelivered` | Agrega `sdPendingDispatch` al set de IDs SD activos para que los entregados localmente sean rastreables. |
+
+### Invariante garantizada
+
+Después del fix, `Confirmados/Listos` se reconstruye SIEMPRE desde DB:
+1. **espera_despacho** (cliente confirmó, admin no despachó): viene de `sdPendingDispatch` (allConfirmedPending filtrado)
+2. **confirmado_listo** (admin despachó): viene de `sdEnReparto` (status=en_reparto)
+
+Ninguno depende del `confirmedOrderCache`. El cache solo acelera la visualización inmediata post-confirmación.
+
+### Cómo probar
+
+1. Confirmar cliente en `/sd-delivery` → pedido aparece en Confirmados/Listos
+2. Refrescar la página → **pedido sigue visible** (fuente: DB, no cache)
+3. Abrir nueva pestaña → **pedido sigue visible** (confirma que no es cache de sesión)
+4. Deploy/redeploy → **pedido sigue visible** tras reload
+5. Admin despacha desde `/confirmados` → pedido pasa de `espera_despacho` a `confirmado_listo`
+6. `npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Botón "Despachar local" en /confirmados — intacto
+- Flujo EFI normal — no modificado
+- Tracking cron / Shopify sync — no modificados
+- Tab Rutas (solo incluye `confirmado_listo`) — no afectado
+- `confirmadosList` incluye correctamente `espera_despacho` Y `confirmado_listo`
+
+---
+
 ## FIX: Separación SD local vs EFI/courier en /sd-delivery (2026-05-19)
 
 ### Bugs corregidos
