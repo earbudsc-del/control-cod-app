@@ -4,6 +4,74 @@
 
 ---
 
+## FIX: Filtro de fechas rango personalizado en /confirmados + contador (2026-05-20)
+
+### Causa raíz del bug de fecha
+
+En `buildUrl()` de `src/app/(app)/confirmados/page.tsx`, el rango personalizado construía:
+
+```
+from=2026-05-17T04:00:00Z
+to=2026-05-17T03:59:59Z   ← END es anterior a START (0 resultados siempre)
+```
+
+RD es UTC-4. El fin del día 17/05 en RD en UTC es `2026-05-18T03:59:59Z` (siguiente día a las 04:00 UTC − 1 segundo), no `2026-05-17T03:59:59Z`. Faltaba sumar 1 día a la fecha `to` antes de armar el endpoint.
+
+### Campo usado para filtrar
+
+`last_confirmation_attempt` — es el campo correcto para "cuándo fue confirmado". Usado en todos los filtros (Hoy, Ayer, rango personalizado). Los filtros Hoy/Ayer de la API no tenían bug (usaban `rdDayBounds()` correcto). Solo el rango personalizado del frontend estaba mal.
+
+No se necesitó cambiar el campo de filtrado.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/confirmados/page.tsx` | Fix `buildUrl()` rango + contador visible de pedidos |
+
+### Cambios en `src/app/(app)/confirmados/page.tsx`
+
+| Cambio | Descripción |
+|---|---|
+| **Fix `buildUrl` rango** | Para `filter='rango'`, suma 1 día UTC a `to` antes de construir el endpoint. `from=YYYY-MM-DDT04:00:00Z` · `to=(YYYY-MM-DD+1)T03:59:59Z`. Cubre el día completo en timezone RD. |
+| **Contador de pedidos** | Barra sutil entre el buscador y la tabla. Siempre visible cuando hay resultados. Muestra "X pedido(s)" si caben en 1 página, o "Mostrando X–Y de Z pedidos" si hay paginación. Si hay filtro de alerta o búsqueda activa, muestra también "· N total sin filtros". |
+
+### Cómo probar Hoy/Ayer/rango personalizado
+
+1. Abrir `/confirmados`
+2. **Hoy**: clic en "Hoy" → debe mostrar los pedidos confirmados hoy (sin cambio, ya funcionaba)
+3. **Ayer**: clic en "Ayer" → debe mostrar los pedidos confirmados ayer (sin cambio, ya funcionaba)
+4. **Rango personalizado**:
+   - Ingresar `17/05/2026` en ambos campos de fecha
+   - Clic "Aplicar"
+   - Debe mostrar todos los pedidos con `last_confirmation_attempt` entre `2026-05-17T04:00:00Z` y `2026-05-18T03:59:59Z`
+   - Antes del fix: 0 resultados (end < start). Después: resultados correctos.
+5. **Todos**: sin filtro de fecha → muestra todo (sin cambio, ya funcionaba)
+
+### Cómo funciona el contador/resumen
+
+- Aparece siempre que `displayed.length > 0` (después de buscador, antes de la tabla)
+- `displayed` = pedidos tras aplicar alertFilter + searchQuery
+- Sin paginación: "X pedido(s)"
+- Con paginación: "Mostrando X–Y de Z pedidos"
+- Si hay filtro activo y `orders.length !== displayed.length`: muestra "· N total sin filtros" en gris
+- Funciona con: Todos / Hoy / Ayer / rango personalizado / búsqueda / alertas
+
+### NO se rompió
+
+- Filtros Hoy/Ayer — sin cambios (ya funcionaban)
+- Filtro Todos — sin cambios
+- Filtro Recuperados — sin cambios
+- Botón "# Guía EFI" (assign-tracking) — intacto
+- Botón "Despachar local" (SD) — intacto
+- Filtros de alertas (duplicados, cobertura, zona, SD) — intactos
+- Paginación — intacta
+- EFI sync / tracking cron — no modificados
+- Shopify sync — no modificado
+- TypeScript: `npx tsc --noEmit` → sin errores ✅
+
+---
+
 ## MEJORA: Mobile-first UX para Mensajero Santo Domingo (2026-05-20)
 
 ### Objetivo

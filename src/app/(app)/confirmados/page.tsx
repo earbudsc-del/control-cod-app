@@ -98,7 +98,12 @@ export default function ConfirmadosPage() {
     if (filter === 'hoy')         return '/api/confirmados?filter=hoy'
     if (filter === 'ayer')        return '/api/confirmados?filter=ayer'
     if (filter === 'recuperados') return '/api/confirmados?filter=recuperados'
-    if (filter === 'rango' && from && to) return `/api/confirmados?from=${from}T04:00:00Z&to=${to}T03:59:59Z`
+    if (filter === 'rango' && from && to) {
+      // RD is UTC-4. End of `to` day in RD = start of (to+1) at 04:00 UTC minus 1 second.
+      const toNext = new Date(`${to}T00:00:00Z`)
+      toNext.setUTCDate(toNext.getUTCDate() + 1)
+      return `/api/confirmados?from=${from}T04:00:00Z&to=${toNext.toISOString().slice(0, 10)}T03:59:59Z`
+    }
     return '/api/confirmados'
   }
 
@@ -596,7 +601,29 @@ export default function ConfirmadosPage() {
         )}
 
         {!loading && displayed.length > 0 && (
-          <div className="overflow-x-auto">
+          <>
+            <div className="px-4 py-2 border-b border-green-100 bg-green-50/30 flex items-center gap-3 text-xs text-gray-500">
+              {totalPages > 1 ? (
+                <span>
+                  Mostrando{' '}
+                  <span className="font-semibold text-gray-700">
+                    {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, displayed.length)}
+                  </span>
+                  {' '}de{' '}
+                  <span className="font-semibold text-gray-700">{displayed.length}</span>
+                  {' '}pedidos
+                </span>
+              ) : (
+                <span>
+                  <span className="font-semibold text-gray-700">{displayed.length}</span>
+                  {' '}pedido{displayed.length !== 1 ? 's' : ''}
+                </span>
+              )}
+              {(alertFilter !== 'todos' || searchQuery.trim() !== '') && orders.length !== displayed.length && (
+                <span className="text-gray-400">· {orders.length} total sin filtros</span>
+              )}
+            </div>
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-green-50/60 border-b border-green-100">
                 <tr>
@@ -779,7 +806,8 @@ export default function ConfirmadosPage() {
                 })}
               </tbody>
             </table>
-          </div>
+            </div>
+          </>
         )}
 
         {!loading && totalPages > 1 && (
