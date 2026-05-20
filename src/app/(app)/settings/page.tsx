@@ -19,13 +19,14 @@ function fmtRelative(iso: string | null | undefined): string {
 }
 
 const ROLE_OPTIONS: { value: string; label: string }[] = [
-  { value: 'admin',              label: 'Administrador'          },
-  { value: 'ia_supervisor',      label: 'Supervisor IA'          },
-  { value: 'confirmation_agent', label: 'Agente de confirmación' },
-  { value: 'novelty_agent',      label: 'Agente de novedades'    },
-  { value: 'delivery_agent',     label: 'Agente de reparto'      },
-  { value: 'agent',              label: 'Agente general'         },
-  { value: 'viewer',             label: 'Solo lectura'           },
+  { value: 'admin',                          label: 'Administrador'             },
+  { value: 'ia_supervisor',                  label: 'Supervisor IA'             },
+  { value: 'confirmation_agent',             label: 'Agente de confirmación'    },
+  { value: 'novelty_agent',                  label: 'Agente de novedades'       },
+  { value: 'delivery_agent',                 label: 'Agente de reparto'         },
+  { value: 'santo_domingo_delivery_agent',   label: 'Mensajero Santo Domingo'   },
+  { value: 'agent',                          label: 'Agente general'            },
+  { value: 'viewer',                         label: 'Solo lectura'              },
 ]
 
 type Tab = 'users' | 'sla' | 'patterns'

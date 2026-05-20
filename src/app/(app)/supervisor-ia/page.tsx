@@ -684,9 +684,10 @@ const PAY_LEVEL_STYLE: Record<string, string> = {
 }
 
 const ROL_LABEL: Record<string, string> = {
-  confirmation_agent: 'Confirmación',
-  novelty_agent:      'Novedad',
-  delivery_agent:     'Reparto',
+  confirmation_agent:           'Confirmación',
+  novelty_agent:                'Novedad',
+  delivery_agent:               'Reparto',
+  santo_domingo_delivery_agent: 'Mensajero SD',
 }
 
 function agentMetrics(agent: AgentPaymentData) {

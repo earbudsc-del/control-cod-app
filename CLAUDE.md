@@ -4,6 +4,58 @@
 
 ---
 
+## FIX: Rol `santo_domingo_delivery_agent` en dropdown admin (2026-05-20)
+
+### Problema
+
+El rol `santo_domingo_delivery_agent` existía correctamente en código, TypeScript, auth, DB y profiles, pero **no aparecía en el selector de roles** del panel admin (`/settings`), impidiendo asignar o cambiar a ese rol desde la UI.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/settings/page.tsx` | Agrega `{ value: 'santo_domingo_delivery_agent', label: 'Mensajero Santo Domingo' }` en `ROLE_OPTIONS`, entre `delivery_agent` y `agent`. |
+| `src/app/(app)/supervisor-ia/page.tsx` | Agrega `santo_domingo_delivery_agent: 'Mensajero SD'` en `ROL_LABEL` (mapping para panel supervisor). |
+
+### Dropdown resultante en /settings
+
+| Label visible | Role key guardado |
+|---|---|
+| Administrador | `admin` |
+| Supervisor IA | `ia_supervisor` |
+| Agente de confirmación | `confirmation_agent` |
+| Agente de novedades | `novelty_agent` |
+| Agente de reparto | `delivery_agent` |
+| **Mensajero Santo Domingo** | **`santo_domingo_delivery_agent`** |
+| Agente general | `agent` |
+| Solo lectura | `viewer` |
+
+### Separación EFI vs SD local (invariante)
+
+- `delivery_agent` → Agente de reparto EFI/Gintracom. Usa guía externa. Tracking por cron EFI.
+- `santo_domingo_delivery_agent` → Mensajero Santo Domingo local. `tracking_number IS NULL`. Sin guía EFI. Flujo propio (`/sd-delivery`, `dispatch-local`, mark-delivered SD).
+
+Ambos roles coexisten. La separación es arquitectónica: un pedido EFI tiene `tracking_number IS NOT NULL`; un pedido SD local tiene `tracking_number IS NULL`. Mutuamente excluyentes.
+
+### NO se rompió
+
+- `delivery_agent` sigue existiendo con su label "Agente de reparto" (intacto)
+- Auth, RLS, perfiles existentes — sin cambios
+- Sidebar dinámico — sin cambios (ya tenía soporte `santo_domingo_delivery_agent`)
+- Flujo EFI normal — sin cambios
+- Flujo SD local — sin cambios
+
+### Cómo probar
+
+1. Ir a `/settings` → tab Usuarios
+2. Abrir el dropdown de rol de cualquier usuario
+3. Verificar que aparece "Mensajero Santo Domingo" entre "Agente de reparto" y "Agente general"
+4. Seleccionar "Mensajero Santo Domingo" para un usuario de prueba → confirmar → verificar que se guarda `santo_domingo_delivery_agent`
+5. Verificar que "Agente de reparto" (delivery_agent) sigue apareciendo sin cambios
+6. `npx tsc --noEmit` → sin errores ✅
+
+---
+
 ## FEATURE: Despacho local SD desde /confirmados (2026-05-19)
 
 ### Flujo implementado
