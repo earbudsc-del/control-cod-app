@@ -15,12 +15,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const { id: order_id } = await params
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
+    if (!user) {
+      console.error(`[actions] 401 no auth order_id=${order_id}`)
+      return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
+    }
 
     const { data: profile } = await supabase
       .from('profiles').select('id, role').eq('id', user.id).single()
 
     if (!profile || !isAgentOrAbove(profile.role)) {
+      console.error(`[actions] 403 user=${user.id} role=${profile?.role ?? 'null'}`)
       return NextResponse.json({ error: 'Sin permisos' }, { status: 403 })
     }
 
@@ -49,7 +53,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       .single()
 
     if (error) {
-      console.error(`[actions] DB insert failed — order=${order_id} action=${action_type} code=${error.code}:`, error.message)
+      console.error(`[actions] DB insert FAILED — order=${order_id} action=${action_type} code=${error.code} msg=${error.message}`)
       throw error
     }
 
@@ -67,7 +71,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
           order.tracking_number ?? null,
         )
 
-        // Log de sincronización — sin bloquear respuesta
         const logEntry = {
           order_id,
           shopify_order_id: order.shopify_order_id,

@@ -591,36 +591,52 @@ export default function SdDeliveryPage() {
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const [enRepartoRes, nuevosRes, confirmedRes, deliveredRes, perfRes]:
-        [OrdersResponse, OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData] = await Promise.all([
+      const [enRepartoRes, nuevosRes, confirmedRes, deliveredRes, perfRes, routeConfirmedRes]:
+        [OrdersResponse, OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData, { ids: string[], orders: Order[] }] =
+        await Promise.all([
           fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc').then(r => r.json()),
           fetch('/api/orders?confirmationStatus=pending&limit=300').then(r => r.json()),
           fetch('/api/orders?confirmationStatus=confirmed&limit=200').then(r => r.json()),
           fetch('/api/reparto/entregados').then(r => r.json()),
           fetch('/api/sd-delivery/performance').then(r => r.json()),
+          fetch('/api/sd-delivery/route-confirmed-ids').then(r => r.json()).catch(() => ({ ids: [], orders: [] })),
         ])
       const enRepartoData: Order[] = enRepartoRes.data ?? []
       const confirmedData: Order[]  = confirmedRes.data ?? []
+      const routeConfirmedIds       = new Set<string>(routeConfirmedRes.ids ?? [])
 
-      setAllEnReparto(enRepartoData)
+      // Supplement enRepartoData with route_confirmed orders that were paginated out.
+      // The API returns full order objects for IDs that are en_reparto but beyond limit=500.
+      const rcOrders = routeConfirmedRes.orders ?? []
+      const enRepartoBaseIds = new Set(enRepartoData.map((o: Order) => o.id))
+      const missingRCOrders = rcOrders.filter((o: Order) => !enRepartoBaseIds.has(o.id))
+      const supplementedEnReparto = [...enRepartoData, ...missingRCOrders]
+
+      setAllEnReparto(supplementedEnReparto)
       setAllNuevos(nuevosRes.data ?? [])
       setAllConfirmedPending(confirmedData)
       setDeliveredDb(Array.isArray(deliveredRes) ? deliveredRes : [])
       setPerf(perfRes)
       setLastRefresh(new Date())
 
-      const freshEnRepartoIds = new Set(enRepartoData.map((o: Order) => o.id))
+      const freshEnRepartoIds = new Set(supplementedEnReparto.map((o: Order) => o.id))
 
-      // Seed actionMap for SD orders confirmed by client but not yet dispatched.
-      // Ensures espera_despacho is visible after page refresh/deploy without relying on local cache.
       setActionMap(prev => {
         const next = { ...prev }
+        // Seed route_confirmed from DB so "En ruta" persists after page refresh.
+        // Only applied to orders currently en_reparto; does not override delivered/rescheduled.
+        for (const id of routeConfirmedIds) {
+          if (freshEnRepartoIds.has(id) && (!next[id] || next[id] === 'client_confirmed')) {
+            next[id] = 'route_confirmed'
+          }
+        }
+        // Seed client_confirmed for SD orders confirmed by client but not yet dispatched.
         for (const order of confirmedData) {
           if (
             isSantoDomingoOrder(order.city, order.province, order.customer_address) &&
             !order.tracking_number &&
             !freshEnRepartoIds.has(order.id) &&
-            !next[order.id]  // preserve local session actions (delivered, rescheduled, etc.)
+            !next[order.id]
           ) {
             next[order.id] = 'client_confirmed'
           }
@@ -754,19 +770,23 @@ export default function SdDeliveryPage() {
     [filteredPooled, actionMap],
   )
 
+  // Confirmados/Listos tab: only pre-dispatch orders (client confirmed, admin hasn't dispatched).
+  // confirmado_listo orders appear exclusively in Rutas so they visibly leave this tab after dispatch.
   const confirmadosList = useMemo(
-    () => filteredPooled.filter(({ order, pool }) => {
-      const s = computeDisplayState(pool, actionMap[order.id], false)
-      return s === 'espera_despacho' || s === 'confirmado_listo'
-    }),
+    () => filteredPooled.filter(({ order, pool }) =>
+      computeDisplayState(pool, actionMap[order.id], false) === 'espera_despacho',
+    ),
     [filteredPooled, actionMap],
   )
 
+  // Uses allPooled (not filteredPooled) so orders in-route are always visible regardless of
+  // their dispatch date. An order confirmed for route must stay in "En ruta" even if its
+  // status_since is from a previous day or the date filter was changed between sessions.
   const enRutaList = useMemo(
-    () => filteredPooled.filter(({ order, pool }) =>
+    () => allPooled.filter(({ order, pool }) =>
       computeDisplayState(pool, actionMap[order.id], false) === 'en_ruta',
     ),
-    [filteredPooled, actionMap],
+    [allPooled, actionMap],
   )
 
   const noRespondenList = useMemo(
@@ -930,7 +950,7 @@ export default function SdDeliveryPage() {
     }
   }
 
-  async function confirmRoute(orderId: string) {
+  async function confirmRoute(orderId: string, silent = false): Promise<boolean> {
     setLoadingRow(prev => ({ ...prev, [orderId]: true }))
     try {
       const res = await fetch(`/api/orders/${orderId}/actions`, {
@@ -941,12 +961,22 @@ export default function SdDeliveryPage() {
           notes:       'Mensajero confirmó salida a ruta',
         }),
       })
-      if (!res.ok) { showToast('Error al confirmar ruta', false); return }
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}))
+        console.error(`[confirmRoute] order=${orderId} status=${res.status}`, errBody)
+        if (!silent) showToast('Error al confirmar ruta', false)
+        return false
+      }
       setActionMap(prev => ({ ...prev, [orderId]: 'route_confirmed' }))
-      showToast('✓ Ruta confirmada — ya puedes marcar entregado', true)
-      fetch('/api/sd-delivery/performance').then(r => r.json()).then(setPerf).catch(() => null)
-    } catch {
-      showToast('Error de red', false)
+      if (!silent) {
+        showToast('✓ Ruta confirmada — ya puedes marcar entregado', true)
+        fetch('/api/sd-delivery/performance').then(r => r.json()).then(setPerf).catch(() => null)
+      }
+      return true
+    } catch (err) {
+      console.error(`[confirmRoute] network error order=${orderId}`, err)
+      if (!silent) showToast('Error de red', false)
+      return false
     } finally {
       setLoadingRow(prev => ({ ...prev, [orderId]: false }))
     }
@@ -991,10 +1021,27 @@ export default function SdDeliveryPage() {
   }
 
   async function confirmZoneRoute(zoneId: string, orderIds: string[]) {
-    for (const id of orderIds) {
-      if (!loadingRow[id]) await confirmRoute(id)
+    const pending = orderIds.filter(id => !loadingRow[id])
+
+    if (pending.length === 0) {
+      showToast(`Sin pedidos pendientes en ${zoneId}`, false)
+      return
     }
-    showToast(`✓ Ruta ${zoneId} iniciada`, true)
+
+    let ok = 0
+    for (const id of pending) {
+      const success = await confirmRoute(id, true)
+      if (success) ok++
+    }
+
+    if (ok === pending.length) {
+      showToast(`✓ Ruta ${zoneId} iniciada — ${ok} pedido${ok !== 1 ? 's' : ''}`, true)
+    } else if (ok > 0) {
+      showToast(`Ruta ${zoneId}: ${ok} de ${pending.length} iniciados — ${pending.length - ok} fallaron`, true)
+    } else {
+      showToast(`Error al iniciar ruta ${zoneId} — verifica migración 026 en Supabase`, false)
+    }
+    fetch('/api/sd-delivery/performance').then(r => r.json()).then(setPerf).catch(() => null)
   }
 
   async function saveNote(orderId: string, note: string) {
@@ -1316,12 +1363,13 @@ export default function SdDeliveryPage() {
               {zoneGroups.length === 0 ? (
                 <div className="px-5 py-10 text-center">
                   <Route className="w-8 h-8 text-gray-200 mx-auto mb-3" />
-                  <p className="text-gray-500 font-medium text-sm">No hay pedidos confirmados/listos por zona</p>
+                  <p className="text-gray-500 font-medium text-sm">No hay pedidos listos para despachar</p>
+                  <p className="text-gray-400 text-xs mt-1">El admin debe despachar pedidos desde /confirmados</p>
                   <button
                     onClick={() => setActiveTab('confirmados')}
                     className="text-teal-600 text-sm mt-2 hover:underline"
                   >
-                    Ver Confirmados/Listos →
+                    Ver esperando despacho →
                   </button>
                 </div>
               ) : (
@@ -1452,12 +1500,12 @@ export default function SdDeliveryPage() {
                                           RD${order.cod_amount.toLocaleString('es-DO')}
                                         </span>
                                       )}
-                                      <button
-                                        onClick={() => setActiveTab('confirmados')}
+                                      <Link
+                                        href={`/orders/${order.id}`}
                                         className="text-[10px] text-teal-600 hover:text-teal-800 font-medium whitespace-nowrap"
                                       >
                                         Ver →
-                                      </button>
+                                      </Link>
                                     </div>
                                   </div>
                                 </div>

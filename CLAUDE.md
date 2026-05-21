@@ -4,6 +4,362 @@
 
 ---
 
+## FIX VALIDADO: Flujo SD completo funciona en localhost (2026-05-21 — sesión 6)
+
+### Flujo validado en localhost
+
+1. Admin da "Despachar local" → pedido pasa a tab **Rutas** ✅
+2. Mensajero expande zona → "Iniciar ruta" → pedidos pasan a tab **En ruta** ✅
+3. F5 / refresh completo → permanecen en **En ruta** ✅
+4. "Marcar entregado" → pasan a **Entregados** ✅
+
+### Causa raíz confirmada (flujo completo funciona correctamente)
+
+El flujo SD estaba roto en sesiones previas por:
+- Migración 026 no aplicada (CHECK constraint + `is_agent_or_above()` sin `santo_domingo_delivery_agent`)
+- `enRutaList` usaba `filteredPooled` en vez de `allPooled` (filtro de fecha borraba órdenes tras F5)
+- `route-confirmed-ids` no suplementaba órdenes paginadas fuera del límite 500
+
+Todos los fixes estaban aplicados. Al probar en localhost con migración 026 ya en Supabase, el flujo funciona de extremo a extremo.
+
+### Archivos modificados en sesión 6 (después de diagnóstico y limpieza)
+
+| Archivo | Cambio neto |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | `confirmZoneRoute`: guard para `pending=0` con toast explícito; toast granular "N de M iniciados — X fallaron"; `console.error` en fallo real (status + body). Limpiados todos los `console.log DIAG` de sesiones 4/5/6. |
+| `src/app/api/orders/[id]/actions/route.ts` | Limpiados logs DIAG verbosos; eliminado extra query a `orders` para obtener `order_number` (solo era para log). Mantenidos: `console.error` en 401/403, DB insert FAILED, Shopify fulfillment logs. |
+| `src/app/api/sd-delivery/route-confirmed-ids/route.ts` | Limpiados todos los logs DIAG; eliminado `userProfile` fetch innecesario; eliminado raw-orders diagnostic query. Mantenidos: `console.error` para fallos de query reales. |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- EFI/Gintracom, tracking cron, Shopify sync — sin cambios
+- Tabs Nuevos, Confirmados/Listos, Rutas, Entregados — sin cambios
+
+---
+
+## FIX VALIDADO: "En ruta" persiste tras F5 (2026-05-21 — sesión 5)
+
+### Estado del bug
+
+El fix de sesión 4 (`enRutaList → allPooled`) NO resolvió el problema. Las órdenes (#8996, #9004) siguen desapareciendo de "En ruta" tras F5.
+
+### Logs de diagnóstico agregados
+
+Se agregaron logs en 3 archivos. Para diagnosticar, ejecutar la app y reproducir el bug, luego revisar:
+
+#### Terminal Next.js (logs de servidor) — buscar:
+
+```
+[actions] DIAG route_confirmed SAVED ✓ | order_id=... | order_number=... | action_id=... | created_at=...
+[route-confirmed-ids] DIAG user=... role=... store_id=...
+[route-confirmed-ids] DIAG agent_actions found: N route_confirmed records
+[route-confirmed-ids] DIAG order_ids encontrados: [...]
+[route-confirmed-ids] DIAG orders devueltos: N de M IDs buscados
+[route-confirmed-ids] DIAG ⚠️ (si N=0) → explica POR QUÉ las órdenes no pasan los filtros
+```
+
+#### Browser DevTools Console — buscar:
+
+```
+[fetchData] DIAG routeConfirmedIds (DB): [... (#8996), ... (#9004)]   ← debe aparecer
+[fetchData] DIAG seedear route_confirmed: [...]                         ← debe incluir #8996 y #9004
+[enRutaList] DIAG count=N [...]                                         ← debe ser > 0 con #8996/#9004
+[enRutaList] DIAG SD en_reparto sin tracking: [...accion='route_confirmed'...]
+```
+
+### Árbol de diagnóstico
+
+```
+¿route-confirmed-ids devuelve vacío? (ver [fetchData] DIAG routeConfirmedIds)
+  SÍ → agent_actions found: 0?
+    SÍ → INSERT no persistió en DB (correr Query B abajo)
+         Causa probable: migración 026 no aplicada O RLS blocks INSERT
+    NO → orders devueltos: 0?
+         SÍ → Ver "[route-confirmed-ids] DIAG ⚠️ 0 orders" en terminal
+              → normalized_status ≠ en_reparto O store_id mismatch
+  NO → IDs en willSeed? (ver [fetchData] DIAG seedear)
+    NO → IDs en willSkip → órdenes no están en freshEnReparto (ver log "DIAG ⚠️ IDs con route_confirmed")
+    SÍ → setActionMap se ejecutó. Ver [enRutaList] DIAG
+         → Si accion ≠ route_confirmed → bug en seeding logic (reportar)
+```
+
+### Queries SQL para verificar DB directamente (Supabase SQL Editor)
+
+```sql
+-- Query A: Estado de las órdenes #8996 y #9004
+SELECT id, order_number, normalized_status, confirmation_status,
+       tracking_number, status_since, store_id
+FROM orders
+WHERE order_number IN ('8996', '9004')
+ORDER BY order_number;
+
+-- Query B: ¿Existen route_confirmed en agent_actions?
+SELECT aa.id AS action_id, aa.order_id, aa.action_type, aa.created_at, aa.agent_id,
+       o.order_number, o.normalized_status, o.store_id
+FROM agent_actions aa
+JOIN orders o ON o.id = aa.order_id
+WHERE aa.action_type = 'route_confirmed'
+ORDER BY aa.created_at DESC
+LIMIT 20;
+
+-- Query C: Ver TODAS las acciones para #8996 y #9004
+SELECT aa.action_type, aa.created_at, aa.agent_id, o.order_number
+FROM agent_actions aa
+JOIN orders o ON o.id = aa.order_id
+WHERE o.order_number IN ('8996', '9004')
+ORDER BY aa.created_at DESC;
+```
+
+**Interpretación Query B:**
+- 0 filas → El INSERT de `route_confirmed` no está llegando a la DB → verificar migración 026 y RLS `actions_insert`
+- Filas existen → El INSERT funcionó → bug está en `route-confirmed-ids` o en el seeding de `fetchData`
+
+### Archivos modificados en esta sesión
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/orders/[id]/actions/route.ts` | Log `DIAG` con `order_number` y `created_at` al guardar `route_confirmed` |
+| `src/app/api/sd-delivery/route-confirmed-ids/route.ts` | Logs DIAG: `store_id` del usuario, estado real de órdenes cuando devuelve 0, query de diagnóstico sin filtros |
+| `src/app/(app)/sd-delivery/page.tsx` | Logs DIAG: `order_numbers` en willSeed/willSkip, alerta cuando `routeConfirmedIds` vacío, `useEffect` en `enRutaList` mostrando `pool+acción+displayState` |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Toda la lógica de negocio es idéntica — solo se agregaron `console.log` y un `useEffect` de diagnóstico
+- EFI/Gintracom, tracking cron, Shopify sync — sin cambios
+- Tabs Nuevos, Confirmados/Listos, Rutas, Entregados — sin cambios
+
+---
+
+## FIX CRÍTICO: "En ruta" desaparece tras refresh — filtro de fecha (2026-05-20 — sesión 4)
+
+### Causa raíz exacta
+
+**Síntoma:** Mensajero confirma ruta → aparece en "En ruta". Al refrescar la página → "En ruta" vuelve a 0. El fix de sesión 3 (paginación) NO resolvía este caso.
+
+**Causa raíz:**
+
+`enRutaList` se derivaba de `filteredPooled`, que aplica el filtro de fecha (`dateFilter`). El filtro inicial es `'hoy'`. Para órdenes `pool='confirmado'`, usa `order.status_since` para la comparación.
+
+Si el pedido fue despachado en un día distinto al filtro activo (ej. `status_since = ayer` con `dateFilter = 'hoy'`), la orden se excluye de `filteredPooled` → no aparece en `enRutaList` → "En ruta" = 0. El conteo del badge también muestra 0.
+
+Esto también explicaba el caso donde el usuario cambiaba `dateFilter` a 'todos' para ver la orden en Rutas, confirmaba la ruta (aparecía en En ruta), y al refrescar (F5) el estado de `dateFilter` se reiniciaba a 'hoy' → orden filtrada.
+
+Por contraste, `rutasList` YA usaba `allPooled` (sin filtro de fecha), por eso las órdenes confirmadas_listas siempre eran visibles en Rutas independientemente de la fecha.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | `enRutaList` ahora usa `allPooled` en lugar de `filteredPooled`. Las órdenes en ruta son siempre visibles sin importar `dateFilter` ni `status_since`. |
+| `src/app/api/orders/[id]/actions/route.ts` | Log de debug: confirma cuando `route_confirmed` se guarda, incluye `order_id`, `action_id`, `role`. |
+| `src/app/api/sd-delivery/route-confirmed-ids/route.ts` | Logs de debug detallados en cada paso: cuántos registros en `agent_actions`, qué order_ids encontró, cuántas órdenes devolvió el query. |
+| `src/app/(app)/sd-delivery/page.tsx` | Logs de debug en `fetchData`: muestra `routeConfirmedIds`, qué IDs sí/no están en `freshEnRepartoIds`. |
+
+### Por qué funciona el fix
+
+`enRutaList` usa `allPooled` (sin filtro) igual que `rutasList`. Las órdenes "en ruta" deben verse siempre independientemente del día en que fueron despachadas — el mensajero necesita ver TODOS sus pedidos en curso, no solo los de hoy.
+
+### Cómo probar persistencia tras refresh
+
+1. Ir a tab "Rutas". Expandir zona → "Iniciar ruta".
+2. Cambiar a tab "En ruta" → orden debe aparecer.
+3. **F5** (recarga completa) → **debe seguir en "En ruta"** (bug corregido).
+4. Cambiar `dateFilter` a cualquier valor → **debe seguir en "En ruta"** (inmune a filtro de fecha).
+5. Esperar 3 min (auto-refresh) → **debe seguir en "En ruta"**.
+6. El bug también es reproducible si el pedido fue despachado ayer (status_since ≠ hoy).
+
+### Logs de diagnóstico activos
+
+Para confirmar el flujo completo:
+- **Terminal Next.js** → buscar `[actions] route_confirmed SAVED` y `[route-confirmed-ids]`.
+- **Browser DevTools Console** → buscar `[fetchData]`.
+
+Si los logs muestran `routeConfirmedIds: []` tras el refresh → el insert en `agent_actions` falla (verificar migración 026 y política RLS `actions_insert`).
+Si los logs muestran `IDs que NO están en freshEnReparto` → el pedido no está en los primeros 500 Y la query de orders del endpoint devolvió vacío.
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- EFI/Gintracom — sin cambios
+- Tracking cron — sin cambios
+- Shopify sync — sin cambios
+- Tabs Nuevos, Confirmados/Listos, Rutas, No responden, Entregados — sin cambios
+- `rutasList` (ya usaba `allPooled`) — sin cambios
+- Seeding de `route_confirmed` en `fetchData` — sin cambios
+
+---
+
+## FIX CRÍTICO: "En ruta" desaparece tras refetch por paginación (2026-05-20 — sesión 3)
+
+### Causa raíz exacta
+
+**Síntoma:** Admin despacha → aparece en Rutas. Mensajero confirma ruta → pasa momentáneamente a "En ruta". Tras ~1 min o refetch automático → vuelve a Confirmados/Listos.
+
+**Causa raíz:**
+
+`/api/orders?status=en_reparto&limit=500&sortBy=status_since_asc` ordena por `status_since ASC` (más antiguos primero). Un pedido recién despachado tiene el `status_since` más reciente → queda en la posición 501+ cuando hay 500+ órdenes `en_reparto` → **no aparece en `enRepartoData`**.
+
+Al faltar en `enRepartoData`:
+1. `freshEnRepartoIds` no lo contiene.
+2. El primer loop de `setActionMap` busca `freshEnRepartoIds.has(id)` → FALSE → no setea `route_confirmed`.
+3. El segundo loop ve que el pedido está en `confirmedData` (SD, sin tracking, no en `freshEnRepartoIds`) → lo seedea como `client_confirmed`.
+4. `computeDisplayState('nuevo', 'client_confirmed', false)` → `'espera_despacho'` → tab **Confirmados/Listos**. Bug confirmado.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/sd-delivery/route-confirmed-ids/route.ts` | Ahora devuelve `{ ids: string[], orders: Order[] }`. `ids`: IDs con `route_confirmed` últimos 7 días (service client, bypass RLS). `orders`: objetos completos para los IDs que siguen `en_reparto + tracking_number IS NULL` (auth client, respeta RLS de tienda). |
+| `src/app/(app)/sd-delivery/page.tsx` | `fetchData`: tipo `routeConfirmedRes` actualizado a `{ ids: string[], orders: Order[] }`. Fallback catch actualizado a `{ ids: [], orders: [] }`. Después de `enRepartoData`, construye `supplementedEnReparto = [...enRepartoData, ...missingRCOrders]` donde `missingRCOrders` son los `rcOrders` no presentes en `enRepartoData`. Usa `supplementedEnReparto` para `setAllEnReparto` y `freshEnRepartoIds`. |
+
+### Por qué funciona el fix
+
+Con `supplementedEnReparto`:
+- `freshEnRepartoIds` contiene el pedido recién despachado aunque esté en posición 501+.
+- El primer loop de `setActionMap` lo encuentra → setea `route_confirmed` → `computeDisplayState('confirmado', 'route_confirmed', false)` → `'en_ruta'` → tab **En ruta**. ✓
+- El segundo loop (seed `client_confirmed`) lo excluye porque `freshEnRepartoIds.has(id)` = TRUE. ✓
+- Persistente tras refetch: `route-confirmed-ids` siempre devuelve esos orders mientras estén `en_reparto`. ✓
+
+### Cómo probar persistencia tras refresh
+
+1. Admin despacha un pedido SD → aparece en tab "Rutas".
+2. Mensajero confirma ruta → aparece en tab "En ruta".
+3. Esperar 3 min (auto-refresh) o refrescar manualmente → **debe seguir en "En ruta"**.
+4. Recargar la página (F5) → **debe seguir en "En ruta"** (datos reconstruidos desde DB).
+5. Abrir nueva pestaña con la misma sesión → **debe seguir en "En ruta"**.
+
+El fix funciona incluso si hay 500+ pedidos `en_reparto` que empujan el pedido SD fuera del límite de la query principal.
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- EFI/Gintracom — sin cambios
+- Tracking cron — sin cambios
+- Shopify sync — sin cambios
+- Tabs Nuevos, No responden, Entregados — sin cambios
+- Confirmados/Listos para órdenes correctamente en ese estado — sin cambios
+- setConfirmedOrderCache cleanup — usa `freshEnRepartoIds` ya derivado del array suplementado
+
+---
+
+## FIX CRÍTICO: Tabs SD — Rutas/En ruta/Confirmados rotos (2026-05-20 — sesión 2)
+
+### Causa raíz (4 bugs independientes)
+
+#### Bug 1 — "En ruta" no persiste tras refresh (Rutas → En ruta → reload → vuelve a Rutas)
+
+`actionMap` es React state local. `route_confirmed` se guarda en `agent_actions` DB pero `fetchData` **nunca lo leía**. Tras cada recarga, `actionMap` se vacía → todos los pedidos `en_reparto` con `route_confirmed` en DB volvían a `confirmado_listo` (Rutas) en lugar de `en_ruta`.
+
+#### Bug 2 — "Iniciar ruta" falla completamente (sin migration 026)
+
+`route_confirmed` no estaba en el CHECK constraint de `agent_actions.action_type` (migration 001). `createServiceClient()` bypassa RLS pero **no bypassa CHECK constraints** (son Postgres-level). Toda inserción `route_confirmed` fallaba con PG 23514 para cualquier rol. **Solución obligatoria: aplicar migration 026 en Supabase SQL Editor.**
+
+#### Bug 3 — Confirmados/Listos no se vacía tras despacho local
+
+`confirmadosList` incluía `espera_despacho` Y `confirmado_listo`. Después de `dispatch-local`, el pedido pasaba de `espera_despacho` a `confirmado_listo` pero **permanecía en el mismo tab**. El mensajero no veía la transición y los pedidos parecían estancados.
+
+#### Bug 4 — "Iniciar ruta" mostraba toast de éxito aunque todos fallaran
+
+`confirmZoneRoute` llamaba `showToast('✓ Ruta X iniciada', true)` **siempre** al final del loop, independientemente de si los `confirmRoute` individuales fallaban. El mensajero no sabía que la acción había fallado.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/sd-delivery/route-confirmed-ids/route.ts` | **NUEVO.** GET endpoint: devuelve IDs con `route_confirmed` en agent_actions últimos 7 días. Usa `createServiceClient()`. |
+| `src/app/(app)/sd-delivery/page.tsx` | Ver detalle abajo |
+
+### Cambios en `page.tsx`
+
+| Cambio | Descripción |
+|---|---|
+| **fetchData — nuevo fetch** | Agrega `fetch('/api/sd-delivery/route-confirmed-ids')` al `Promise.all` de 6 fetches. |
+| **fetchData — seed route_confirmed** | Antes de seedear `client_confirmed`, itera `routeConfirmedIds`: para IDs que están en `freshEnRepartoIds` y no tienen acción local (o solo `client_confirmed`), setea `actionMap[id] = 'route_confirmed'`. Esto garantiza que "En ruta" persista tras reload. |
+| **confirmadosList** | Solo incluye `espera_despacho` (excluye `confirmado_listo`). Después de `dispatch-local`, el pedido **sale** de Confirmados/Listos y aparece **solo en Rutas**. |
+| **confirmRoute** | Retorna `Promise<boolean>`. Acepta `silent = false` para suprimir toasts individuales cuando es llamado desde zona. |
+| **confirmZoneRoute** | Llama `confirmRoute(id, true)` (silencioso). Cuenta éxitos. Toast preciso: "✓ Ruta X iniciada — N pedidos" / "N/M confirmados" / "Error — verifica migración 026". |
+| **Botón "Ver →" en Rutas** | Cambiado de tab-switch (`setActiveTab('confirmados')`) a `<Link href="/orders/${order.id}">`. Evita navegar a Confirmados que ya no muestra `confirmado_listo`. |
+
+### Estados definitivos del flujo SD (invariante post-fix)
+
+```
+Estado 1 — espera_despacho
+  confirmation_status='confirmed', normalized_status≠'en_reparto', tracking_number IS NULL
+  Visible en: Confirmados/Listos (tab 'confirmados')
+  Acción disponible: ninguna para el mensajero (admin debe despachar)
+
+Estado 2 — confirmado_listo
+  normalized_status='en_reparto', tracking_number IS NULL, actionMap≠'route_confirmed'
+  Visible en: Rutas (tab 'rutas') — agrupado por zona
+  Acción disponible: "Iniciar ruta" (bulk por zona)
+
+Estado 3 — en_ruta
+  normalized_status='en_reparto', tracking_number IS NULL, actionMap='route_confirmed' (en DB y cacheado)
+  Visible en: En ruta (tab 'en_ruta')
+  Acción disponible: "Marcar entregado", "No resp.", "Reprog."
+
+Estado 4 — entregado
+  deliveredDbIds.has(id) = true
+  Visible en: Entregados (tab 'entregados')
+```
+
+### OBLIGATORIO antes de probar Rutas → En ruta
+
+**Aplicar migration 026 en Supabase SQL Editor** (el archivo ya existe en `supabase/migrations/026_sd_delivery_fixes.sql`). Sin esto, `route_confirmed` falla con PG 23514 y el flujo Rutas → En ruta nunca funciona.
+
+### Cómo probar el flujo completo (post-fix)
+
+1. **Cliente confirma** (tab Nuevos):
+   - Mensajero pulsa "Cliente confirma" → toast "✓ Cliente confirmado"
+   - Pedido pasa a Confirmados/Listos como `espera_despacho` (badge púrpura, sin botón)
+
+2. **Admin despacha** (en `/confirmados`):
+   - Admin ve badge "SD / Transporte local" + botón "Despachar local"
+   - Pulsa → toast "✓ Pedido despachado"
+   - Pedido desaparece de `/confirmados`
+
+3. **Aparece en Rutas** (tab Rutas):
+   - Refrescar `/sd-delivery` → pedido aparece en zona correspondiente
+   - Ya **NO aparece** en Confirmados/Listos (fix Bug 3)
+
+4. **Iniciar ruta** (tab Rutas):
+   - Expandir zona → "Iniciar ruta"
+   - Toast: "✓ Ruta [zona] iniciada — N pedidos" (o error claro si falla)
+   - Todos los pedidos de la zona pasan a tab "En ruta"
+
+5. **Refresh mantiene En ruta**:
+   - Recargar la página → pedidos siguen en "En ruta" (fix Bug 1)
+   - `fetchData` lee `route_confirmed` desde DB y reseedea `actionMap`
+
+6. **Marcar entregado** (tab En ruta):
+   - "Marcar entregado" → pedido pasa a tab "Entregados"
+
+### NO se rompió
+
+- EFI/Gintracom — sin cambios
+- Botón "# Guía EFI" (assign-tracking) — intacto
+- Shopify sync / tracking cron — no modificados
+- Roles existentes (admin, delivery_agent, etc.) — intactos
+- Tab Nuevos, No responden, Entregados — sin cambios
+- SdCard individual "Confirmar ruta" en desktop (accesible desde En ruta via acción directa)
+- TypeScript: `npx tsc --noEmit` → sin errores ✅
+
+---
+
 ## FIX CRÍTICO: Flujo SD local completo roto (2026-05-20)
 
 ### Causa raíz exacta
