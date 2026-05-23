@@ -4,6 +4,69 @@
 
 ---
 
+## FIX: "No resp." no persistía tras F5 — filteredPooled → allPooled (2026-05-23 — sesión 9)
+
+### Causa raíz exacta
+
+`noRespondenList` usaba `filteredPooled` (filtrado por Hoy/Ayer/Todos), mientras que `enRutaList` y `reprogramadosList` ya usaban `allPooled` (inmunes al filtro de fecha).
+
+`dateFilter` default = `'hoy'`. Si una orden tenía `status_since` de ayer o de días anteriores, quedaba excluida de `filteredPooled` → `noRespondenList` vacía tras F5, aunque `actionMap` tuviera `'no_answer'` correctamente sembrado desde `sd-actions`.
+
+**El DB write y el seed desde `sd-actions` eran correctos.** El bug era exclusivamente en el memo de la lista.
+
+### Fix aplicado
+
+```typescript
+// ANTES (buggy):
+const noRespondenList = useMemo(
+  () => filteredPooled.filter(({ order, pool }) =>
+    computeDisplayState(pool, actionMap[order.id], false) === 'no_responde',
+  ),
+  [filteredPooled, actionMap],
+)
+
+// DESPUÉS (correcto):
+// Uses allPooled (not filteredPooled) so no-response orders persist regardless of date filter,
+// matching the same immunity-from-date-filter guarantee as enRutaList and reprogramadosList.
+const noRespondenList = useMemo(
+  () => allPooled.filter(({ order, pool }) =>
+    computeDisplayState(pool, actionMap[order.id], false) === 'no_responde',
+  ),
+  [allPooled, actionMap],
+)
+```
+
+### Invariante de listas por tab (referencia definitiva)
+
+| Lista | Fuente | Razón |
+|---|---|---|
+| `nuevosList` | `filteredPooled` | Órdenes nuevas — filtro de fecha relevante |
+| `confirmadosList` | `filteredPooled` | Órdenes confirmadas por cliente — filtro de fecha relevante |
+| `enRutaList` | `allPooled` | Órdenes en ruta siempre visibles sin importar día |
+| `noRespondenList` | `allPooled` | No resp. siempre visibles (misma garantía que En ruta) |
+| `reprogramadosList` | `allPooled` | Reprogramados siempre visibles |
+| `rutasList` | `allPooled` | Rutas activas siempre visibles |
+
+### action_type final usado para "No resp."
+
+| Botón | `action_type` en DB | `contact_result` en DB | `actionKey` local |
+|---|---|---|---|
+| No resp. | `contacted` | `no_answer` | `no_answer` |
+
+`postAction(orderId, 'no_answer', 'contacted', 'no_answer')` — los 4 parámetros son correctos.
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | `noRespondenList`: `filteredPooled` → `allPooled` (1 línea) |
+
+---
+
 ## FEATURE: Tab Reprogramados + Timestamps estilo Shopify (2026-05-22 — sesión 8)
 
 ### Cambios implementados

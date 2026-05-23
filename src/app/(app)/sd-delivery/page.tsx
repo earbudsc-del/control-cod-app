@@ -867,11 +867,13 @@ export default function SdDeliveryPage() {
     [allPooled, actionMap],
   )
 
+  // Uses allPooled (not filteredPooled) so no-response orders persist regardless of date filter,
+  // matching the same immunity-from-date-filter guarantee as enRutaList and reprogramadosList.
   const noRespondenList = useMemo(
-    () => filteredPooled.filter(({ order, pool }) =>
+    () => allPooled.filter(({ order, pool }) =>
       computeDisplayState(pool, actionMap[order.id], false) === 'no_responde',
     ),
-    [filteredPooled, actionMap],
+    [allPooled, actionMap],
   )
 
   // Uses allPooled (not filteredPooled) so rescheduled orders persist regardless of date filter,
