@@ -43,6 +43,7 @@ export type ActionType =
   | 'delivered'
   | 'route_confirmed'
   | 'customer_declined'
+  | 'local_dispatched'
 export type InvalidReason =
   | 'courier_no_call'
   | 'courier_no_show'
@@ -337,6 +338,7 @@ export const ACTION_LABELS: Record<ActionType, string> = {
   delivered:          'Confirmó entrega',
   route_confirmed:    'Confirmó salida a ruta',
   customer_declined:  'Cliente no desea el pedido',
+  local_dispatched:   'Despachado localmente por mensajero SD',
 }
 
 export type TaskType = 'follow_up' | 'novedad' | 'confirmation' | 'recovery'

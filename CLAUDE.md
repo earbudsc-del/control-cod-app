@@ -4,6 +4,149 @@
 
 ---
 
+## FEATURE: Mensajero SD puede despachar localmente sin admin (2026-05-23 — sesión 11)
+
+### Problema resuelto
+
+El mensajero `santo_domingo_delivery_agent` veía pedidos confirmados/listos en `/sd-delivery` pero no podía despacharlos — necesitaba que el admin lo hiciera desde `/confirmados`. Esto creaba fricción operativa innecesaria.
+
+### Nuevo flujo SD local
+
+```
+Cliente confirma
+→ pedido queda en Confirmados/Listos (espera_despacho)
+→ mensajero SD pulsa "Despachar local" en /sd-delivery
+→ pedido pasa a Rutas (confirmado_listo)
+→ mensajero pulsa "Iniciar ruta"
+→ En ruta
+→ Entregado / No resp. / Reprogramado / No desea
+```
+
+El admin puede seguir despachando desde `/confirmados` — flujo sin cambios.
+
+### Cambios implementados
+
+#### 1. Nuevo `action_type: 'local_dispatched'`
+
+Registra en `agent_actions` quién despachó y cuándo:
+- Admin desde `/confirmados` → `notes: 'Despachado por admin — transporte SD sin guía EFI'`
+- Mensajero desde `/sd-delivery` → `notes: 'Despachado por mensajero SD — transporte local sin guía EFI'`
+
+Antes el endpoint usaba `status_updated` (genérico). Ahora usa `local_dispatched` (específico y auditable).
+
+#### 2. Endpoint `dispatch-local` — permisos extendidos
+
+```typescript
+// ANTES:
+if (profile?.role !== 'admin') → 403
+
+// DESPUÉS:
+const canDispatch = profile?.role === 'admin' || profile?.role === 'santo_domingo_delivery_agent'
+if (!canDispatch) → 403
+```
+
+Validaciones de seguridad sin cambios:
+- `order.store_id !== profile.store_id` → 403 (solo órdenes de la misma tienda)
+- `confirmation_status !== 'confirmed'` → 422
+- `tracking_number !== null` → 422 (no aplica a pedidos EFI)
+- `normalized_status === 'en_reparto'` → 409 (ya despachado)
+
+#### 3. Botón "Despachar local" en `/sd-delivery`
+
+Visible en el tab **Confirmados/Listos** para órdenes en `espera_despacho`:
+- **Móvil (SdCard):** botón `bg-indigo-600` ocupando ancho completo, reemplaza el texto estático anterior
+- **Desktop (tabla):** botón `bg-indigo-600` en columna Acciones
+
+Al pulsarlo:
+1. `fetch POST /api/orders/:id/dispatch-local`
+2. Toast de confirmación
+3. `fetchData()` completo para refrescar desde DB → pedido aparece en Rutas
+
+#### 4. Migración requerida
+
+**`028_local_dispatched_action_type.sql`** — debe aplicarse en Supabase antes de usar el botón:
+```sql
+ALTER TABLE agent_actions DROP CONSTRAINT IF EXISTS agent_actions_action_type_check;
+ALTER TABLE agent_actions ADD CONSTRAINT agent_actions_action_type_check
+  CHECK (action_type IN (
+    'contacted','confirmed','rescheduled','recovered','courier_claim',
+    'note_added','status_updated','returned','delivered',
+    'route_confirmed','customer_declined','local_dispatched'
+  ));
+```
+
+### Action types SD local — tabla actualizada (referencia definitiva)
+
+| action_type | Quién lo registra | Significado |
+|---|---|---|
+| `contacted` | mensajero | Contactó al cliente |
+| `rescheduled` | mensajero | Reprogramado |
+| `route_confirmed` | mensajero | Salió a ruta (Iniciar ruta) |
+| `customer_declined` | mensajero | No desea |
+| `delivered` (via mark-delivered) | mensajero | Entregado |
+| `local_dispatched` | **admin O mensajero** | Despachado localmente — `normalized_status → en_reparto` |
+
+### Auditoría para el admin
+
+El admin puede ver quién despachó en Supabase:
+```sql
+SELECT aa.created_at, p.full_name, p.role, aa.notes, o.order_number
+FROM agent_actions aa
+JOIN profiles p ON p.id = aa.agent_id
+JOIN orders o ON o.id = aa.order_id
+WHERE aa.action_type = 'local_dispatched'
+ORDER BY aa.created_at DESC
+LIMIT 20;
+```
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `supabase/migrations/028_local_dispatched_action_type.sql` | NUEVO — agrega `local_dispatched` al CHECK constraint |
+| `src/types/index.ts` | Agrega `local_dispatched` a `ActionType` y `ACTION_LABELS` |
+| `src/app/api/orders/[id]/actions/route.ts` | Agrega `local_dispatched` a `VALID_TYPES` |
+| `src/app/api/orders/[id]/dispatch-local/route.ts` | Permite `santo_domingo_delivery_agent`; usa `local_dispatched`; nota distingue admin vs mensajero |
+| `src/app/(app)/sd-delivery/page.tsx` | `dispatchLocal` función; prop `onDispatchLocal` en SdCard; botón en `espera_despacho` (móvil + desktop); texto Rutas vacío actualizado |
+
+### Cómo probar
+
+**Con usuario `santo_domingo_delivery_agent`:**
+1. Aplicar migración 028 en Supabase SQL Editor
+2. Entrar a `/sd-delivery`
+3. Tab "Confirmados/Listos" → aparece botón **"Despachar local"** (indigo) en cada card
+4. Pulsarlo → toast "✓ Despachado — pedido pasa a Rutas" → la página refresca
+5. Tab "Rutas" → pedido aparece agrupado por zona
+6. "Iniciar ruta" → Tab "En ruta"
+7. Flujo normal: Entregado / No resp. / Reprog. / No desea
+
+**Con admin:**
+- `/confirmados` → botón "Despachar local" funciona igual que antes
+- `/sd-delivery` → también puede ver y usar el botón (permisos incluyen admin)
+
+**Auditoría en Supabase:**
+```sql
+SELECT action_type, notes, created_at
+FROM agent_actions
+WHERE action_type = 'local_dispatched'
+ORDER BY created_at DESC LIMIT 5;
+```
+Debe mostrar la nota correcta (admin vs mensajero).
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Botón "Despachar local" del admin en `/confirmados` — sin cambios
+- Tab Rutas, Iniciar ruta, En ruta, Entregados — sin cambios
+- No resp., Reprogramados, No desea — sin cambios
+- EFI/Gintracom, tracking cron, Shopify sync — sin cambios
+- Pedidos con `tracking_number` (EFI) rechazados por el endpoint — sin cambios
+
+---
+
 ## FIX: Conteos falsos en /devoluciones — updated_at → status_since (2026-05-23 — sesión 10)
 
 ### Síntoma

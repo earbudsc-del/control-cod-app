@@ -324,11 +324,12 @@ interface SdCardProps {
   onReprogramar:     () => void
   onNota:            () => void
   onDeclinado:       () => void
+  onDispatchLocal:   () => void
 }
 
 function SdCard({
   order, pool, accion, busy, isDelivered,
-  onWA, onLlamar, onConfirmarRuta, onClienteConfirma, onNoAnswer, onEntregado, onReprogramar, onNota, onDeclinado,
+  onWA, onLlamar, onConfirmarRuta, onClienteConfirma, onNoAnswer, onEntregado, onReprogramar, onNota, onDeclinado, onDispatchLocal,
 }: SdCardProps) {
   const nombre  = order.customer_name ?? ''
   const waMsg   = pool === 'nuevo'
@@ -511,10 +512,13 @@ function SdCard({
           </div>
 
         ) : ds === 'espera_despacho' ? (
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold
-                           px-3 py-1.5 rounded-full bg-purple-100 text-purple-700">
-            <UserCheck className="w-3.5 h-3.5" />Confirmado — el admin asignará a ruta
-          </span>
+          <button
+            onClick={onDispatchLocal}
+            className="w-full flex items-center justify-center gap-2
+                       bg-indigo-600 active:bg-indigo-700 text-white
+                       text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
+            <Truck className="w-5 h-5" />Despachar local
+          </button>
 
         ) : ds === 'confirmado_listo' ? (
           <div className="space-y-2">
@@ -1150,6 +1154,24 @@ export default function SdDeliveryPage() {
     showToast('Pedido marcado como "No desea" — retirado del flujo activo', true)
   }
 
+  async function dispatchLocal(orderId: string) {
+    setLoadingRow(prev => ({ ...prev, [orderId]: true }))
+    try {
+      const res = await fetch(`/api/orders/${orderId}/dispatch-local`, { method: 'POST' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        showToast(body.error ?? 'Error al despachar', false)
+        return
+      }
+      showToast('✓ Despachado — pedido pasa a Rutas', true)
+      await fetchData()
+    } catch {
+      showToast('Error de red al despachar', false)
+    } finally {
+      setLoadingRow(prev => ({ ...prev, [orderId]: false }))
+    }
+  }
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const TAB_META: { tab: Tab; label: string; shortLabel: string }[] = [
@@ -1463,7 +1485,7 @@ export default function SdDeliveryPage() {
                 <div className="px-5 py-10 text-center">
                   <Route className="w-8 h-8 text-gray-200 mx-auto mb-3" />
                   <p className="text-gray-500 font-medium text-sm">No hay pedidos listos para despachar</p>
-                  <p className="text-gray-400 text-xs mt-1">El admin debe despachar pedidos desde /confirmados</p>
+                  <p className="text-gray-400 text-xs mt-1">Despacha pedidos desde el tab "Confirmados/Listos"</p>
                   <button
                     onClick={() => setActiveTab('confirmados')}
                     className="text-teal-600 text-sm mt-2 hover:underline"
@@ -1644,6 +1666,7 @@ export default function SdDeliveryPage() {
                     onReprogramar={() => setReModal({ orderId: order.id, name: order.customer_name ?? '' })}
                     onNota={() => setNoteModal({ orderId: order.id, name: order.customer_name ?? '' })}
                     onDeclinado={() => saveCustomerDeclined(order.id)}
+                    onDispatchLocal={() => dispatchLocal(order.id)}
                   />
                 )
               })}
@@ -1670,6 +1693,7 @@ export default function SdDeliveryPage() {
                   onReprogramar={() => {}}
                   onNota={() => {}}
                   onDeclinado={() => {}}
+                  onDispatchLocal={() => {}}
                 />
               ))}
             </div>
@@ -1832,10 +1856,11 @@ export default function SdDeliveryPage() {
                             </button>
                           </div>
                         ) : ds === 'espera_despacho' ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold
-                                           px-2 py-1 rounded-full bg-purple-100 text-purple-700">
-                            <UserCheck className="w-3 h-3" />Esperando despacho
-                          </span>
+                          <button onClick={() => dispatchLocal(order.id)}
+                            className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700
+                                       text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
+                            <Truck className="w-3 h-3" />Despachar local
+                          </button>
                         ) : ds === 'confirmado_listo' ? (
                           <div className="flex flex-wrap gap-1">
                             <button onClick={() => confirmRoute(order.id)}

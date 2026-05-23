@@ -16,8 +16,9 @@ export async function POST(
     const { data: profile } = await authClient
       .from('profiles').select('id, role, store_id').eq('id', user.id).single()
 
-    if (profile?.role !== 'admin') {
-      return NextResponse.json({ error: 'Solo admins pueden despachar localmente' }, { status: 403 })
+    const canDispatch = profile?.role === 'admin' || profile?.role === 'santo_domingo_delivery_agent'
+    if (!canDispatch) {
+      return NextResponse.json({ error: 'Sin permisos para despachar localmente' }, { status: 403 })
     }
 
     // Service client para las operaciones DB (evita bloqueos RLS en edge cases)
@@ -66,8 +67,10 @@ export async function POST(
         .insert({
           order_id:    id,
           agent_id:    profile.id,
-          action_type: 'status_updated',
-          notes:       'Despachado localmente — transporte SD sin guía EFI',
+          action_type: 'local_dispatched',
+          notes:       profile.role === 'admin'
+            ? 'Despachado por admin — transporte SD sin guía EFI'
+            : 'Despachado por mensajero SD — transporte local sin guía EFI',
         }),
     ])
 
@@ -80,7 +83,7 @@ export async function POST(
       return NextResponse.json({ error: 'No se pudo actualizar el pedido' }, { status: 500 })
     }
 
-    console.log(`[dispatch-local] order=${id} by=${profile.id} → en_reparto`)
+    console.log(`[dispatch-local] order=${id} by=${profile.id} role=${profile.role} → en_reparto`)
 
     return NextResponse.json({ success: true, dispatched_at: now })
   } catch (err) {
