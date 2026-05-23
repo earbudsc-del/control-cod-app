@@ -465,10 +465,12 @@ export async function GET(request: NextRequest) {
       .eq('normalized_status', 'returned').not('tracking_number', 'is', null),
     supabase.from('orders').select('*', { count: 'exact', head: true })
       .eq('normalized_status', 'returned').not('tracking_number', 'is', null)
-      .gte('updated_at', today.start).lte('updated_at', today.end),
+      .not('status_since', 'is', null)
+      .gte('status_since', today.start).lte('status_since', today.end),
     supabase.from('orders').select('*', { count: 'exact', head: true })
       .eq('normalized_status', 'returned').not('tracking_number', 'is', null)
-      .gte('updated_at', yesterday.start).lte('updated_at', yesterday.end),
+      .not('status_since', 'is', null)
+      .gte('status_since', yesterday.start).lte('status_since', yesterday.end),
     supabase.from('orders').select('*', { count: 'exact', head: true })
       .eq('normalized_status', 'returned').gte('delivery_attempts', 3),
     supabase.from('orders').select('*', { count: 'exact', head: true })
@@ -500,9 +502,9 @@ export async function GET(request: NextRequest) {
   } else if (filter === '3mas-intentos') {
     query = query.gte('delivery_attempts', 3)
   } else if (filter === 'devueltas-hoy') {
-    query = query.gte('updated_at', today.start).lte('updated_at', today.end)
+    query = query.not('status_since', 'is', null).gte('status_since', today.start).lte('status_since', today.end)
   } else if (filter === 'devueltas-ayer') {
-    query = query.gte('updated_at', yesterday.start).lte('updated_at', yesterday.end)
+    query = query.not('status_since', 'is', null).gte('status_since', yesterday.start).lte('status_since', yesterday.end)
   } else if (filter === 'sla-vencido') {
     query = query.lt('status_since', cutoff72h)
   } else if (filter === 'reclamadas') {

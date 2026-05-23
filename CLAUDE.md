@@ -4,6 +4,117 @@
 
 ---
 
+## FIX: Conteos falsos en /devoluciones — updated_at → status_since (2026-05-23 — sesión 10)
+
+### Síntoma
+
+KPIs inflados irrealisticamente:
+- `devueltasHoy: 135` (real: ~14)
+- `devueltasAyer: 216` (real: ~24)
+
+### Causa raíz exacta
+
+`devueltasHoy` y `devueltasAyer` usaban **`updated_at`** como campo de fecha.
+
+`updated_at` se re-stampea en cada sync del cron EFI — cada vez que el tracking de una guía se re-sincroniza, todas las órdenes tocadas ese día "actualizan" su `updated_at`. Resultado: todo el histórico de devoluciones que el cron resincronizó hoy/ayer era contado como "devuelta hoy/ayer".
+
+El campo correcto es **`status_since`**: registra cuándo el `normalized_status` cambió a `'returned'` por primera vez. No se modifica en re-syncs posteriores.
+
+El mismo error estaba en los filtros de la query principal (tab `devueltas-hoy` / `devueltas-ayer`).
+
+### Fix aplicado
+
+```typescript
+// ANTES (buggy) — KPIs:
+.gte('updated_at', today.start).lte('updated_at', today.end)   // devueltasHoy
+.gte('updated_at', yesterday.start).lte('updated_at', yesterday.end) // devueltasAyer
+
+// DESPUÉS (correcto) — KPIs:
+.not('status_since', 'is', null)
+.gte('status_since', today.start).lte('status_since', today.end)
+.not('status_since', 'is', null)
+.gte('status_since', yesterday.start).lte('status_since', yesterday.end)
+
+// ANTES (buggy) — query main filters:
+query.gte('updated_at', today.start).lte('updated_at', today.end)
+query.gte('updated_at', yesterday.start).lte('updated_at', yesterday.end)
+
+// DESPUÉS (correcto) — query main filters:
+query.not('status_since', 'is', null).gte('status_since', today.start).lte('status_since', today.end)
+query.not('status_since', 'is', null).gte('status_since', yesterday.start).lte('status_since', yesterday.end)
+```
+
+El `.not('status_since', 'is', null)` es un guard explícito: si `status_since` es null (caso raro), Postgres excluye la fila de la comparación `gte/lte` de todas formas, pero lo hacemos explícito para claridad.
+
+### Campo correcto por KPI (referencia definitiva)
+
+| KPI | Campo fecha | Razón |
+|---|---|---|
+| `devueltasHoy` | `status_since` | Cuándo el status cambió a returned |
+| `devueltasAyer` | `status_since` | Ídem |
+| `slaVencido72h` | `status_since` | Cuánto tiempo lleva en returned (sin cambios — era correcto) |
+| `totalDevueltas` | — | COUNT sin fecha (sin cambios) |
+| `tresMasIntentos` | — | Filtro por `delivery_attempts` (sin cambios) |
+
+### SQL de verificación en Supabase
+
+```sql
+-- Cuántas órdenes pasaron a returned HOY (timezone RD)
+SELECT COUNT(*) AS devueltas_hoy
+FROM orders
+WHERE normalized_status = 'returned'
+  AND tracking_number IS NOT NULL
+  AND status_since IS NOT NULL
+  AND status_since >= (
+    date_trunc('day', NOW() AT TIME ZONE 'America/Santo_Domingo') AT TIME ZONE 'America/Santo_Domingo'
+  )
+  AND status_since < (
+    date_trunc('day', NOW() AT TIME ZONE 'America/Santo_Domingo') AT TIME ZONE 'America/Santo_Domingo' + INTERVAL '1 day'
+  );
+
+-- Comparación rápida: updated_at vs status_since (para entender la inflación)
+SELECT
+  COUNT(*) FILTER (WHERE updated_at >= NOW() - INTERVAL '24 hours') AS devueltas_por_updated_at,
+  COUNT(*) FILTER (WHERE status_since >= NOW() - INTERVAL '24 hours') AS devueltas_por_status_since
+FROM orders
+WHERE normalized_status = 'returned' AND tracking_number IS NOT NULL;
+
+-- Ver status_since de los returned más recientes
+SELECT order_number, tracking_number, status_since, updated_at, raw_status
+FROM orders
+WHERE normalized_status = 'returned' AND tracking_number IS NOT NULL
+ORDER BY status_since DESC NULLS LAST
+LIMIT 20;
+```
+
+### Cómo probar conteos hoy/ayer
+
+1. Abrir `/devoluciones` — verificar que `devueltasHoy` muestra ~14 (no 135)
+2. Verificar que `devueltasAyer` muestra ~24 (no 216)
+3. Clic en tab "Devueltas hoy" — debe listar solo órdenes cuyo `status_since` fue hoy en RD
+4. Clic en tab "Devueltas ayer" — ídem para ayer
+5. Correr query SQL de verificación arriba para confirmar cifras contra DB
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/devoluciones/route.ts` | `devueltasHoy`/`devueltasAyer` KPIs: `updated_at` → `status_since` + guard `.not('status_since', 'is', null)`. Mismo cambio en filtros query principal `devueltas-hoy`/`devueltas-ayer`. |
+
+### NO se rompió
+
+- `slaVencido72h` — ya usaba `status_since` correctamente
+- `totalDevueltas`, `tresMasIntentos`, `reclamadas`, `pendientesRevisar` — sin cambios
+- Scoring de indemnización (`calcCompensationScore`) — sin cambios
+- Filtros por ciudad, provincia, búsqueda, intentos — sin cambios
+- EFI/Gintracom, SD local — sin cambios
+
+---
+
 ## FIX: "No resp." no persistía tras F5 — filteredPooled → allPooled (2026-05-23 — sesión 9)
 
 ### Causa raíz exacta
