@@ -4,6 +4,228 @@
 
 ---
 
+## FEATURE: Tab Reprogramados + Timestamps estilo Shopify (2026-05-22 — sesión 8)
+
+### Cambios implementados
+
+#### 1. Tab "Reprogramados" separado de "No responden"
+
+**Antes:** `rescheduled` y `no_answer` ambos mapeaban a `'no_responde'` → todo en el mismo tab "No responden".
+
+**Después:** tabs separados con esquemas de color distintos:
+- `no_answer` → `displayState = 'no_responde'` → tab "No responden" (amber-500)
+- `rescheduled` → `displayState = 'reprogramado'` → tab "Reprogramados" (orange-500)
+- `customer_declined` → `displayState = 'cancelado'` → filtrado de `allPooled` (invisible)
+
+**`computeDisplayState` corregido:**
+```typescript
+function computeDisplayState(pool: OrderPool, accion: LocalAccion, isDelivered: boolean): DisplayState {
+  if (isDelivered)                 return 'entregado'
+  if (accion === 'customer_declined') return 'cancelado'
+  if (pool === 'nuevo') {
+    if (accion === 'client_confirmed') return 'espera_despacho'
+    if (accion === 'no_answer')        return 'no_responde'
+    if (accion === 'rescheduled')      return 'reprogramado'
+    return 'nuevo'
+  }
+  if (accion === 'route_confirmed') return 'en_ruta'
+  if (accion === 'no_answer')       return 'no_responde'
+  if (accion === 'rescheduled')     return 'reprogramado'
+  return 'confirmado_listo'
+}
+```
+
+**`reprogramadosList` memo (F5-persistence igual que `enRutaList`):**
+```typescript
+const reprogramadosList = useMemo(
+  () => allPooled.filter(({ order, pool }) =>
+    computeDisplayState(pool, actionMap[order.id], false) === 'reprogramado',
+  ),
+  [allPooled, actionMap],
+)
+```
+Usa `allPooled` (no `filteredPooled`) → inmune al filtro de fecha Hoy/Ayer/Todos.
+
+**`TAB_META` actualizado:**
+```typescript
+{ tab: 'reprogramados', label: 'Reprogramados', shortLabel: 'Reprog.' }
+```
+Añadido entre "No responden" y "Entregados".
+
+**Badges visuales de estado `reprogramado`:**
+- Mobile SdCard: badge naranja con icono `RotateCcw` + botón Nota
+- Desktop table: badge naranja `bg-orange-100 text-orange-700` + botón Nota
+
+#### 2. F5-persistence para No resp. y Reprogramados
+
+El endpoint `/api/sd-delivery/sd-actions` (`GET`) devuelve:
+```json
+{ [order_id]: 'no_answer' | 'rescheduled' | 'customer_declined' }
+```
+
+- Consulta `agent_actions` de los últimos 7 días
+- Filtra: `route_confirmed`, `rescheduled`, `customer_declined`, `contacted` (con `contact_result='no_answer'`)
+- Toma la acción más reciente por orden
+- Si `route_confirmed` es la más reciente → **excluye la orden** (la maneja `route-confirmed-ids`)
+- Si `rescheduled` es la más reciente → devuelve `'rescheduled'`
+- `fetchData` siembra `actionMap` con estos datos al cargar
+
+#### 3. Timestamps estilo Shopify en todas las tabs
+
+**Nuevos helpers en `page.tsx`** (antes de `mapsUrl`):
+
+```typescript
+function orderDateMs(order: Order, pool: OrderPool): number {
+  if (pool === 'nuevo') return new Date(order.created_at).getTime()
+  return new Date(order.status_since ?? order.last_tracking_update ?? order.updated_at).getTime()
+}
+
+function formatOrderDate(order: Order, pool: OrderPool): { relative: string; absolute: string } {
+  // relative: "Hace menos de 1h" / "Hace 2h" / "Hace 1d 3h" / "Hace 3 días"
+  // absolute: "15 may, 3:42 PM" (America/Santo_Domingo timezone)
+}
+```
+
+- `pool='nuevo'` → timestamp base = `order.created_at`
+- `pool='confirmado'` → timestamp base = `order.status_since ?? order.last_tracking_update ?? order.updated_at`
+- Timezone: `America/Santo_Domingo` (UTC-4, sin DST)
+
+**Inyectado en SdCard (mobile):** `<p className="text-[10px] text-gray-400 mt-0.5" title={absolute}>`
+
+**Inyectado en desktop table (columna orden):** `<p className="text-[9px] text-gray-400 mt-0.5 whitespace-nowrap" title={absolute}>`
+
+### Action types SD local — tabla CORREGIDA (referencia definitiva)
+
+| action_type | contact_result | actionKey local | DisplayState | Tab |
+|---|---|---|---|---|
+| `contacted` | `no_answer` | `no_answer` | `no_responde` | No responden |
+| `rescheduled` | — | `rescheduled` | `reprogramado` | **Reprogramados** |
+| `route_confirmed` | — | `route_confirmed` | `en_ruta` | En ruta |
+| `customer_declined` | — | `customer_declined` | `cancelado` | (invisible) |
+| `delivered` (via mark-delivered) | — | `delivered` | `entregado` | Entregados |
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | `computeDisplayState` separa `rescheduled`→`reprogramado`. `reprogramadosList` memo. TAB_META agrega `reprogramados`. Helpers `orderDateMs`/`formatOrderDate`. Timestamps en SdCard y desktop table. Badges naranja para estado `reprogramado`. |
+
+### Cómo probar
+
+1. **Tab Reprogramados:** clic en "Reprog." en una orden en ruta → modal → guardar → pedido aparece en tab "Reprogramados" con badge naranja. F5 → permanece.
+2. **Tab No responden:** clic en "No resp." → pedido aparece en "No responden" con badge amber. F5 → permanece.
+3. **Los dos tabs son distintos** — "No responden" no mezcla reprogramados y viceversa.
+4. **Timestamps:** cada card y cada fila de tabla muestra "Hace Xh · 15 may, 3:42 PM".
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Tabs Nuevos, Confirmados/Listos, Rutas, En ruta, Entregados — sin cambios
+- Botón "No desea" (customer_declined) — sin cambios
+- F5-persistence para En ruta — sin cambios
+- EFI/Gintracom, tracking cron, Shopify sync — sin cambios
+
+---
+
+## FIX: "No resp." / "Reprogramar" persisten + botón "No desea" (2026-05-21 — sesión 7)
+
+### Causa raíz de los bugs
+
+**Bug "No resp." no persiste tras F5:**
+- `postAction` guardaba `action_type='contacted', contact_result='no_answer'` en DB
+- `fetchData` nunca releía ese registro al volver a cargar — `actionMap` se reiniciaba vacío
+- Orden volvía a aparecer en `confirmado_listo` o `nuevo` tras F5
+
+**Bug "Reprogramar" no persiste tras F5:**
+- `postAction` guardaba `action_type='rescheduled'` en DB correctamente
+- `fetchData` nunca leía `rescheduled` de vuelta — mismo problema: `actionMap` sin seed
+
+### Fix aplicado
+
+#### Nuevo endpoint: `/api/sd-delivery/sd-actions`
+- `GET` — devuelve `{ [order_id]: 'no_answer' | 'rescheduled' | 'customer_declined' }`
+- Consulta `agent_actions` de los últimos 7 días para los tipos: `route_confirmed`, `rescheduled`, `customer_declined`, `contacted` (con `contact_result='no_answer'`)
+- Usa DISTINCT-en-JS para obtener la acción más reciente por orden
+- Si la más reciente es `route_confirmed` → excluye esa orden (la maneja `route-confirmed-ids`)
+- Así devuelve solo las acciones secundarias que son **más recientes** que `route_confirmed`
+
+#### Cambio en `fetchData` (`page.tsx`)
+- Ahora hace 7 fetches en paralelo (antes 6) — añadido `/api/sd-delivery/sd-actions`
+- Siembra `actionMap` con acciones secundarias **antes** de sembrar `route_confirmed`
+- Guard de `route_confirmed` existente (`!next[id] || next[id] === 'client_confirmed'`) impide que sobreescriba `no_answer`/`rescheduled`/`customer_declined`
+- Guard de sd-actions: no sobreescribe `delivered` ni `client_confirmed`
+
+#### Nuevo botón "No desea" (`customer_declined`)
+- Visible en estado `en_ruta` — tanto en SdCard (móvil) como en tabla desktop
+- Llama `saveCustomerDeclined(orderId)` → `postAction(id, 'customer_declined', 'customer_declined')`
+- Botón en rojo (`bg-red-100 text-red-700`) para distinguirlo de acciones reversibles
+- En móvil: grid 2×2 con [No resp., Reprog., No desea, Nota]
+- El orden `customer_declined` **saca el pedido de todos los tabs activos** — se filtra en `allPooled`
+
+#### Nuevo `DisplayState`: `'cancelado'`
+- `computeDisplayState` devuelve `'cancelado'` si `accion === 'customer_declined'`
+- `allPooled` filtra `actionMap[id] === 'customer_declined'` en los 4 pools (confirmado, nuevo, pendingDispatch, cached)
+- Pedidos cancelados son auditables en `agent_actions` pero invisibles en la UI
+
+### Migración requerida
+
+**`027_sd_delivery_secondary_actions.sql`** — debe aplicarse en Supabase antes de usar el botón "No desea":
+```sql
+-- Amplía CHECK de agent_actions para incluir 'customer_declined'
+ALTER TABLE agent_actions DROP CONSTRAINT IF EXISTS agent_actions_action_type_check;
+ALTER TABLE agent_actions ADD CONSTRAINT agent_actions_action_type_check
+  CHECK (action_type IN (
+    'contacted','confirmed','rescheduled','recovered','courier_claim',
+    'note_added','status_updated','returned','delivered',
+    'route_confirmed','customer_declined'
+  ));
+```
+
+### Action types SD local (referencia completa)
+
+| action_type | contact_result | actionKey local | Significado |
+|---|---|---|---|
+| `contacted` | `no_answer` | `no_answer` | No contestó — mueve a "No responden" |
+| `rescheduled` | — | `rescheduled` | Reprogramado — mueve a "Reprogramados" (ver sesión 8) |
+| `route_confirmed` | — | `route_confirmed` | Salió a ruta — mueve a "En ruta" |
+| `customer_declined` | — | `customer_declined` | No desea — retira del flujo activo |
+| `delivered` (via mark-delivered) | — | `delivered` | Entregado — mueve a "Entregados" |
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `supabase/migrations/027_sd_delivery_secondary_actions.sql` | NUEVO — agrega `customer_declined` al CHECK |
+| `src/types/index.ts` | Agrega `customer_declined` a `ActionType` y `ACTION_LABELS` |
+| `src/app/api/orders/[id]/actions/route.ts` | Agrega `customer_declined` a `VALID_TYPES` |
+| `src/app/api/sd-delivery/sd-actions/route.ts` | NUEVO — endpoint que devuelve acciones secundarias por orden |
+| `src/app/(app)/sd-delivery/page.tsx` | DisplayState `cancelado`, fetchData 7 fetches, seeding sd-actions, filtros allPooled, botón "No desea" en SdCard y tabla desktop |
+
+### Cómo probar
+
+1. Aplicar migración 027 en Supabase SQL Editor
+2. Abrir `/sd-delivery`
+3. **Test "No resp."**: Clic en "No resp." en cualquier orden → debe moverse a tab "No responden". F5 → debe permanecer en "No responden"
+4. **Test "Reprogramar"**: Clic en "Reprog." → modal → guardar nota → debe moverse a "No responden". F5 → debe permanecer
+5. **Test "No desea"**: Orden en estado "En ruta" → clic en "No desea" (botón rojo) → desaparece de todos los tabs activos. F5 → sigue desaparecida. Verificar en Supabase: `SELECT * FROM agent_actions WHERE action_type = 'customer_declined' ORDER BY created_at DESC LIMIT 5`
+6. **Regresión "En ruta"**: Iniciar ruta → F5 → orden debe permanecer en "En ruta" (sin cambio)
+7. **Regresión entregado**: Marcar entregado → F5 → orden en "Entregados" (sin cambio)
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- EFI/Gintracom, tracking cron, Shopify sync — sin cambios
+- Iniciar ruta, Confirmar ruta, Marcar entregado — sin cambios
+- Tabs Nuevos, Confirmados/Listos, Rutas — sin cambios
+
+---
+
 ## FIX VALIDADO: Flujo SD completo funciona en localhost (2026-05-21 — sesión 6)
 
 ### Flujo validado en localhost

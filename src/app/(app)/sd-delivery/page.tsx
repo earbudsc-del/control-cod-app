@@ -19,7 +19,7 @@ import {
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
-type Tab        = 'nuevos' | 'confirmados' | 'en_ruta' | 'no_responden' | 'entregados' | 'rutas'
+type Tab        = 'nuevos' | 'confirmados' | 'en_ruta' | 'no_responden' | 'reprogramados' | 'entregados' | 'rutas'
 type DateFilter = 'hoy' | 'ayer' | 'todos'
 type OrderPool  = 'nuevo' | 'confirmado'
 type LocalAccion = string | undefined
@@ -30,8 +30,10 @@ type DisplayState =
   | 'espera_despacho'  // pool=nuevo, client_confirmed (admin debe despachar)
   | 'confirmado_listo' // pool=confirmado, sin route_confirmed
   | 'en_ruta'          // pool=confirmado, route_confirmed
-  | 'no_responde'      // no_answer/rescheduled (cualquier pool)
+  | 'no_responde'      // no_answer (cualquier pool)
+  | 'reprogramado'     // rescheduled (cualquier pool)
   | 'entregado'
+  | 'cancelado'        // customer_declined — excluido de todos los tabs activos
 
 interface PooledOrder {
   order: Order
@@ -100,6 +102,33 @@ function criticalityLabel(order: Order): 'critico' | 'riesgo' | 'normal' {
   return 'normal'
 }
 
+function orderDateMs(order: Order, pool: OrderPool): number {
+  if (pool === 'nuevo') return new Date(order.created_at).getTime()
+  return new Date(order.status_since ?? order.last_tracking_update ?? order.updated_at).getTime()
+}
+
+function formatOrderDate(order: Order, pool: OrderPool): { relative: string; absolute: string } {
+  const ms = orderDateMs(order, pool)
+  const diffMs = Date.now() - ms
+  const diffH = diffMs / (1000 * 60 * 60)
+  let relative: string
+  if (diffH < 1)         relative = 'Hace menos de 1h'
+  else if (diffH < 24)   relative = `Hace ${Math.floor(diffH)}h`
+  else {
+    const dias = Math.floor(diffH / 24)
+    const hrs  = Math.floor(diffH % 24)
+    if (dias === 1) relative = hrs > 0 ? `Hace 1d ${hrs}h` : 'Hace 1 día'
+    else            relative = hrs > 0 ? `Hace ${dias}d ${hrs}h` : `Hace ${dias} días`
+  }
+  const d = new Date(ms)
+  const absolute = d.toLocaleString('es-DO', {
+    timeZone: 'America/Santo_Domingo',
+    day: '2-digit', month: 'short',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  })
+  return { relative, absolute }
+}
+
 function mapsUrl(order: Order): string | null {
   const parts = [order.customer_address, order.city, order.province].filter(Boolean)
   if (!parts.length) return null
@@ -134,14 +163,17 @@ function buildWaMsgNuevo(nombre: string, product: string | null | undefined): st
 
 function computeDisplayState(pool: OrderPool, accion: LocalAccion, isDelivered: boolean): DisplayState {
   if (isDelivered) return 'entregado'
+  if (accion === 'customer_declined') return 'cancelado'
   if (pool === 'nuevo') {
-    if (accion === 'client_confirmed')                          return 'espera_despacho'
-    if (accion === 'no_answer' || accion === 'rescheduled')     return 'no_responde'
+    if (accion === 'client_confirmed') return 'espera_despacho'
+    if (accion === 'no_answer')        return 'no_responde'
+    if (accion === 'rescheduled')      return 'reprogramado'
     return 'nuevo'
   }
   // pool === 'confirmado'
-  if (accion === 'route_confirmed')                             return 'en_ruta'
-  if (accion === 'no_answer' || accion === 'rescheduled')       return 'no_responde'
+  if (accion === 'route_confirmed') return 'en_ruta'
+  if (accion === 'no_answer')       return 'no_responde'
+  if (accion === 'rescheduled')     return 'reprogramado'
   return 'confirmado_listo'
 }
 
@@ -151,6 +183,7 @@ function computeTab(state: DisplayState): Tab {
   if (state === 'confirmado_listo') return 'confirmados'
   if (state === 'en_ruta')          return 'en_ruta'
   if (state === 'no_responde')      return 'no_responden'
+  if (state === 'reprogramado')     return 'reprogramados'
   return 'entregados'
 }
 
@@ -290,11 +323,12 @@ interface SdCardProps {
   onEntregado:       () => void
   onReprogramar:     () => void
   onNota:            () => void
+  onDeclinado:       () => void
 }
 
 function SdCard({
   order, pool, accion, busy, isDelivered,
-  onWA, onLlamar, onConfirmarRuta, onClienteConfirma, onNoAnswer, onEntregado, onReprogramar, onNota,
+  onWA, onLlamar, onConfirmarRuta, onClienteConfirma, onNoAnswer, onEntregado, onReprogramar, onNota, onDeclinado,
 }: SdCardProps) {
   const nombre  = order.customer_name ?? ''
   const waMsg   = pool === 'nuevo'
@@ -315,6 +349,7 @@ function SdCard({
     : ds === 'en_ruta'        ? 'bg-teal-50/30'
     : ds === 'nuevo'          ? 'bg-blue-50/30'
     : ds === 'espera_despacho'? 'bg-purple-50/20'
+    : ds === 'reprogramado'   ? 'bg-orange-50/30'
     : crit === 'critico'      ? 'bg-red-50/20'
     : crit === 'riesgo'       ? 'bg-orange-50/20'
     : 'bg-white'
@@ -331,6 +366,12 @@ function SdCard({
           {order.tracking_number && order.order_number && (
             <p className="font-mono text-[10px] text-gray-400 mt-0.5">{order.order_number}</p>
           )}
+          {(() => { const { relative, absolute } = formatOrderDate(order, pool); return (
+            <p className="text-[10px] text-gray-400 mt-0.5" title={absolute}>
+              <span className="font-medium">{relative}</span>
+              <span className="ml-1 opacity-70">· {absolute}</span>
+            </p>
+          ); })()}
         </div>
         {ds === 'entregado' && (
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700 shrink-0">
@@ -346,6 +387,11 @@ function SdCard({
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 shrink-0">
             <PhoneMissed className="inline w-3 h-3 mr-0.5" />No responde
             {pool === 'nuevo' && <span className="ml-1 opacity-70">· pendiente conf.</span>}
+          </span>
+        )}
+        {ds === 'reprogramado' && (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 shrink-0">
+            <RotateCcw className="inline w-3 h-3 mr-0.5" />Reprogramado
           </span>
         )}
         {ds === 'nuevo' && (
@@ -504,21 +550,27 @@ function SdCard({
                          text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
               <CheckCircle2 className="w-5 h-5" />Marcar entregado
             </button>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button onClick={onNoAnswer}
-                className="flex items-center justify-center gap-1 col-span-1
+                className="flex items-center justify-center gap-1
                            bg-amber-100 active:bg-amber-200 text-amber-700
                            text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
                 <PhoneMissed className="w-3.5 h-3.5" /><span>No resp.</span>
               </button>
               <button onClick={onReprogramar}
-                className="flex items-center justify-center gap-1 col-span-1
+                className="flex items-center justify-center gap-1
                            bg-indigo-100 active:bg-indigo-200 text-indigo-700
                            text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
                 <RotateCcw className="w-3.5 h-3.5" /><span>Reprog.</span>
               </button>
+              <button onClick={onDeclinado}
+                className="flex items-center justify-center gap-1
+                           bg-red-100 active:bg-red-200 text-red-700
+                           text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
+                <X className="w-3.5 h-3.5" /><span>No desea</span>
+              </button>
               <button onClick={onNota}
-                className="flex items-center justify-center gap-1 col-span-1
+                className="flex items-center justify-center gap-1
                            bg-gray-100 active:bg-gray-200 text-gray-600
                            text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
                 <FileText className="w-3.5 h-3.5" /><span>Nota</span>
@@ -548,6 +600,17 @@ function SdCard({
                 <UserCheck className="w-3.5 h-3.5" />El cliente llamó y confirma
               </button>
             )}
+          </div>
+        ) : ds === 'reprogramado' ? (
+          <div className="flex items-center justify-between">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold
+                             px-3 py-1.5 rounded-full bg-orange-100 text-orange-700">
+              <RotateCcw className="w-3.5 h-3.5" />Reprogramado
+            </span>
+            <button onClick={onNota}
+              className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-teal-600 ml-2">
+              <FileText className="w-3 h-3" />Nota
+            </button>
           </div>
         ) : null}
       </div>
@@ -591,8 +654,8 @@ export default function SdDeliveryPage() {
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const [enRepartoRes, nuevosRes, confirmedRes, deliveredRes, perfRes, routeConfirmedRes]:
-        [OrdersResponse, OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData, { ids: string[], orders: Order[] }] =
+      const [enRepartoRes, nuevosRes, confirmedRes, deliveredRes, perfRes, routeConfirmedRes, sdActionsRes]:
+        [OrdersResponse, OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData, { ids: string[], orders: Order[] }, Record<string, 'no_answer' | 'rescheduled' | 'customer_declined'>] =
         await Promise.all([
           fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc').then(r => r.json()),
           fetch('/api/orders?confirmationStatus=pending&limit=300').then(r => r.json()),
@@ -600,6 +663,7 @@ export default function SdDeliveryPage() {
           fetch('/api/reparto/entregados').then(r => r.json()),
           fetch('/api/sd-delivery/performance').then(r => r.json()),
           fetch('/api/sd-delivery/route-confirmed-ids').then(r => r.json()).catch(() => ({ ids: [], orders: [] })),
+          fetch('/api/sd-delivery/sd-actions').then(r => r.json()).catch(() => ({})),
         ])
       const enRepartoData: Order[] = enRepartoRes.data ?? []
       const confirmedData: Order[]  = confirmedRes.data ?? []
@@ -623,8 +687,22 @@ export default function SdDeliveryPage() {
 
       setActionMap(prev => {
         const next = { ...prev }
+
+        // Seed secondary actions (no_answer, rescheduled, customer_declined) from DB.
+        // The sd-actions endpoint only returns a secondary action when it is MORE RECENT
+        // than route_confirmed for that order, so applying these first is safe:
+        // route_confirmed seeding below will not override them (its guard checks next[id]).
+        // Terminal states (delivered, client_confirmed) are never overridden.
+        const noOverride = new Set(['delivered', 'client_confirmed'])
+        for (const [id, secondaryAction] of Object.entries(sdActionsRes)) {
+          if (!noOverride.has(next[id] ?? '')) {
+            next[id] = secondaryAction
+          }
+        }
+
         // Seed route_confirmed from DB so "En ruta" persists after page refresh.
-        // Only applied to orders currently en_reparto; does not override delivered/rescheduled.
+        // Only applied when there is no current secondary action already seeded above
+        // and the order is currently en_reparto.
         for (const id of routeConfirmedIds) {
           if (freshEnRepartoIds.has(id) && (!next[id] || next[id] === 'client_confirmed')) {
             next[id] = 'route_confirmed'
@@ -714,10 +792,10 @@ export default function SdDeliveryPage() {
 
   const allPooled = useMemo((): PooledOrder[] => {
     const confirmedPool: PooledOrder[] = sdEnReparto
-      .filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id))
+      .filter(o => actionMap[o.id] !== 'delivered' && actionMap[o.id] !== 'customer_declined' && !deliveredDbIds.has(o.id))
       .map(o => ({ order: o, pool: 'confirmado' as OrderPool }))
     const nuevosPool: PooledOrder[] = sdNuevos
-      .filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id))
+      .filter(o => actionMap[o.id] !== 'delivered' && actionMap[o.id] !== 'customer_declined' && !deliveredDbIds.has(o.id))
       .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
 
     const enRepartoIds       = new Set(sdEnReparto.map(o => o.id))
@@ -728,7 +806,7 @@ export default function SdDeliveryPage() {
     // actionMap is seeded with 'client_confirmed' for these in fetchData, so
     // computeDisplayState returns 'espera_despacho' after page refresh/deploy.
     const pendingDispatchPool: PooledOrder[] = sdPendingDispatch
-      .filter(o => actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id))
+      .filter(o => actionMap[o.id] !== 'delivered' && actionMap[o.id] !== 'customer_declined' && !deliveredDbIds.has(o.id))
       .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
 
     // Locally-confirmed orders not yet reflected in DB; exclude ones already in pendingDispatchPool.
@@ -736,7 +814,7 @@ export default function SdDeliveryPage() {
       .filter(o =>
         !enRepartoIds.has(o.id) && !nuevosIds.has(o.id) &&
         !pendingDispatchIds.has(o.id) &&
-        actionMap[o.id] !== 'delivered' && !deliveredDbIds.has(o.id),
+        actionMap[o.id] !== 'delivered' && actionMap[o.id] !== 'customer_declined' && !deliveredDbIds.has(o.id),
       )
       .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
 
@@ -796,6 +874,15 @@ export default function SdDeliveryPage() {
     [filteredPooled, actionMap],
   )
 
+  // Uses allPooled (not filteredPooled) so rescheduled orders persist regardless of date filter,
+  // matching the same immunity-from-date-filter guarantee as enRutaList.
+  const reprogramadosList = useMemo(
+    () => allPooled.filter(({ order, pool }) =>
+      computeDisplayState(pool, actionMap[order.id], false) === 'reprogramado',
+    ),
+    [allPooled, actionMap],
+  )
+
   // Rutas: only confirmado_listo orders — no date filter so all pending routes are visible
   const rutasList = useMemo(
     () => allPooled.filter(({ order, pool }) =>
@@ -837,13 +924,14 @@ export default function SdDeliveryPage() {
   // ── Conteos ────────────────────────────────────────────────────────────────
 
   const tabCounts = useMemo(() => ({
-    nuevos:       nuevosList.length,
-    confirmados:  confirmadosList.length,
-    en_ruta:      enRutaList.length,
-    no_responden: noRespondenList.length,
-    entregados:   entregadosFiltrados.length,
-    rutas:        rutasList.length,
-  }), [nuevosList, confirmadosList, enRutaList, noRespondenList, entregadosFiltrados, rutasList])
+    nuevos:        nuevosList.length,
+    confirmados:   confirmadosList.length,
+    en_ruta:       enRutaList.length,
+    no_responden:  noRespondenList.length,
+    reprogramados: reprogramadosList.length,
+    entregados:    entregadosFiltrados.length,
+    rutas:         rutasList.length,
+  }), [nuevosList, confirmadosList, enRutaList, noRespondenList, reprogramadosList, entregadosFiltrados, rutasList])
 
   const totalActive = allPooled.length
 
@@ -869,11 +957,12 @@ export default function SdDeliveryPage() {
 
   const displayedPooled = useMemo((): PooledOrder[] => {
     let base: PooledOrder[]
-    if (activeTab === 'nuevos')        base = nuevosList
-    else if (activeTab === 'confirmados')   base = confirmadosList
-    else if (activeTab === 'en_ruta')       base = enRutaList
-    else if (activeTab === 'no_responden')  base = noRespondenList
-    else if (activeTab === 'rutas')         return []  // rutas has own render
+    if (activeTab === 'nuevos')           base = nuevosList
+    else if (activeTab === 'confirmados')  base = confirmadosList
+    else if (activeTab === 'en_ruta')      base = enRutaList
+    else if (activeTab === 'no_responden') base = noRespondenList
+    else if (activeTab === 'reprogramados') base = reprogramadosList
+    else if (activeTab === 'rutas')        return []  // rutas has own render
     else return []
 
     if (!searchQuery.trim()) return base
@@ -1054,15 +1143,21 @@ export default function SdDeliveryPage() {
     showToast('Reprogramado registrado', true)
   }
 
+  async function saveCustomerDeclined(orderId: string) {
+    await postAction(orderId, 'customer_declined', 'customer_declined')
+    showToast('Pedido marcado como "No desea" — retirado del flujo activo', true)
+  }
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const TAB_META: { tab: Tab; label: string; shortLabel: string }[] = [
-    { tab: 'nuevos',       label: 'Nuevos / Por confirmar', shortLabel: 'Nuevos'     },
-    { tab: 'confirmados',  label: 'Confirmados / Listos',   shortLabel: 'Listos'     },
-    { tab: 'rutas',        label: 'Rutas',                  shortLabel: 'Rutas'      },
-    { tab: 'en_ruta',      label: 'En ruta',                shortLabel: 'En ruta'    },
-    { tab: 'no_responden', label: 'No responden',           shortLabel: 'N/Resp.'    },
-    { tab: 'entregados',   label: 'Entregados',             shortLabel: 'Entregados' },
+    { tab: 'nuevos',        label: 'Nuevos / Por confirmar', shortLabel: 'Nuevos'     },
+    { tab: 'confirmados',   label: 'Confirmados / Listos',   shortLabel: 'Listos'     },
+    { tab: 'rutas',         label: 'Rutas',                  shortLabel: 'Rutas'      },
+    { tab: 'en_ruta',       label: 'En ruta',                shortLabel: 'En ruta'    },
+    { tab: 'no_responden',  label: 'No responden',           shortLabel: 'N/Resp.'    },
+    { tab: 'reprogramados', label: 'Reprogramados',          shortLabel: 'Reprog.'    },
+    { tab: 'entregados',    label: 'Entregados',             shortLabel: 'Entregados' },
   ]
 
   // Ayuda visual: color del tab por estado
@@ -1072,7 +1167,8 @@ export default function SdDeliveryPage() {
     if (tab === 'nuevos')       return 'bg-blue-500 text-white'
     if (tab === 'confirmados')  return 'bg-teal-500 text-white'
     if (tab === 'en_ruta')      return 'bg-teal-600 text-white'
-    if (tab === 'no_responden') return 'bg-amber-500 text-white'
+    if (tab === 'no_responden')  return 'bg-amber-500 text-white'
+    if (tab === 'reprogramados') return 'bg-orange-500 text-white'
     return 'bg-emerald-500 text-white'
   }
 
@@ -1081,7 +1177,8 @@ export default function SdDeliveryPage() {
     if (tab === 'nuevos')       return 'border-blue-500 text-blue-700 bg-blue-50/60'
     if (tab === 'confirmados')  return 'border-teal-500 text-teal-700 bg-teal-50/60'
     if (tab === 'en_ruta')      return 'border-teal-600 text-teal-800 bg-teal-50/80'
-    if (tab === 'no_responden') return 'border-amber-500 text-amber-700 bg-amber-50/60'
+    if (tab === 'no_responden')  return 'border-amber-500 text-amber-700 bg-amber-50/60'
+    if (tab === 'reprogramados') return 'border-orange-500 text-orange-700 bg-orange-50/60'
     return 'border-emerald-500 text-emerald-700 bg-emerald-50/60'
   }
 
@@ -1544,6 +1641,7 @@ export default function SdDeliveryPage() {
                     onEntregado={() => markDelivered(order.id)}
                     onReprogramar={() => setReModal({ orderId: order.id, name: order.customer_name ?? '' })}
                     onNota={() => setNoteModal({ orderId: order.id, name: order.customer_name ?? '' })}
+                    onDeclinado={() => saveCustomerDeclined(order.id)}
                   />
                 )
               })}
@@ -1569,6 +1667,7 @@ export default function SdDeliveryPage() {
                   onEntregado={() => {}}
                   onReprogramar={() => {}}
                   onNota={() => {}}
+                  onDeclinado={() => {}}
                 />
               ))}
             </div>
@@ -1627,6 +1726,11 @@ export default function SdDeliveryPage() {
                             <Clock className="w-2.5 h-2.5" />Por confirmar
                           </span>
                         )}
+                        {(() => { const { relative, absolute } = formatOrderDate(order, pool); return (
+                          <p className="text-[9px] text-gray-400 mt-0.5 whitespace-nowrap" title={absolute}>
+                            {relative} · {absolute}
+                          </p>
+                        ); })()}
                       </td>
 
                       {/* Cliente */}
@@ -1765,6 +1869,11 @@ export default function SdDeliveryPage() {
                                          text-indigo-700 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
                               <RotateCcw className="w-3 h-3" />Reprogram.
                             </button>
+                            <button onClick={() => saveCustomerDeclined(order.id)}
+                              className="flex items-center gap-1 bg-red-100 hover:bg-red-200
+                                         text-red-700 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
+                              <X className="w-3 h-3" />No desea
+                            </button>
                             <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
                               className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
                                          text-gray-600 text-[11px] font-medium px-2 py-1.5 rounded transition-colors">
@@ -1784,6 +1893,18 @@ export default function SdDeliveryPage() {
                                 <UserCheck className="w-3 h-3" />Confirma ahora
                               </button>
                             )}
+                            <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
+                              className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
+                                         text-gray-600 text-[11px] font-medium px-1.5 py-1 rounded transition-colors">
+                              <FileText className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ) : ds === 'reprogramado' ? (
+                          <div className="flex items-center gap-1.5">
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold
+                                             px-2 py-1 rounded-full bg-orange-100 text-orange-700">
+                              <RotateCcw className="w-3 h-3" />Reprogramado
+                            </span>
                             <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
                               className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
                                          text-gray-600 text-[11px] font-medium px-1.5 py-1 rounded transition-colors">
