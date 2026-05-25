@@ -4,6 +4,158 @@
 
 ---
 
+## FEATURE: Tab Reprogramados — reactivación de pedidos estancados (2026-05-25 — sesión 12)
+
+### Problema resuelto
+
+El tab `Reprogramados` en `/sd-delivery` era un estado muerto: los pedidos mostraban el badge "Reprogramado" pero no tenían acciones disponibles. El mensajero no podía continuar el flujo operativo sin recargar la página y sin opción de reactivar.
+
+### Nuevo comportamiento
+
+#### Desde tab `Reprogramados` el mensajero ahora puede:
+
+**"Volver a ruta"** (`pool='confirmado'`)
+- Llama a `confirmRoute(orderId)` → registra `route_confirmed` en `agent_actions`
+- `actionMap[id]` = `'route_confirmed'` → `computeDisplayState` = `'en_ruta'`
+- Pedido reaparece en tab **En ruta** inmediatamente y persiste tras F5
+- F5-persistence: `route-confirmed-ids` endpoint devuelve el ID → `actionMap` se siembra correctamente
+- `sd-actions` excluye el ID (route_confirmed > rescheduled como acción más reciente) ✓
+
+**"Marcar entregado"** (`pool='confirmado'`)
+- Llama a `markDelivered(orderId)` → mismo endpoint que el flujo normal
+- Pedido pasa directamente a **Entregados** sin pasar de nuevo por En ruta
+
+**"El cliente llamó y confirma"** (`pool='nuevo'`)
+- Para pedidos nuevos reprogramados que nunca fueron despachados
+- Llama a `confirmClient(orderId)` → mueve a `espera_despacho`
+
+#### Metadata de reprogramación visible
+
+Cada card/fila reprogramada muestra ahora:
+- **Timestamp**: "Hace 2h · 23 may, 3:42 PM" (momento exacto del rescheduled)
+- **Contador**: `×2` (si el pedido fue reprogramado más de una vez, en los últimos 7 días)
+
+### Cambios implementados
+
+#### 1. `sd-actions` endpoint extendido
+
+Nuevo campo `rescheduledMeta` en el response (sin query adicional, computado desde datos ya consultados):
+
+```typescript
+// ANTES:
+return NextResponse.json(result)
+
+// DESPUÉS:
+const rescheduledMeta: Record<string, { at: string; count: number }> = {}
+for (const [orderId, row] of latestByOrder) {
+  if (row.action_type === 'rescheduled') {
+    const count = relevant.filter(r => r.order_id === orderId && r.action_type === 'rescheduled').length
+    rescheduledMeta[orderId] = { at: row.created_at, count }
+  }
+}
+return NextResponse.json({ actions: result, rescheduledMeta })
+```
+
+`count` refleja reprogramaciones dentro de la ventana de 7 días ya consultada — sin query extra.
+
+#### 2. Nuevo tipo `SdActionsResponse`
+
+```typescript
+interface SdActionsResponse {
+  actions: Record<string, 'no_answer' | 'rescheduled' | 'customer_declined'>
+  rescheduledMeta: Record<string, { at: string; count: number }>
+}
+```
+
+#### 3. Nuevo estado y helper en `page.tsx`
+
+```typescript
+const [reprogramadoMeta, setReprogramadoMeta] = useState<Record<string, { at: string; count: number }>>({})
+```
+
+```typescript
+function formatRescheduleDate(iso: string): { relative: string; absolute: string }
+```
+
+#### 4. `fetchData` actualizado
+
+- Tipo annotation: `SdActionsResponse` en lugar de `Record<string, ...>`
+- `setReprogramadoMeta(sdActionsRes.rescheduledMeta ?? {})` antes de `setActionMap`
+- Loop usa `sdActionsRes.actions ?? {}` en lugar de `sdActionsRes` directamente
+- `.catch(() => ({ actions: {}, rescheduledMeta: {} }))` tipado correctamente
+
+#### 5. SdCard `reprogramado` block — reemplazado
+
+- Muestra timestamp + contador de veces reprogramado
+- `pool='confirmado'`: grid 2×2 con "Volver a ruta" (teal) y "Entregado" (emerald)
+- `pool='nuevo'`: botón "El cliente llamó y confirma" (blue)
+- Botón "Nota" siempre visible
+
+#### 6. Desktop table `reprogramado` section — extendida
+
+- Badge "Reprogramado ×N" + timestamp relativo en la celda Acciones
+- Botones "Volver a ruta" y "Entregado" para `pool='confirmado'`
+- Botón "Confirma ahora" para `pool='nuevo'`
+
+#### 7. Bug fix: `displayedPooled` dependency array
+
+`reprogramadosList` faltaba en el array de dependencias del memo — causaba resultados stale al cambiar al tab Reprogramados:
+```typescript
+// ANTES (buggy):
+}, [activeTab, nuevosList, confirmadosList, enRutaList, noRespondenList, searchQuery])
+
+// DESPUÉS (correcto):
+}, [activeTab, nuevosList, confirmadosList, enRutaList, noRespondenList, reprogramadosList, searchQuery])
+```
+
+### Flujo completo Reprogramados (estado → acciones → nuevo estado)
+
+```
+Reprogramado (pool=confirmado)
+├── "Volver a ruta" → En ruta → Entregado / No resp. / Reprog. / No desea
+└── "Marcar entregado" → Entregados (directo)
+
+Reprogramado (pool=nuevo, sin despachar)
+└── "El cliente llamó y confirma" → Confirmados/Listos → [admin despacha] → Rutas → En ruta
+```
+
+### Invariante de auditoría
+
+- NO se borran ni modifican acciones previas en `agent_actions`
+- Cada "Volver a ruta" añade un nuevo `route_confirmed` row (trazabilidad completa)
+- El contador "×N" muestra cuántas veces se reprogramó en los últimos 7 días
+- Historial consultable en Supabase:
+
+```sql
+SELECT aa.created_at, aa.action_type, aa.notes, p.full_name
+FROM agent_actions aa
+JOIN profiles p ON p.id = aa.agent_id
+WHERE aa.order_id = '<order_id>'
+ORDER BY aa.created_at DESC;
+```
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/sd-delivery/sd-actions/route.ts` | Agrega `rescheduledMeta` al response (sin query adicional) |
+| `src/app/(app)/sd-delivery/page.tsx` | `SdActionsResponse` type · `reprogramadoMeta` state · `formatRescheduleDate` helper · `fetchData` parsing actualizado · `SdCardProps` + `SdCard` reprogramado block · tabla desktop reprogramado · dep array fix |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- "Volver a ruta" usa `confirmRoute` existente (misma lógica que Iniciar ruta desde Rutas)
+- "Marcar entregado" usa `markDelivered` existente (incluye Shopify mark_paid)
+- No responden, En ruta, Entregados — sin cambios
+- No desea, EFI/Gintracom, tracking cron, Shopify sync — sin cambios
+- Confirmados/Listos, Rutas, Nuevos — sin cambios
+- F5-persistence garantizada por los endpoints existentes (`route-confirmed-ids`, `sd-actions`) ✓
+
+---
+
 ## FEATURE: Mensajero SD puede despachar localmente sin admin (2026-05-23 — sesión 11)
 
 ### Problema resuelto

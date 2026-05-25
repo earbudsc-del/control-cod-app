@@ -58,6 +58,11 @@ interface DeliveredEntry {
 
 interface OrdersResponse { data: Order[] }
 
+interface SdActionsResponse {
+  actions: Record<string, 'no_answer' | 'rescheduled' | 'customer_declined'>
+  rescheduledMeta: Record<string, { at: string; count: number }>
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function rdMidnightUTC(offsetDays = 0): number {
@@ -122,6 +127,26 @@ function formatOrderDate(order: Order, pool: OrderPool): { relative: string; abs
   }
   const d = new Date(ms)
   const absolute = d.toLocaleString('es-DO', {
+    timeZone: 'America/Santo_Domingo',
+    day: '2-digit', month: 'short',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  })
+  return { relative, absolute }
+}
+
+function formatRescheduleDate(iso: string): { relative: string; absolute: string } {
+  const ms = new Date(iso).getTime()
+  const diffH = (Date.now() - ms) / (1000 * 60 * 60)
+  let relative: string
+  if (diffH < 1)         relative = 'Hace menos de 1h'
+  else if (diffH < 24)   relative = `Hace ${Math.floor(diffH)}h`
+  else {
+    const dias = Math.floor(diffH / 24)
+    const hrs  = Math.floor(diffH % 24)
+    if (dias === 1) relative = hrs > 0 ? `Hace 1d ${hrs}h` : 'Hace 1 día'
+    else            relative = hrs > 0 ? `Hace ${dias}d ${hrs}h` : `Hace ${dias} días`
+  }
+  const absolute = new Date(ms).toLocaleString('es-DO', {
     timeZone: 'America/Santo_Domingo',
     day: '2-digit', month: 'short',
     hour: 'numeric', minute: '2-digit', hour12: true,
@@ -325,11 +350,12 @@ interface SdCardProps {
   onNota:            () => void
   onDeclinado:       () => void
   onDispatchLocal:   () => void
+  reprogramadoMeta?: { at: string; count: number }
 }
 
 function SdCard({
   order, pool, accion, busy, isDelivered,
-  onWA, onLlamar, onConfirmarRuta, onClienteConfirma, onNoAnswer, onEntregado, onReprogramar, onNota, onDeclinado, onDispatchLocal,
+  onWA, onLlamar, onConfirmarRuta, onClienteConfirma, onNoAnswer, onEntregado, onReprogramar, onNota, onDeclinado, onDispatchLocal, reprogramadoMeta,
 }: SdCardProps) {
   const nombre  = order.customer_name ?? ''
   const waMsg   = pool === 'nuevo'
@@ -606,15 +632,54 @@ function SdCard({
             )}
           </div>
         ) : ds === 'reprogramado' ? (
-          <div className="flex items-center justify-between">
-            <span className="inline-flex items-center gap-1.5 text-xs font-semibold
-                             px-3 py-1.5 rounded-full bg-orange-100 text-orange-700">
-              <RotateCcw className="w-3.5 h-3.5" />Reprogramado
-            </span>
-            <button onClick={onNota}
-              className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-teal-600 ml-2">
-              <FileText className="w-3 h-3" />Nota
-            </button>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold
+                                 px-3 py-1.5 rounded-full bg-orange-100 text-orange-700">
+                  <RotateCcw className="w-3.5 h-3.5" />Reprogramado
+                  {reprogramadoMeta && reprogramadoMeta.count > 1 && (
+                    <span className="ml-1 opacity-70">×{reprogramadoMeta.count}</span>
+                  )}
+                </span>
+                {reprogramadoMeta?.at && (() => {
+                  const { relative, absolute } = formatRescheduleDate(reprogramadoMeta.at)
+                  return (
+                    <p className="text-[10px] text-orange-500/80 mt-0.5">
+                      <span className="font-medium">{relative}</span>
+                      <span className="ml-1 opacity-70">· {absolute}</span>
+                    </p>
+                  )
+                })()}
+              </div>
+              <button onClick={onNota}
+                className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-teal-600 ml-2">
+                <FileText className="w-3 h-3" />Nota
+              </button>
+            </div>
+            {pool === 'confirmado' ? (
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={onConfirmarRuta}
+                  className="flex items-center justify-center gap-1.5
+                             bg-teal-500 active:bg-teal-600 text-white
+                             text-xs font-semibold py-2.5 min-h-[40px] rounded-xl transition-colors">
+                  <Truck className="w-3.5 h-3.5" />Volver a ruta
+                </button>
+                <button onClick={onEntregado}
+                  className="flex items-center justify-center gap-1.5
+                             bg-emerald-500 active:bg-emerald-600 text-white
+                             text-xs font-semibold py-2.5 min-h-[40px] rounded-xl transition-colors">
+                  <CheckCircle2 className="w-3.5 h-3.5" />Entregado
+                </button>
+              </div>
+            ) : (
+              <button onClick={onClienteConfirma}
+                className="w-full flex items-center justify-center gap-2
+                           bg-blue-100 active:bg-blue-200 text-blue-700
+                           text-xs font-semibold py-2.5 rounded-xl transition-colors">
+                <UserCheck className="w-3.5 h-3.5" />El cliente llamó y confirma
+              </button>
+            )}
           </div>
         ) : null}
       </div>
@@ -651,6 +716,7 @@ export default function SdDeliveryPage() {
   const [loadingRow, setLoadingRow]     = useState<Record<string, boolean>>({})
   const [noteModal, setNoteModal]       = useState<{ orderId: string; name: string } | null>(null)
   const [reModal, setReModal]           = useState<{ orderId: string; name: string } | null>(null)
+  const [reprogramadoMeta, setReprogramadoMeta] = useState<Record<string, { at: string; count: number }>>({})
   const [toast, setToast]               = useState<{ msg: string; ok: boolean } | null>(null)
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
@@ -659,7 +725,7 @@ export default function SdDeliveryPage() {
     setLoading(true)
     try {
       const [enRepartoRes, nuevosRes, confirmedRes, deliveredRes, perfRes, routeConfirmedRes, sdActionsRes]:
-        [OrdersResponse, OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData, { ids: string[], orders: Order[] }, Record<string, 'no_answer' | 'rescheduled' | 'customer_declined'>] =
+        [OrdersResponse, OrdersResponse, OrdersResponse, DeliveredEntry[], SdPerfData, { ids: string[], orders: Order[] }, SdActionsResponse] =
         await Promise.all([
           fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc').then(r => r.json()),
           fetch('/api/orders?confirmationStatus=pending&limit=300').then(r => r.json()),
@@ -667,7 +733,7 @@ export default function SdDeliveryPage() {
           fetch('/api/reparto/entregados').then(r => r.json()),
           fetch('/api/sd-delivery/performance').then(r => r.json()),
           fetch('/api/sd-delivery/route-confirmed-ids').then(r => r.json()).catch(() => ({ ids: [], orders: [] })),
-          fetch('/api/sd-delivery/sd-actions').then(r => r.json()).catch(() => ({})),
+          fetch('/api/sd-delivery/sd-actions').then(r => r.json()).catch(() => ({ actions: {}, rescheduledMeta: {} })),
         ])
       const enRepartoData: Order[] = enRepartoRes.data ?? []
       const confirmedData: Order[]  = confirmedRes.data ?? []
@@ -689,6 +755,7 @@ export default function SdDeliveryPage() {
 
       const freshEnRepartoIds = new Set(supplementedEnReparto.map((o: Order) => o.id))
 
+      setReprogramadoMeta(sdActionsRes.rescheduledMeta ?? {})
       setActionMap(prev => {
         const next = { ...prev }
 
@@ -698,7 +765,7 @@ export default function SdDeliveryPage() {
         // route_confirmed seeding below will not override them (its guard checks next[id]).
         // Terminal states (delivered, client_confirmed) are never overridden.
         const noOverride = new Set(['delivered', 'client_confirmed'])
-        for (const [id, secondaryAction] of Object.entries(sdActionsRes)) {
+        for (const [id, secondaryAction] of Object.entries(sdActionsRes.actions ?? {})) {
           if (!noOverride.has(next[id] ?? '')) {
             next[id] = secondaryAction
           }
@@ -981,7 +1048,7 @@ export default function SdDeliveryPage() {
       (o.city             ?? '').toLowerCase().includes(q) ||
       (o.order_number     ?? '').toLowerCase().includes(q),
     )
-  }, [activeTab, nuevosList, confirmadosList, enRutaList, noRespondenList, searchQuery])
+  }, [activeTab, nuevosList, confirmadosList, enRutaList, noRespondenList, reprogramadosList, searchQuery])
 
   const displayedEntregados = useMemo(() => {
     if (activeTab !== 'entregados') return []
@@ -1667,6 +1734,7 @@ export default function SdDeliveryPage() {
                     onNota={() => setNoteModal({ orderId: order.id, name: order.customer_name ?? '' })}
                     onDeclinado={() => saveCustomerDeclined(order.id)}
                     onDispatchLocal={() => dispatchLocal(order.id)}
+                    reprogramadoMeta={reprogramadoMeta[order.id]}
                   />
                 )
               })}
@@ -1927,16 +1995,48 @@ export default function SdDeliveryPage() {
                             </button>
                           </div>
                         ) : ds === 'reprogramado' ? (
-                          <div className="flex items-center gap-1.5">
-                            <span className="inline-flex items-center gap-1 text-xs font-semibold
-                                             px-2 py-1 rounded-full bg-orange-100 text-orange-700">
-                              <RotateCcw className="w-3 h-3" />Reprogramado
-                            </span>
-                            <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
-                              className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
-                                         text-gray-600 text-[11px] font-medium px-1.5 py-1 rounded transition-colors">
-                              <FileText className="w-3 h-3" />
-                            </button>
+                          <div className="space-y-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="inline-flex items-center gap-1 text-xs font-semibold
+                                               px-2 py-1 rounded-full bg-orange-100 text-orange-700">
+                                <RotateCcw className="w-3 h-3" />Reprogramado
+                                {reprogramadoMeta[order.id] && reprogramadoMeta[order.id].count > 1 && (
+                                  <span className="ml-1 opacity-70">×{reprogramadoMeta[order.id].count}</span>
+                                )}
+                              </span>
+                              {reprogramadoMeta[order.id]?.at && (() => {
+                                const { relative } = formatRescheduleDate(reprogramadoMeta[order.id].at)
+                                return <span className="text-[10px] text-orange-500/80">{relative}</span>
+                              })()}
+                            </div>
+                            <div className="flex items-center gap-1 flex-wrap">
+                              {pool === 'confirmado' && (
+                                <>
+                                  <button onClick={() => confirmRoute(order.id)}
+                                    className="flex items-center gap-1 bg-teal-500 hover:bg-teal-600
+                                               text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
+                                    <Truck className="w-3 h-3" />Volver a ruta
+                                  </button>
+                                  <button onClick={() => markDelivered(order.id)}
+                                    className="flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600
+                                               text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
+                                    <CheckCircle2 className="w-3 h-3" />Entregado
+                                  </button>
+                                </>
+                              )}
+                              {pool === 'nuevo' && (
+                                <button onClick={() => confirmClient(order.id)}
+                                  className="flex items-center gap-1 bg-blue-100 hover:bg-blue-200
+                                             text-blue-700 text-[11px] font-medium px-2 py-1 rounded transition-colors whitespace-nowrap">
+                                  <UserCheck className="w-3 h-3" />Confirma ahora
+                                </button>
+                              )}
+                              <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
+                                className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
+                                           text-gray-600 text-[11px] font-medium px-1.5 py-1 rounded transition-colors">
+                                <FileText className="w-3 h-3" />
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <span className="inline-flex items-center gap-1 text-xs font-semibold

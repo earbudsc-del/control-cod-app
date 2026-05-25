@@ -66,7 +66,15 @@ export async function GET() {
       }
     }
 
-    return NextResponse.json(result)
+    const rescheduledMeta: Record<string, { at: string; count: number }> = {}
+    for (const [orderId, row] of latestByOrder) {
+      if (row.action_type === 'rescheduled') {
+        const count = relevant.filter(r => r.order_id === orderId && r.action_type === 'rescheduled').length
+        rescheduledMeta[orderId] = { at: row.created_at, count }
+      }
+    }
+
+    return NextResponse.json({ actions: result, rescheduledMeta })
   } catch (err) {
     console.error('[GET /api/sd-delivery/sd-actions]', err)
     return NextResponse.json({})
