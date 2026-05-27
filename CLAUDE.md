@@ -4,6 +4,54 @@
 
 ---
 
+## FIX: Falsos positivos de cobertura en Santo Domingo (2026-05-27 — sesión 16)
+
+### Causa raíz
+
+`checkCoverage(address, city)` en `src/lib/alert-helpers.ts` construía el haystack solo con `address + city`, sin considerar `province`. Al buscar coincidencias en `OUT_OF_COVERAGE_ZONES`, el término `luperon` (de **Luperón, Puerto Plata**) hacía match con cualquier dirección que contuviera "Luperon" — independientemente de que la ciudad y provincia indicaran claramente Santo Domingo / Distrito Nacional.
+
+### Caso de prueba — Pedido #9154
+
+| Campo | Valor |
+|---|---|
+| Cliente | Juan compres |
+| Dirección | "Luperon con Maireni" |
+| Ciudad | Santo Domingo |
+| Provincia | Distrito Nacional |
+| Resultado anterior (incorrecto) | "Posible fuera de cobertura — Zona: Luperón" |
+| Resultado correcto | Sin alerta de cobertura (es entrega local SD) |
+
+### Regla nueva — contexto urbano Santo Domingo
+
+Si city/province indica contexto SD/DN (coincide con `SD_PATTERN = /santo domingo|distrito nacional|\bdn\b/`), se descartan los matches de `OUT_OF_COVERAGE_ZONES` cuya `province` NO sea `'Santo Domingo'` ni `'Distrito Nacional'`.
+
+**Por qué:** En Santo Domingo, nombres como `Luperón`, `Churchill`, `Lincoln`, `Kennedy`, `Independencia`, `27 de Febrero`, `Máximo Gómez`, `Duarte`, `Mella` son **avenidas o referencias urbanas**, no municipios. El municipio real (Luperón, Puerto Plata) no aplica en ese contexto.
+
+**Excepción:** La entrada `San Antonio de Guerra (Santo Domingo)` sí está en `province: 'Santo Domingo'` y es válida — seguirá disparando alerta.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/alert-helpers.ts` | `checkCoverage` acepta `province` como 3er parámetro opcional. Si contexto SD/DN detectado, filtra `matchedOoc` a solo province SD/DN. Nueva constante `SD_COVERED_PROVINCES`. |
+| `src/components/shared/alert-badges.tsx` | Pasa `province` a `checkCoverage` (ya tenía el prop) |
+| `src/app/(app)/confirmacion/page.tsx` | 4 call sites actualizados a `checkCoverage(address, city, order.province)` |
+| `src/app/(app)/orders/[id]/page.tsx` | Actualizado a `checkCoverage(address, city, order.province)` |
+
+### Cómo probar
+
+1. Abrir el pedido #9154 (Juan compres, "Luperon con Maireni", Santo Domingo / Distrito Nacional)
+2. Verificar que el badge **no** muestra "Fuera de cobertura" ni "Posible fuera de cobertura"
+3. Verificar que sí muestra "SD / Transporte local" (por `isSantoDomingoOrder`)
+4. Probar dirección real fuera de cobertura: **"Luperón, Puerto Plata"** → debe seguir marcando fuera de cobertura (province = Puerto Plata, no SD)
+5. Probar **"San Antonio de Guerra, Santo Domingo"** → debe seguir marcando fuera de cobertura (province = Santo Domingo, que sí está en `SD_COVERED_PROVINCES`, y esa zona SÍ está en OOC para Santo Domingo)
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+---
+
 ## FEATURE: Filtro de estado en `/confirmacion` (2026-05-27 — sesión 15)
 
 ### Objetivo

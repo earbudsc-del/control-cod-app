@@ -16,7 +16,7 @@ export function AlertBadges({
   province,
   className = '',
 }: AlertBadgesProps) {
-  const coverage    = checkCoverage(customerAddress, city)
+  const coverage    = checkCoverage(customerAddress, city, province)
   const showDup     = !!duplicateAlert
   const showOoc     = coverage.isOutOfCoverage
   const showSpec    = !coverage.isOutOfCoverage && coverage.isSpecialDestination

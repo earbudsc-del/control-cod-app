@@ -211,7 +211,7 @@ function ConfirmacionCard({
   const waUrl   = whatsAppUrl(order.customer_phone, buildConfirmMsg(nombre, order.product_summary, order.cod_amount))
   const telUrl  = callUrl(order.customer_phone)
   const hasPhone = !!order.customer_phone
-  const cov     = checkCoverage(order.customer_address, order.city)
+  const cov     = checkCoverage(order.customer_address, order.city, order.province)
   const hasDup  = !!order.duplicate_alert
   const hasAlert = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
   const delay   = getDelayBadge(order)
@@ -1432,7 +1432,7 @@ export default function ConfirmacionPage() {
                         const delay       = getDelayBadge(order)
                         const isPending   = !terminal && (order.confirmation_status as string) === 'pending' && !order.tracking_number
                         const hasDup      = !!order.duplicate_alert
-                        const cov         = checkCoverage(order.customer_address, order.city)
+                        const cov         = checkCoverage(order.customer_address, order.city, order.province)
                         const hasAlert    = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
                         return (
                           <tr key={order.id}
@@ -1605,7 +1605,7 @@ export default function ConfirmacionPage() {
                         const totalAttempts = sessionAtt ?? (order.confirmation_attempts ?? 0)
                         const delay         = getDelayBadge(order)
                         const hasDup        = !!order.duplicate_alert
-                        const cov           = checkCoverage(order.customer_address, order.city)
+                        const cov           = checkCoverage(order.customer_address, order.city, order.province)
                         const hasAlert      = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
                         const isHighlighted = !!(trackingParam && order.tracking_number === trackingParam)
                         const confBadge     = getConfirmBadge(order, terminal)
@@ -1746,7 +1746,7 @@ export default function ConfirmacionPage() {
                         const confBadge = getConfirmBadge(order)
                         const logBadge  = getLogisticsBadge(order)
                         const hasDup    = !!order.duplicate_alert
-                        const cov       = checkCoverage(order.customer_address, order.city)
+                        const cov       = checkCoverage(order.customer_address, order.city, order.province)
                         const hasAlert  = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
                         return (
                           <tr key={order.id}

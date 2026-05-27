@@ -252,7 +252,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const history     = detail.history     ?? []
 
   const slaStatus = getSlaStatus(order.sla_deadline, order.sla_breached)
-  const coverage  = checkCoverage(order.customer_address, order.city)
+  const coverage  = checkCoverage(order.customer_address, order.city, order.province)
 
   return (
     <div className="space-y-4 md:space-y-6 max-w-5xl">
