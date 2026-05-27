@@ -44,6 +44,7 @@ export async function GET(request: Request) {
     const from   = searchParams.get('from') ?? ''
     const to     = searchParams.get('to')   ?? ''
     const filter = searchParams.get('filter') ?? ''  // 'santo_domingo' | 'fuera_de_cobertura' | ''
+    const status = searchParams.get('status') ?? ''  // 'pending' | 'reintentar' | 'confirmed' | 'cancelled' | 'no_coverage' | 'unreachable' | ''
 
     const rangeFrom = (page - 1) * limit
     const rangeTo   = rangeFrom + limit - 1
@@ -79,6 +80,27 @@ export async function GET(request: Request) {
     if (filter === 'fuera_de_cobertura') {
       // Todos los pedidos marcados como sin cobertura — sin restricción de fecha
       query = query.eq('confirmation_status', 'no_coverage')
+    }
+
+    // ── Filtro de estado de confirmación ──────────────────────────────────────
+    if (status === 'pending') {
+      // Pendiente: status=pending y sin intentos (0 o null)
+      query = query
+        .eq('confirmation_status', 'pending')
+        .or('confirmation_attempts.eq.0,confirmation_attempts.is.null')
+    } else if (status === 'reintentar') {
+      // No contesta: status=pending con 1–2 intentos
+      query = query
+        .eq('confirmation_status', 'pending')
+        .gt('confirmation_attempts', 0)
+    } else if (status === 'confirmed') {
+      query = query.eq('confirmation_status', 'confirmed')
+    } else if (status === 'cancelled') {
+      query = query.eq('confirmation_status', 'cancelled')
+    } else if (status === 'no_coverage') {
+      query = query.eq('confirmation_status', 'no_coverage')
+    } else if (status === 'unreachable') {
+      query = query.or('confirmation_status.eq.unreachable,confirmation_status.eq.wrong_number')
     }
 
     const { data, error, count } = await query

@@ -11,7 +11,7 @@ import {
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, RotateCcw, Clock, Inbox, TrendingUp,
   MapPinOff, ChevronLeft, ChevronRight, Search, Truck,
-  CalendarDays, ShoppingBag, Package,
+  CalendarDays, ShoppingBag, Package, ListFilter,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
@@ -25,9 +25,10 @@ const MS_24H       = 24 * 60 * 60 * 1000
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type ViewMode      = 'pedidos' | 'reintentar' | 'confirmados_sin_guia' | 'despachados' | 'santo_domingo' | 'fuera_de_cobertura'
-type ContactMethod = 'call' | 'whatsapp' | 'other'
-type DateFilter    = 'hoy' | 'ayer' | '7dias' | '30dias' | 'personalizado'
+type ViewMode           = 'pedidos' | 'reintentar' | 'confirmados_sin_guia' | 'despachados' | 'santo_domingo' | 'fuera_de_cobertura'
+type ContactMethod      = 'call' | 'whatsapp' | 'other'
+type DateFilter         = 'hoy' | 'ayer' | '7dias' | '30dias' | 'personalizado'
+type ConfirmStatusFilter = '' | 'pending' | 'reintentar' | 'confirmed' | 'cancelled' | 'no_coverage' | 'unreachable'
 
 interface ConfirmStats {
   nuevos:             number
@@ -151,6 +152,21 @@ function buildConfirmMsg(nombre: string, producto?: string | null, monto?: numbe
   const m = monto ? ` Monto a cancelar: RD$${monto.toLocaleString('es-DO')}.` : ''
   return [`Hola ${n} 😊,`, '', `Tu pedido de ${p} 📦 está próximo a ser entregado.`, '',
           `Por favor confirmanos si podrás recibirlo.${m}`, '', 'Quedamos atentos 🙏'].join('\n')
+}
+
+function matchesStatusFilter(order: Order, sf: ConfirmStatusFilter): boolean {
+  if (!sf) return true
+  const status   = (order.confirmation_status as string) ?? 'pending'
+  const attempts = order.confirmation_attempts ?? 0
+  switch (sf) {
+    case 'pending':     return status === 'pending' && attempts === 0
+    case 'reintentar':  return status === 'pending' && attempts > 0
+    case 'confirmed':   return status === 'confirmed'
+    case 'cancelled':   return status === 'cancelled'
+    case 'no_coverage': return status === 'no_coverage'
+    case 'unreachable': return status === 'unreachable' || status === 'wrong_number'
+    default: return true
+  }
 }
 
 function buildDateParams(
@@ -518,12 +534,13 @@ export default function ConfirmacionPage() {
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const [toast, setToast]             = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
 
-  // ── Search + date (shared) ──────────────────────────────────────────────────
-  const [searchQuery, setSearchQuery] = useState('')
-  const [dateFilter, setDateFilter]   = useState<DateFilter | null>(null)
-  const [dateFrom, setDateFrom]       = useState('')
-  const [dateTo, setDateTo]           = useState('')
-  const [dateApplied, setDateApplied] = useState(false)
+  // ── Search + date + status (shared) ────────────────────────────────────────
+  const [searchQuery, setSearchQuery]     = useState('')
+  const [dateFilter, setDateFilter]       = useState<DateFilter | null>(null)
+  const [dateFrom, setDateFrom]           = useState('')
+  const [dateTo, setDateTo]               = useState('')
+  const [dateApplied, setDateApplied]     = useState(false)
+  const [statusFilter, setStatusFilter]   = useState<ConfirmStatusFilter>('')
 
   // ── Vista "Pedidos" (server-paginated) ──────────────────────────────────────
   const [pedidosData, setPedidosData]     = useState<Order[]>([])
@@ -578,12 +595,13 @@ export default function ConfirmacionPage() {
   }, [])
 
   // ── Fetch: pedidos (server-paginated) ───────────────────────────────────────
-  const fetchPedidos = useCallback(async (page: number, sq: string, df: DateFilter | null, dFrom: string, dTo: string, dApplied: boolean) => {
+  const fetchPedidos = useCallback(async (page: number, sq: string, df: DateFilter | null, dFrom: string, dTo: string, dApplied: boolean, sf: ConfirmStatusFilter = '') => {
     setPedidosLoading(true)
     try {
       const searchQs = sq ? `&search=${encodeURIComponent(sq)}` : ''
       const dateQs   = buildDateParams(df, dFrom, dTo, dApplied)
-      const res      = await fetch(`/api/confirmacion/pedidos?page=${page}&limit=50${searchQs}${dateQs}`)
+      const statusQs = sf ? `&status=${encodeURIComponent(sf)}` : ''
+      const res      = await fetch(`/api/confirmacion/pedidos?page=${page}&limit=50${searchQs}${dateQs}${statusQs}`)
         .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
       setPedidosData(res.data  ?? [])
       setPedidosTotal(res.total ?? 0)
@@ -640,11 +658,12 @@ export default function ConfirmacionPage() {
   }, [])
 
   // ── Fetch: Santo Domingo (server-paginated) ─────────────────────────────────
-  const fetchSD = useCallback(async (page: number, sq: string) => {
+  const fetchSD = useCallback(async (page: number, sq: string, sf: ConfirmStatusFilter = '') => {
     setSdLoading(true)
     try {
       const searchQs = sq ? `&search=${encodeURIComponent(sq)}` : ''
-      const res = await fetch(`/api/confirmacion/pedidos?filter=santo_domingo&page=${page}&limit=50${searchQs}`)
+      const statusQs = sf ? `&status=${encodeURIComponent(sf)}` : ''
+      const res = await fetch(`/api/confirmacion/pedidos?filter=santo_domingo&page=${page}&limit=50${searchQs}${statusQs}`)
         .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
       setSdData(res.data   ?? [])
       setSdTotal(res.total ?? 0)
@@ -656,11 +675,12 @@ export default function ConfirmacionPage() {
   }, [])
 
   // ── Fetch: Fuera de cobertura (server-paginated) ─────────────────────────────
-  const fetchFCD = useCallback(async (page: number, sq: string) => {
+  const fetchFCD = useCallback(async (page: number, sq: string, sf: ConfirmStatusFilter = '') => {
     setFcdLoading(true)
     try {
       const searchQs = sq ? `&search=${encodeURIComponent(sq)}` : ''
-      const res = await fetch(`/api/confirmacion/pedidos?filter=fuera_de_cobertura&page=${page}&limit=50${searchQs}`)
+      const statusQs = sf ? `&status=${encodeURIComponent(sf)}` : ''
+      const res = await fetch(`/api/confirmacion/pedidos?filter=fuera_de_cobertura&page=${page}&limit=50${searchQs}${statusQs}`)
         .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
       setFcdData(res.data   ?? [])
       setFcdTotal(res.total ?? 0)
@@ -676,13 +696,13 @@ export default function ConfirmacionPage() {
     setLastRefresh(new Date())
     fetchStats()
     if (viewMode === 'pedidos')
-      fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
+      fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
     if (viewMode === 'reintentar')           fetchQueue()
     if (viewMode === 'confirmados_sin_guia') fetchConfirmados()
     if (viewMode === 'despachados')          fetchDespachados()
-    if (viewMode === 'santo_domingo')        fetchSD(sdPage, searchQuery)
-    if (viewMode === 'fuera_de_cobertura')   fetchFCD(fcdPage, searchQuery)
-  }, [viewMode, pedidosPage, sdPage, fcdPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied,
+    if (viewMode === 'santo_domingo')        fetchSD(sdPage, searchQuery, statusFilter)
+    if (viewMode === 'fuera_de_cobertura')   fetchFCD(fcdPage, searchQuery, statusFilter)
+  }, [viewMode, pedidosPage, sdPage, fcdPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter,
       fetchStats, fetchPedidos, fetchQueue, fetchConfirmados, fetchDespachados, fetchSD, fetchFCD])
 
   // ── Mount: pre-cargar todo ──────────────────────────────────────────────────
@@ -703,55 +723,55 @@ export default function ConfirmacionPage() {
   useEffect(() => {
     setCurrentPage(1)
     if (viewMode === 'pedidos')
-      fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
+      fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
     if (viewMode === 'reintentar')                          fetchQueue()
     if (viewMode === 'confirmados_sin_guia' && !confirmadosLoaded) fetchConfirmados()
     if (viewMode === 'despachados'          && !despachadosLoaded) fetchDespachados()
-    if (viewMode === 'santo_domingo')      { setSdPage(1);  fetchSD(1, searchQuery)  }
-    if (viewMode === 'fuera_de_cobertura') { setFcdPage(1); fetchFCD(1, searchQuery) }
+    if (viewMode === 'santo_domingo')      { setSdPage(1);  fetchSD(1, searchQuery, statusFilter)  }
+    if (viewMode === 'fuera_de_cobertura') { setFcdPage(1); fetchFCD(1, searchQuery, statusFilter) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode])
 
-  // ── Cambios en búsqueda/fecha → re-fetch pedidos ────────────────────────────
+  // ── Cambios en búsqueda/fecha/estado → re-fetch pedidos ─────────────────────
   useEffect(() => {
     if (viewMode !== 'pedidos') return
     setPedidosPage(1)
-    fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
+    fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, dateFilter, dateApplied])
+  }, [searchQuery, dateFilter, dateApplied, statusFilter])
 
   // ── Cambio de página en pedidos ─────────────────────────────────────────────
   useEffect(() => {
     if (viewMode === 'pedidos')
-      fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
+      fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pedidosPage])
 
-  // ── Búsqueda en tab Santo Domingo (searchQuery cambia mientras está activo) ──
+  // ── Búsqueda/estado en tab Santo Domingo ────────────────────────────────────
   useEffect(() => {
     if (viewMode !== 'santo_domingo') return
     setSdPage(1)
-    fetchSD(1, searchQuery)
+    fetchSD(1, searchQuery, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery])
+  }, [searchQuery, statusFilter])
 
   // ── Cambio de página en Santo Domingo ────────────────────────────────────────
   useEffect(() => {
-    if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery)
+    if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sdPage])
 
-  // ── Búsqueda en tab Fuera de cobertura ───────────────────────────────────────
+  // ── Búsqueda/estado en tab Fuera de cobertura ────────────────────────────────
   useEffect(() => {
     if (viewMode !== 'fuera_de_cobertura') return
     setFcdPage(1)
-    fetchFCD(1, searchQuery)
+    fetchFCD(1, searchQuery, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery])
+  }, [searchQuery, statusFilter])
 
   // ── Cambio de página en Fuera de cobertura ───────────────────────────────────
   useEffect(() => {
-    if (viewMode === 'fuera_de_cobertura') fetchFCD(fcdPage, searchQuery)
+    if (viewMode === 'fuera_de_cobertura') fetchFCD(fcdPage, searchQuery, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fcdPage])
 
@@ -806,6 +826,9 @@ export default function ConfirmacionPage() {
       const { from, to } = effectiveDateRange
       result = result.filter(o => { const ts = effectiveMs(o); return ts >= from && ts < to })
     }
+    if (statusFilter) {
+      result = result.filter(o => matchesStatusFilter(o, statusFilter))
+    }
     const q = searchQuery.trim().toLowerCase()
     if (!q) return result
     return result.filter(o =>
@@ -813,7 +836,7 @@ export default function ConfirmacionPage() {
       (o.customer_phone ?? '').toLowerCase().includes(q) ||
       (o.order_number   ?? '').toLowerCase().includes(q),
     )
-  }, [displayedOrders, effectiveDateRange, searchQuery])
+  }, [displayedOrders, effectiveDateRange, searchQuery, statusFilter])
 
   const pagedOrders  = useMemo(
     () => filteredOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
@@ -821,7 +844,7 @@ export default function ConfirmacionPage() {
   )
   const totalPages = Math.ceil(filteredOrders.length / PAGE_SIZE)
 
-  useEffect(() => { setCurrentPage(1) }, [searchQuery, dateFilter, dateApplied, viewMode])
+  useEffect(() => { setCurrentPage(1) }, [searchQuery, dateFilter, dateApplied, viewMode, statusFilter])
 
   // ── Toast ───────────────────────────────────────────────────────────────────
   function showToast(msg: string, type: 'success' | 'error') {
@@ -898,6 +921,12 @@ export default function ConfirmacionPage() {
     viewMode === 'santo_domingo'        ? sdData         :
     viewMode === 'fuera_de_cobertura'   ? fcdData        :
     []
+
+  // Para confirmados/despachados (carga total client-side) aplicamos statusFilter en cliente
+  const clientFilteredData: Order[] =
+    (viewMode === 'confirmados_sin_guia' || viewMode === 'despachados') && statusFilter
+      ? currentData.filter(o => matchesStatusFilter(o, statusFilter))
+      : currentData
 
   // ── Metadatos de vistas ─────────────────────────────────────────────────────
   const VIEW_META: { mode: ViewMode; label: string; Icon: React.ElementType; color: string }[] = [
@@ -1277,6 +1306,33 @@ export default function ConfirmacionPage() {
           )}
         </div>
 
+        {/* ── Filtro de estado ── */}
+        <div className="px-3 py-2 border-b border-indigo-100 flex items-center gap-2 flex-wrap bg-gray-50/60">
+          <ListFilter className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+          <select
+            value={statusFilter}
+            onChange={e => { setStatusFilter(e.target.value as ConfirmStatusFilter); setCurrentPage(1) }}
+            className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors cursor-pointer
+              ${statusFilter
+                ? 'bg-indigo-500 text-white border-indigo-500'
+                : 'text-gray-600 border-gray-200 bg-white hover:border-indigo-300 hover:text-indigo-600'}`}>
+            <option value=''>Estado: Todos</option>
+            <option value='pending'>Pendiente</option>
+            <option value='reintentar'>No contesta</option>
+            <option value='confirmed'>Confirmado</option>
+            <option value='cancelled'>Canceló</option>
+            <option value='no_coverage'>Sin cobertura</option>
+            <option value='unreachable'>Inalcanzable</option>
+          </select>
+          {statusFilter && (
+            <button
+              onClick={() => { setStatusFilter(''); setCurrentPage(1) }}
+              className="text-[11px] text-gray-400 hover:text-red-500 ml-auto shrink-0">
+              ✕ Limpiar
+            </button>
+          )}
+        </div>
+
         {/* ── Tab bar (5 vistas) ── */}
         <>
           {/* Mobile: select */}
@@ -1315,7 +1371,7 @@ export default function ConfirmacionPage() {
           <div className="flex items-center justify-center py-16">
             <Spinner className="w-6 h-6 text-indigo-500" />
           </div>
-        ) : currentData.length === 0 ? (
+        ) : clientFilteredData.length === 0 ? (
           <div className="px-5 py-10 text-center">
             <p className="text-gray-500 font-medium">No hay pedidos en esta vista</p>
             {viewMode === 'reintentar' && (
@@ -1668,7 +1724,7 @@ export default function ConfirmacionPage() {
               <>
                 {/* Mobile cards */}
                 <div className="md:hidden divide-y divide-gray-100">
-                  {currentData.map(order => (
+                  {clientFilteredData.map(order => (
                     <div key={order.id}><ReadOnlyCard order={order} /></div>
                   ))}
                 </div>
@@ -1686,7 +1742,7 @@ export default function ConfirmacionPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {currentData.map(order => {
+                      {clientFilteredData.map(order => {
                         const confBadge = getConfirmBadge(order)
                         const logBadge  = getLogisticsBadge(order)
                         const hasDup    = !!order.duplicate_alert

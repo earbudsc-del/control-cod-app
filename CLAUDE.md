@@ -4,6 +4,96 @@
 
 ---
 
+## FEATURE: Filtro de estado en `/confirmacion` (2026-05-27 — sesión 15)
+
+### Objetivo
+
+Agregar un dropdown de filtro por `confirmation_status` visible en todos los tabs del módulo de confirmación, combinable con búsqueda, fecha y paginación.
+
+### Estados disponibles
+
+| Valor `status` | Label UI | Lógica DB |
+|---|---|---|
+| `''` (vacío) | Estado: Todos | Sin filtro |
+| `pending` | Pendiente | `confirmation_status = 'pending' AND (confirmation_attempts = 0 OR IS NULL)` |
+| `reintentar` | No contesta | `confirmation_status = 'pending' AND confirmation_attempts > 0` |
+| `confirmed` | Confirmado | `confirmation_status = 'confirmed'` |
+| `cancelled` | Canceló | `confirmation_status = 'cancelled'` |
+| `no_coverage` | Sin cobertura | `confirmation_status = 'no_coverage'` |
+| `unreachable` | Inalcanzable | `confirmation_status IN ('unreachable', 'wrong_number')` |
+
+### Query param usado
+
+`?status=<valor>` en `/api/confirmacion/pedidos`
+
+### Cómo se combina con tabs/search/paginación
+
+| Tab | Modo filtrado | Detalles |
+|---|---|---|
+| Pedidos | Server-side | `?status=X` se pasa a la API, re-fetch al cambiar |
+| Santo Domingo | Server-side | `?filter=santo_domingo&status=X` — composición correcta |
+| Fuera de cobertura | Server-side | `?filter=fuera_de_cobertura&status=X` |
+| Reintentar | Client-side | `filteredOrders` aplica `matchesStatusFilter` |
+| Confirmados | Client-side | `clientFilteredData` filtra sobre `confirmadosData` ya cargada |
+| Despachados | Client-side | `clientFilteredData` filtra sobre `despachadosData` ya cargada |
+
+- Se combina con búsqueda: el filtro de estado se aplica antes del filtro de texto.
+- Se combina con paginación: al cambiar `statusFilter`, la página vuelve a 1.
+- Se combina con fecha: el filtro de fecha aplica a Pedidos (server-side) independientemente.
+- No se resetea al cambiar de tab (es intencional — el usuario puede mantener el filtro).
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/confirmacion/pedidos/route.ts` | Nuevo query param `?status=`; 6 ramas de filtro SQL incluyendo null-safe para `pending` |
+| `src/app/(app)/confirmacion/page.tsx` | Tipo `ConfirmStatusFilter` · state `statusFilter` · helper `matchesStatusFilter` · params `sf` en fetchPedidos/fetchSD/fetchFCD · `refreshAll` + todos los efectos actualizados · `filteredOrders` con statusFilter · `clientFilteredData` · UI fila de filtro de estado · render read-only usa `clientFilteredData` |
+
+### Cómo probar
+
+**Tab Pedidos:**
+1. Abrir `/confirmacion` (tab Pedidos por defecto)
+2. Abrir dropdown "Estado: Todos" → seleccionar "Pendiente"
+3. Verificar que lista solo muestra pedidos `pending` con 0 intentos
+4. Seleccionar "No contesta" → solo pedidos `pending` con ≥1 intento
+5. Seleccionar "Confirmado" → solo pedidos `confirmed`
+6. Combinar con búsqueda y fecha — debe funcionar en conjunto
+7. Botón "✕ Limpiar" → quita el filtro de estado
+
+**Tab Santo Domingo (prioridad):**
+1. Clic en tab "Sto. Domingo"
+2. Dropdown "Estado: Todos" → seleccionar "Pendiente"
+   → Solo pedidos SD sin confirmar, paginación 50/página
+3. Seleccionar "Confirmado" → pedidos SD ya confirmados
+4. Seleccionar "Sin cobertura" → pedidos SD marcados no_coverage
+5. Seleccionar "No contesta" → pedidos SD en estado reintentar
+6. Búsqueda + estado combinados → funciona
+
+**Tab Reintentar:**
+1. Seleccionar "Confirmado" → 0 resultados (lógico, reintentar son pending)
+2. Seleccionar "No contesta" o "Pendiente" → filtra dentro de la cola
+
+**Tab Confirmados / Despachados:**
+- Filtro aplica client-side sobre datos ya cargados
+- "Confirmado" en Confirmados → muestra todos (ya son confirmed)
+- Otros estados → 0 resultados (esperado)
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Tabs Santo Domingo / Fuera de cobertura — sin cambios en comportamiento base
+- Búsqueda — combina correctamente con estado
+- Paginación — se resetea a p.1 al cambiar estado
+- Alertas de duplicados/cobertura — sin cambios
+- Roles — sin cambios
+- Mobile UI — dropdown nativo, mobile-first
+- Auto-refresh — pasa statusFilter en refreshAll
+
+---
+
 ## FEATURE: Tabs "Santo Domingo" y "Fuera de cobertura" en `/confirmacion` (2026-05-27 — sesión 14)
 
 ### Objetivo
