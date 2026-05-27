@@ -4,6 +4,139 @@
 
 ---
 
+## FEATURE: Tabs "Santo Domingo" y "Fuera de cobertura" en `/confirmacion` (2026-05-27 — sesión 14)
+
+### Objetivo
+
+Dos tabs rápidos en `/confirmacion` que acumulan pedidos de todas las fechas para facilitar gestión operativa sin mezclarlos con la lista general.
+
+### Tab "Santo Domingo" (`viewMode = 'santo_domingo'`)
+
+Muestra TODOS los pedidos de zona SD/DN (todas las fechas, todos los estados). Usa el mismo rendering interactivo que la vista "Pedidos" (con botones de confirmación para pedidos pendientes).
+
+**Zonas detectadas:**
+- `city` o `province` o `customer_address` que contenga: `santo domingo`, `distrito nacional`, `dn`
+- Incluye: Santo Domingo Este, Santo Domingo Norte, Santo Domingo Oeste, Distrito Nacional, y zonas de transporte local
+
+**Comportamiento:**
+- Sin filtro de fecha (acumula todas las fechas)
+- Paginación server-side 50 por página con navegación Anterior/Siguiente
+- Búsqueda por nombre, teléfono, #orden, guía — funciona dentro del tab
+- Contadores visibles: KPI card + badge en tab bar
+- Color teal en KPI card y paginación
+
+### Tab "Fuera de cobertura" (`viewMode = 'fuera_de_cobertura'`)
+
+Muestra TODOS los pedidos con `confirmation_status = 'no_coverage'` (todas las fechas). Vista de solo lectura.
+
+**Comportamiento:**
+- Sin filtro de fecha (acumula todas las fechas)
+- Paginación server-side 50 por página con navegación Anterior/Siguiente
+- Búsqueda por nombre, teléfono, #orden — funciona dentro del tab
+- Contadores visibles: KPI card + badge en tab bar
+- Color rojo en KPI card y paginación
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/confirmacion/pedidos/route.ts` | Nuevo query param `?filter=santo_domingo\|fuera_de_cobertura`; no aplica filtro de fecha cuando filter está activo |
+| `src/app/api/confirmacion/stats/route.ts` | 2 nuevas queries paralelas: `santoDomingoTotal` + `fueraDeCoberturaTotal`; devueltos en el JSON |
+| `src/app/(app)/confirmacion/page.tsx` | `ViewMode` + 2 nuevas modos · `ConfirmStats` + 2 nuevos campos · 10 nuevas state vars · `fetchSD` + `fetchFCD` callbacks · `refreshAll` extendido · 4 nuevos efectos (search + page change × 2) · `viewCounts` extendido · `isLoading` extendido · `currentData` extendido · `VIEW_META` + 2 entradas · 2 nuevos KPI cards con colores teal/red · rendering SD (reutiliza pedidos via IIFE + `displayData`) · FCD incluido en bloque read-only existente · 2 nuevas secciones de paginación |
+
+### Lógica de filtro SD en la API
+
+```typescript
+// Idéntico al sdFilter usado en /api/confirmacion/stats
+const SD_FILTER = [
+  'city.ilike.%santo domingo%',
+  'city.ilike.%distrito nacional%',
+  'city.ilike.dn',
+  'province.ilike.%santo domingo%',
+  'province.ilike.%distrito nacional%',
+  'province.ilike.dn',
+  'customer_address.ilike.%santo domingo%',
+  'customer_address.ilike.%distrito nacional%',
+].join(',')
+```
+
+### Paginación — invariante de 50 por página
+
+| Tab | Server-side | Límite | Filtro fecha |
+|---|---|---|---|
+| Pedidos | ✅ | 50 | Sí (Hoy/Ayer/7días/30días/Rango) |
+| Reintentar | client-side | 50 | Sí |
+| Confirmados | client-side (all) | — | No |
+| Despachados | client-side (all) | — | No |
+| **Santo Domingo** | ✅ | **50** | **No (todas las fechas)** |
+| **Fuera cobertura** | ✅ | **50** | **No (todas las fechas)** |
+
+### Contadores (viewCounts)
+
+```typescript
+santo_domingo:      sdTotal  > 0 ? sdTotal  : (stats?.santoDomingoTotal    ?? 0),
+fuera_de_cobertura: fcdTotal > 0 ? fcdTotal : (stats?.fueraDeCoberturaTotal ?? 0),
+```
+
+- `sdTotal`/`fcdTotal` se actualizan al cargar la primera página del tab
+- `stats.santoDomingoTotal`/`stats.fueraDeCoberturaTotal` se populan en el `fetchStats` inicial
+- El badge del tab bar usa `viewCounts` → se actualiza en ambos casos
+
+### Cómo probar
+
+1. Abrir `/confirmacion`
+2. Verificar que aparecen **2 nuevos KPI cards** en teal (Santo Domingo) y rojo (Fuera cobertura) debajo de los 4 existentes
+3. Clic en **"Santo Domingo"** → tab se activa, carga pedidos de zona SD/DN, contadores visibles
+4. Verificar que muestra pedidos de **todas las fechas** (no solo hoy)
+5. Escribir en el buscador → filtra dentro de SD orders únicamente
+6. Clic "Siguiente" → segunda página de 50 pedidos SD
+7. Volver a "Pedidos" → lista general sin cambios
+8. Clic en **"Fuera de cobertura"** → tab se activa, carga pedidos `no_coverage`
+9. Verificar que es read-only (no hay botones de acción)
+10. Búsqueda y paginación funcionan igual
+11. Verificar que tabs existentes (Reintentar, Confirmados, Despachados) siguen funcionando
+
+**SQL de verificación SD:**
+```sql
+-- Contar pedidos SD para comparar con el contador del tab
+SELECT COUNT(*) AS sd_total
+FROM orders
+WHERE source = 'shopify_webhook'
+  AND (
+    city ILIKE '%santo domingo%' OR city ILIKE '%distrito nacional%' OR city ILIKE 'dn'
+    OR province ILIKE '%santo domingo%' OR province ILIKE '%distrito nacional%' OR province ILIKE 'dn'
+    OR customer_address ILIKE '%santo domingo%' OR customer_address ILIKE '%distrito nacional%'
+  );
+```
+
+**SQL de verificación Fuera de cobertura:**
+```sql
+-- Contar pedidos sin cobertura para comparar con el contador del tab
+SELECT COUNT(*) AS fcd_total
+FROM orders
+WHERE source = 'shopify_webhook'
+  AND confirmation_status = 'no_coverage';
+```
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Tab Pedidos — sin cambios (usa `displayData` que resuelve a `pedidosData` cuando `viewMode === 'pedidos'`)
+- Tab Reintentar — sin cambios
+- Tab Confirmados sin guía — sin cambios
+- Tab Despachados — sin cambios
+- Búsqueda — funciona en todos los tabs (con semántica correcta por tab)
+- Alertas de duplicados/cobertura — sin cambios
+- Paginación existente — sin cambios
+- Roles (admin / confirmation_agent) — sin cambios
+- Mobile UI (select + scroll horizontal) — sin cambios
+- EFI/Gintracom, cron tracking, Shopify sync — sin cambios
+
+---
+
 ## FEATURE: Rol `dispatch_agent` — Agente de despacho (2026-05-26 — sesión 13)
 
 ### Propósito
