@@ -7,6 +7,7 @@ export const OPERATIVE_ROLES: UserRole[] = [
   'novelty_agent',
   'delivery_agent',
   'santo_domingo_delivery_agent',
+  'dispatch_agent',
   'agent',
 ]
 
@@ -21,6 +22,7 @@ export const ROLE_TASK_TYPES: Partial<Record<string, TaskType[] | null>> = {
   confirmation_agent: ['confirmation'],
   novelty_agent:      ['novedad', 'recovery'],
   delivery_agent:     ['follow_up', 'recovery'],
+  dispatch_agent:     null,
   agent:              null,
   ia_supervisor:      null,
 }

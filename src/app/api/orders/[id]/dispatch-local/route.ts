@@ -16,7 +16,10 @@ export async function POST(
     const { data: profile } = await authClient
       .from('profiles').select('id, role, store_id').eq('id', user.id).single()
 
-    const canDispatch = profile?.role === 'admin' || profile?.role === 'santo_domingo_delivery_agent'
+    const canDispatch =
+      profile?.role === 'admin' ||
+      profile?.role === 'dispatch_agent' ||
+      profile?.role === 'santo_domingo_delivery_agent'
     if (!canDispatch) {
       return NextResponse.json({ error: 'Sin permisos para despachar localmente' }, { status: 403 })
     }
@@ -70,7 +73,9 @@ export async function POST(
           action_type: 'local_dispatched',
           notes:       profile.role === 'admin'
             ? 'Despachado por admin — transporte SD sin guía EFI'
-            : 'Despachado por mensajero SD — transporte local sin guía EFI',
+            : profile.role === 'dispatch_agent'
+              ? 'Despachado por agente de despacho — transporte SD sin guía EFI'
+              : 'Despachado por mensajero SD — transporte local sin guía EFI',
         }),
     ])
 

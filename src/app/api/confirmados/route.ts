@@ -21,6 +21,15 @@ export async function GET(request: Request) {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
 
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+
+    const canView = profile?.role === 'admin' || profile?.role === 'dispatch_agent'
+    if (!canView) return NextResponse.json({ error: 'Sin permisos para ver confirmados' }, { status: 403 })
+
     const { searchParams } = new URL(request.url)
     const filter = searchParams.get('filter') // 'hoy' | 'ayer' | 'recuperados'
     const from   = searchParams.get('from')

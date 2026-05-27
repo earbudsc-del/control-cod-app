@@ -4,6 +4,131 @@
 
 ---
 
+## FEATURE: Rol `dispatch_agent` — Agente de despacho (2026-05-26 — sesión 13)
+
+### Propósito
+
+Nuevo rol operativo para la persona encargada de **despachar pedidos ya confirmados**. Es el eslabón entre el agente de confirmación y el mensajero de reparto.
+
+```
+confirmation_agent → confirma pedidos
+dispatch_agent     → despacha pedidos confirmados (guía EFI o local SD)
+delivery_agent     → seguimiento reparto EFI/Gintracom
+santo_domingo_delivery_agent → mensajero SD en ruta
+novelty_agent      → gestiona novedades
+```
+
+### Permisos del `dispatch_agent`
+
+| Capacidad | Permitido |
+|---|---|
+| Acceder a `/confirmados` | ✅ |
+| Ver pedidos confirmados sin guía | ✅ |
+| Asignar guía EFI (`PATCH /api/orders/:id/assign-tracking`) | ✅ |
+| Despachar localmente SD (`POST /api/orders/:id/dispatch-local`) | ✅ |
+| Ver `/mi-rendimiento` (métricas propias, sin dinero) | ✅ (Fase 2) |
+| Confirmar pedidos nuevos | ❌ |
+| Gestionar novedades | ❌ |
+| Gestionar devoluciones | ❌ |
+| Ver `/dashboard` (métricas financieras) | ❌ |
+| Ver `/performance` | ❌ |
+| Ver ganancias / rentabilidad / pagos estimados | ❌ |
+| Configuración avanzada | ❌ |
+
+### Archivos modificados (Fase 1)
+
+| Archivo | Cambio |
+|---|---|
+| `src/types/index.ts` | Añade `'dispatch_agent'` al union type `UserRole` |
+| `src/lib/roles.ts` | Añade `dispatch_agent` a `OPERATIVE_ROLES` y `ROLE_TASK_TYPES` |
+| `src/components/layout/sidebar.tsx` | Nuevo nav `dispatch_agent`: Mi rendimiento + Confirmados |
+| `src/middleware.ts` | `CONFIRMADOS_PATHS = ['/confirmados']` — permite solo admin + dispatch_agent; bloquea otros roles |
+| `src/app/api/confirmados/route.ts` | Guard explícito: `role === 'admin' \|\| role === 'dispatch_agent'` |
+| `src/app/api/orders/[id]/assign-tracking/route.ts` | `canAssign = admin \|\| dispatch_agent` (antes solo admin) |
+| `src/app/api/orders/[id]/dispatch-local/route.ts` | `canDispatch` extiende a `dispatch_agent`; nota auditoría distingue rol |
+| `supabase/migrations/029_dispatch_agent_role.sql` | NUEVO — profiles.role CHECK + is_agent_or_above() actualizada |
+
+### Migración requerida
+
+Aplicar **`029_dispatch_agent_role.sql`** en Supabase SQL Editor **antes de crear el usuario**:
+
+```sql
+-- Amplía el CHECK de profiles.role para aceptar 'dispatch_agent'
+-- Actualiza is_agent_or_above() para que RLS funcione correctamente
+```
+
+El archivo está en `supabase/migrations/029_dispatch_agent_role.sql`.
+
+### Cómo crear el usuario en Supabase
+
+1. Supabase Dashboard → **Authentication → Users → Add user**
+2. Email + contraseña para el agente de despacho
+3. Copiar el UUID del usuario creado
+4. En **SQL Editor**, ejecutar:
+
+```sql
+INSERT INTO profiles (id, store_id, full_name, role)
+VALUES (
+  '<uuid-del-usuario>',
+  '<uuid-de-tu-tienda>',
+  'Nombre del Agente',
+  'dispatch_agent'
+);
+```
+
+> El `store_id` se obtiene con: `SELECT id, name FROM stores LIMIT 5;`
+
+### Cómo probar acceso y restricciones
+
+**Con usuario `dispatch_agent`:**
+
+1. Aplicar migración 029 en Supabase SQL Editor
+2. Crear perfil con `role = 'dispatch_agent'`
+3. Iniciar sesión → debe redirigir a `/my-tasks` (home de agentes)
+4. Sidebar: debe mostrar **"Mi rendimiento"** y **"Confirmados"** únicamente
+5. Navegar a `/confirmados` → debe cargar la lista de pedidos confirmados
+6. Asignar una guía EFI → debe funcionar (botón "Asignar" → toast OK)
+7. Despachar local → debe funcionar (botón "Despachar local" → toast OK)
+8. Navegar a `/dashboard` directamente → debe redirigir a `/my-tasks`
+9. Navegar a `/novedad` directamente → debe redirigir a `/my-tasks`
+10. Navegar a `/devoluciones` directamente → debe redirigir a `/my-tasks`
+11. `GET /api/confirmados` con sesión de otro rol (ej. delivery_agent) → debe devolver 403
+
+**Auditoría en Supabase:**
+
+```sql
+-- Ver despachados por dispatch_agent
+SELECT aa.created_at, p.full_name, p.role, aa.notes, o.order_number
+FROM agent_actions aa
+JOIN profiles p ON p.id = aa.agent_id
+JOIN orders o ON o.id = aa.order_id
+WHERE aa.action_type IN ('local_dispatched', 'status_updated')
+  AND p.role = 'dispatch_agent'
+ORDER BY aa.created_at DESC
+LIMIT 20;
+```
+
+### Pendiente (Fase 2 — métricas dispatch_agent)
+
+- `RendimientoDespacho` component en `/mi-rendimiento`
+- Métricas: confirmados procesados hoy/ayer, guías EFI asignadas, despachos locales, tiempo promedio confirmado→despachado, backlog sin guía, score operativo
+- Vista admin del rendimiento + pago sugerido semanal (solo admin/CEO lo ve)
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- confirmation_agent — sin cambios
+- novelty_agent — sin cambios
+- delivery_agent — sin cambios
+- santo_domingo_delivery_agent — sin cambios (dispatch-local sigue funcionando para él)
+- Flujo admin en /confirmados — sin cambios
+- EFI/Gintracom, cron tracking, Shopify sync — sin cambios
+
+---
+
 ## FEATURE: Tab Reprogramados — reactivación de pedidos estancados (2026-05-25 — sesión 12)
 
 ### Problema resuelto

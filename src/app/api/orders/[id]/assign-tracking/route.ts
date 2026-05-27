@@ -18,8 +18,9 @@ export async function PATCH(
       .eq('id', user.id)
       .single()
 
-    if (profile?.role !== 'admin') {
-      return NextResponse.json({ error: 'Solo admins pueden asignar guías' }, { status: 403 })
+    const canAssign = profile?.role === 'admin' || profile?.role === 'dispatch_agent'
+    if (!canAssign) {
+      return NextResponse.json({ error: 'Sin permisos para asignar guías' }, { status: 403 })
     }
 
     const body = await request.json()

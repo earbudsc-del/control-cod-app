@@ -78,6 +78,11 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/sd-delivery',    label: 'Entregas SD',     icon: MapPin,     alert: 'amber' },
   ],
 
+  dispatch_agent: [
+    { href: '/mi-rendimiento', label: 'Mi rendimiento', icon: TrendingUp,  alert: null    },
+    { href: '/confirmados',    label: 'Confirmados',    icon: CheckCircle2, alert: 'green' },
+  ],
+
   agent: [
     { href: '/my-tasks',     label: 'Mis tareas',     icon: ListTodo,        alert: null     },
     { href: '/orders',       label: 'Pedidos',        icon: Package,         alert: null     },
