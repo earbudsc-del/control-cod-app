@@ -108,11 +108,107 @@ ORDER BY aa.created_at DESC
 LIMIT 20;
 ```
 
-### Pendiente (Fase 2 — métricas dispatch_agent)
+### Fase 2 — RendimientoDespacho (2026-05-26 — sesión 13 continuación)
 
-- `RendimientoDespacho` component en `/mi-rendimiento`
-- Métricas: confirmados procesados hoy/ayer, guías EFI asignadas, despachos locales, tiempo promedio confirmado→despachado, backlog sin guía, score operativo
-- Vista admin del rendimiento + pago sugerido semanal (solo admin/CEO lo ve)
+Dashboard operativo real para el `dispatch_agent`. Reemplaza el task manager genérico vacío.
+
+#### Archivos modificados / creados
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/dispatch-agent.ts` | NUEVO — Constantes (`DISPATCH_META_DIARIA/SEMANAL/SLA_HORAS`) + tipo `DispatchScoreData`. Sin imports server. Importable por Client Components. |
+| `src/app/api/orders/[id]/assign-tracking/route.ts` | Agrega `agent_actions` INSERT con `action_type='tracking_assigned'` para auditoría y métricas |
+| `src/app/api/dispatch-agent/score/route.ts` | NUEVO — API de métricas operativas; importa constantes/tipos desde `@/lib/dispatch-agent` |
+| `src/components/rendimiento/RendimientoDespacho.tsx` | NUEVO — Dashboard operativo (mobile-first, sin dinero); importa desde `@/lib/dispatch-agent` |
+| `src/app/(app)/mi-rendimiento/page.tsx` | Agrega `if (role === 'dispatch_agent') return <RendimientoDespacho />` |
+
+#### Bug fix: next/headers en Client Component (2026-05-27)
+
+**Causa raíz**: `RendimientoDespacho.tsx` (`'use client'`) importaba el valor `DISPATCH_SLA_HORAS` directamente del API route (`score/route.ts`). Next.js rastrea la cadena de imports completa — como el route importa `createClient` → `@/lib/supabase/server` → `next/headers`, el builder fallaba con:
+> "You're importing a component that needs next/headers"
+
+**Patrón correcto** (igual que `sd-zones.ts` para el mensajero SD):
+- Las constantes y tipos compartidos viven en `src/lib/dispatch-agent.ts` (sin imports de servidor)
+- El API route y el Client Component importan **ambos** desde `@/lib/dispatch-agent`
+- Nunca importar valores de un API route en un Client Component
+
+**Regla general del proyecto**: Si un tipo o constante lo necesita un Client Component y también un Server Component/API route, va en `src/lib/` — nunca en el API route.
+
+#### Métricas que expone `/api/dispatch-agent/score`
+
+| Métrica | Fuente | Descripción |
+|---|---|---|
+| `confirmadosProcesadosHoy` | `agent_actions` | guiasEFI + despachosLocales hoy |
+| `confirmadosProcesadosAyer` | `agent_actions` | ídem ayer (para delta %) |
+| `guiasEFIAsignadasHoy/Ayer/Semana` | `agent_actions` (`tracking_assigned`) | guías EFI asignadas por el agente |
+| `despachosLocalesHoy/Ayer/Semana` | `agent_actions` (`local_dispatched`) | despachos SD sin guía |
+| `pendientesSinGuia` | `orders` table (toda la tienda) | confirmed + sin tracking + no en_reparto |
+| `backlog24h` | `orders` table | ídem pero `last_confirmation_attempt < now-24h` |
+| `avgDispatchTimeMinutes` | join actions + orders | promedio(accion.created_at − order.last_confirmation_attempt) |
+| `weeklyActivity` | `agent_actions` agrupado por día RD | array 7 días para el mini bar chart |
+| `recentActivity` | últimas 8 acciones + order_number | actividad reciente del agente |
+| `alerts` | calculado en server | alertas operativas (danger/warning/success/info) |
+| `coaching` | calculado en server | mensajes motivacionales dinámicos |
+
+#### Score operativo (0–100) — sin dinero
+
+```
+score = base(10) + volumen(40) + velocidad(20) + backlog(30) = max 100
+
+base      = 10  (siempre)
+volumen   = min(confirmadosSemana / 50, 1) × 40
+velocidad = <2h→20, <4h→16, <8h→10, <12h→5, ≥12h→0, sin datos→15
+backlog   = max(0, 30 − min(backlog24h, 10) × 3)
+```
+
+Niveles:
+- **Excelente**: ≥90
+- **Bueno**: ≥75
+- **Riesgo**: ≥60
+- **Deficiente**: <60
+
+#### Qué ve el agente vs el admin
+
+| Sección | dispatch_agent | admin |
+|---|---|---|
+| Pedidos procesados hoy/ayer/semana | ✅ | ✅ (en su propia vista) |
+| Backlog sin guía | ✅ | ✅ |
+| Tiempo promedio despacho | ✅ | ✅ (Fase 3) |
+| Score operativo | ✅ | ✅ (Fase 3) |
+| Alertas operativas | ✅ | ✅ (Fase 3) |
+| Dinero / pagos / rentabilidad | ❌ | ✅ (Fase 3 — vista admin separada) |
+| Pago sugerido semanal | ❌ | ✅ (Fase 3) |
+
+#### Constantes operativas
+
+```typescript
+// src/app/api/dispatch-agent/score/route.ts
+DISPATCH_META_DIARIA  = 10   // pedidos / día
+DISPATCH_META_SEMANAL = 50   // pedidos / semana
+DISPATCH_SLA_HORAS    = 4    // objetivo: despacho en ≤4h
+```
+
+#### Nueva acción en agent_actions
+
+`action_type = 'tracking_assigned'` — registrada en `assign-tracking/route.ts` cada vez que el dispatch_agent (o admin) asigna una guía EFI.
+
+**Auditoría:**
+```sql
+SELECT aa.created_at, p.full_name, aa.action_type, aa.notes, o.order_number
+FROM agent_actions aa
+JOIN profiles p ON p.id = aa.agent_id
+JOIN orders o ON o.id = aa.order_id
+WHERE p.role = 'dispatch_agent'
+  AND aa.action_type IN ('tracking_assigned', 'local_dispatched')
+ORDER BY aa.created_at DESC
+LIMIT 20;
+```
+
+#### Pendiente (Fase 3 — vista admin del dispatch_agent)
+
+- Vista admin: pago sugerido semanal (volumen × tarifa por pedido)
+- Comparativa entre agentes de despacho
+- Filtro por rango de fechas
 
 ### TypeScript
 
@@ -126,6 +222,7 @@ LIMIT 20;
 - santo_domingo_delivery_agent — sin cambios (dispatch-local sigue funcionando para él)
 - Flujo admin en /confirmados — sin cambios
 - EFI/Gintracom, cron tracking, Shopify sync — sin cambios
+- Otros componentes de rendimiento — sin cambios
 
 ---
 

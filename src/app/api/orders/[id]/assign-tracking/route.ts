@@ -75,6 +75,14 @@ export async function PATCH(
 
     if (updateErr) throw updateErr
 
+    // Registrar en agent_actions para auditoría y métricas de rendimiento
+    await supabase.from('agent_actions').insert({
+      order_id:    id,
+      agent_id:    user.id,
+      action_type: 'tracking_assigned',
+      notes:       `Guía EFI asignada: ${tracking_number}`,
+    })
+
     console.log(`[assign-tracking] orderId=${id} tracking=${tracking_number} assignedBy=${user.id}`)
 
     return NextResponse.json({ success: true, order: updated })
