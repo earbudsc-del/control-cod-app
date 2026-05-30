@@ -21,9 +21,9 @@ import {
 import {
   ArrowLeft, MessageSquare, Zap, UserCheck, Clock,
   AlertTriangle, CheckCircle2, RotateCcw, Phone, ShieldAlert, RefreshCw,
-  MapPinOff, Navigation, HelpCircle, AlertCircle,
+  MapPinOff, Navigation, HelpCircle, AlertCircle, CreditCard,
 } from 'lucide-react'
-import { checkCoverage } from '@/lib/alert-helpers'
+import { checkCoverage, isTransferOrder } from '@/lib/alert-helpers'
 
 interface OrderDetail {
   order:       Order
@@ -252,7 +252,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const history     = detail.history     ?? []
 
   const slaStatus = getSlaStatus(order.sla_deadline, order.sla_breached)
-  const coverage  = checkCoverage(order.customer_address, order.city, order.province)
+  const coverage    = checkCoverage(order.customer_address, order.city)
+  const isTransfer  = isTransferOrder(order.product_summary)
 
   return (
     <div className="space-y-4 md:space-y-6 max-w-5xl">
@@ -356,6 +357,20 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             <p className="font-semibold text-yellow-800 text-sm">🟡 Zona no verificada</p>
             <p className="text-sm text-yellow-700 mt-0.5">
               Confirmar ubicación exacta antes de despachar. La ciudad no está registrada en la matriz de cobertura.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Banner transferencia LÜMA */}
+      {isTransfer && (
+        <div className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 md:px-5 md:py-4
+                        flex items-start gap-3">
+          <CreditCard className="w-5 h-5 text-violet-600 mt-0.5 shrink-0" />
+          <div className="min-w-0">
+            <p className="font-semibold text-violet-800 text-sm">💳 TRANSFERENCIA · NO COD</p>
+            <p className="text-sm text-violet-700 mt-0.5">
+              Promoción LÜMA 3 unidades — pagada por transferencia bancaria. No despachar como COD.
             </p>
           </div>
         </div>

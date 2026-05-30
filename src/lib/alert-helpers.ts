@@ -346,17 +346,18 @@ export function isSantoDomingoOrder(
   return SD_PATTERN.test(haystack)
 }
 
+export function isTransferOrder(productSummary: string | null | undefined): boolean {
+  if (!productSummary) return false
+  const s = normalize(productSummary)
+  if (!s.includes('luma')) return false
+  return /\bx3\b|3\s*pack|pack\s*3|3\s*unidades|3\s*und\b|3\s*items|3\s*productos/.test(s)
+}
+
 // ── Función principal de detección ────────────────────────────────────────────
 
-// Provincias que constituyen el área metropolitana de Santo Domingo.
-// En este contexto, nombres como "Luperón" o "Churchill" son avenidas/referencias
-// urbanas, NO municipios fuera de cobertura.
-const SD_COVERED_PROVINCES = new Set(['Santo Domingo', 'Distrito Nacional'])
-
 export function checkCoverage(
-  address:  string | null | undefined,
-  city:     string | null | undefined,
-  province: string | null | undefined = undefined,
+  address: string | null | undefined,
+  city:    string | null | undefined,
 ): CoverageCheck {
   const haystack = normalize(`${address ?? ''} ${city ?? ''}`)
 
@@ -364,19 +365,9 @@ export function checkCoverage(
     return { isOutOfCoverage: false, isSpecialDestination: false, isUnknownZone: false, matchedZones: [] }
   }
 
-  // Detectar contexto SD/DN usando city + province + address.
-  const isSD = SD_PATTERN.test(normalize(`${city ?? ''} ${province ?? ''} ${address ?? ''}`))
-
-  let matchedOoc    = _oocIndex.filter(e  => e.terms.some(t => haystack.includes(t)))
+  const matchedOoc  = _oocIndex.filter(e  => e.terms.some(t => haystack.includes(t)))
   const matchedSpec = _specIndex.filter(e => e.terms.some(t => haystack.includes(t)))
   const matchedCov  = _covIndex.filter(e  => e.terms.some(t => haystack.includes(t)))
-
-  // En contexto SD/DN, descartar matches OOC de provincias fuera de SD/DN.
-  // Caso: "Luperón con Maireni, Santo Domingo" → "luperon" matchea Luperón-Puerto Plata,
-  // pero en SD ese término es una avenida, no el municipio norteño.
-  if (isSD) {
-    matchedOoc = matchedOoc.filter(e => SD_COVERED_PROVINCES.has(e.entry.province))
-  }
 
   const knownZone = matchedOoc.length > 0 || matchedSpec.length > 0 || matchedCov.length > 0
 
