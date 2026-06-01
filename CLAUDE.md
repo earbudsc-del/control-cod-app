@@ -4,6 +4,255 @@
 
 ---
 
+## DIAGNÓSTICO PENDIENTE: Novedad 57 EFI vs 20 DB (2026-05-27 — sesión 18)
+
+### Estado
+
+No se tocó código. Se preparó el plan de diagnóstico completo antes de cualquier modificación.
+
+### Diferencia a explicar
+
+EFI ≈ 57 novedad · DB = 20 novedad (COUNT exacto, no afectado por paginación)
+**37 pedidos faltantes** — en DB con otro estado, o no importados.
+
+### Hipótesis por prioridad
+
+| # | Hipótesis | Señal |
+|---|---|---|
+| H1 | `in_transit` en DB que EFI ya movió a novedad (lag Q1) | `in_transit.total` con `horas_sin_sync > 12` |
+| H2 | `en_reparto` en DB que EFI ya marcó novedad (lag Q2) | `en_reparto.total` con `horas_sin_sync > 12` |
+| H3 | Órdenes no importadas (sin tracking_number, sin registro en DB) | `pending` sin tracking, fuente faltante |
+| H4 | Q3 > 50: cron saturado, novedades sin clasificar esperan slot | `q3_exceso > 0` |
+| H5 | `unknown` congelados: guard anti-overwrite los bloqueó | `unknown` con tracking + raw de novedad |
+| H6 | returned/delivered prematuros (Q4 aún no revalidó) | returned recientes < 21d |
+| H7 | Parser no mapea label nuevo de EFI | raw_status de in_transit con texto novedad |
+
+### SQL de diagnóstico (8 queries, ver sesión anterior para texto completo)
+
+```sql
+-- Q1: Universo por normalized_status (sync freshness)
+SELECT normalized_status, COUNT(*), COUNT(tracking_number), ... FROM orders GROUP BY normalized_status;
+
+-- Q2: Caps vs universo actual del cron (Q1=60/Q2=50/Q3=50/Q4=15)
+SELECT SUM(CASE WHEN normalized_status = 'in_transit' ...) AS q1_universe, ... FROM orders WHERE tracking_number IS NOT NULL;
+
+-- Q3A: in_transit detallado (ORDER BY last_tracking_update ASC, LIMIT 60)
+-- Q3B: en_reparto detallado (ORDER BY last_tracking_update ASC, LIMIT 50)
+-- Q3C: unknown+pending con tracking
+
+-- Q4: raw_status de in_transit (detectar novedades camufladas)
+SELECT raw_status, COUNT(*) FROM orders WHERE normalized_status='in_transit' GROUP BY raw_status;
+
+-- Q5: órdenes sin tracking_number (no sincronizables)
+-- Q6: importación por fuente en mayo (detectar gap)
+-- Q7: actividad del cron últimas 48h por hora (pulso del cron)
+-- Q8: returned/delivered recientes (Q4 revalidation universe)
+```
+
+### Próximos pasos
+
+1. Correr Q1 → confirmar totales por estado
+2. Correr Q2 → confirmar si hay exceso en caps
+3. Si `in_transit + en_reparto + unknown ≈ 37` → H1/H2: disparar cron manual, esperar 15 min, re-verificar
+4. Si no llegan a 37 → correr Q5/Q6 para detectar gap de importación
+5. Aplicar fix quirúrgico según hipótesis confirmada (ver tabla de fixes en el diagnóstico)
+
+### Archivos a tocar según hipótesis
+
+| H | Archivo |
+|---|---|
+| H1/H2 lag + caps saturados | `src/app/api/tracking/auto/route.ts` — subir Q1 de 60→80 |
+| H4 Q3 saturado | mismo archivo — Q separada para novedad |
+| H5 unknown stuck | fix manual en DB, evaluar lógica de guard |
+| H7 parser label | `src/lib/tracking/efi-parser.ts` — agregar label a `mapNormalizedStatus` |
+
+---
+
+## FIX: Métricas EFI contaminadas por pedidos SD local — tracking_number IS NOT NULL (2026-06-01 — sesión 19)
+
+### Síntoma
+Los KPIs de pipeline del supervisor-ia mezclaban pedidos SD local (sin guía EFI, sin tracking_number) con pedidos EFI reales, inflando los conteos de novedades activas, en reparto y otras métricas EFI.
+
+### Causa raíz
+`src/app/api/supervisor-ia/metrics/route.ts` tenía 14 queries EFI-específicas sin el filtro `.not('tracking_number', 'is', null)`. Los pedidos del flujo SD local (manejados por `santo_domingo_delivery_agent`) tienen `normalized_status='en_reparto'` o `normalized_status='novedad'` pero `tracking_number IS NULL` — al no filtrar por tracking_number, se incluían en métricas EFI que no les corresponden.
+
+### Invariante arquitectónico
+- Pedidos EFI: `tracking_number IS NOT NULL` (siempre tienen guía del courier externo)
+- Pedidos SD local: `tracking_number IS NULL` (el mensajero entrega directamente sin guía EFI)
+- Son mutuamente excluyentes — nunca se mezclan
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/supervisor-ia/metrics/route.ts` | Agrega `.not('tracking_number', 'is', null)` a 14 queries EFI-específicas |
+
+### Queries afectadas (14 total)
+- `entregadosHoyRes` — entregados hoy, solo EFI
+- `novedadesActivasRes` — novedad activa, solo EFI
+- `reparto48hRes` — en_reparto crítico +48h, solo EFI
+- `transito48hRes` — in_transit crítico +48h (no generadas/anuladas), solo EFI
+- `generadas48hRes` — generadas críticas +48h dentro de ventana 60d, solo EFI
+- `novedad2IntentosRes` — novedad con 2+ intentos, solo EFI
+- `novedad7diasRes` — novedad +7 días, solo EFI
+- `novedad14diasRes` — novedad +14 días, solo EFI
+- `guiasAnuladasRes` — returned anuladas/canceladas, solo EFI
+- `indemnizablesRes` — returned indemnizables, solo EFI
+- `repartoTotalRes` — total en_reparto, solo EFI
+- `transitoGeneradasRes` — in_transit generadas dentro de ventana 60d, solo EFI
+- `transitoActivoRes` — in_transit activo (no generadas/anuladas), solo EFI
+- `novedadRecuperadasHoyRes` — delivered con delivery_attempts hoy, solo EFI
+
+### Queries NO modificadas (no son EFI-específicas)
+- `nuevosHoyRes` — pedidos Shopify nuevos (filtra por source)
+- `confirmadosHoyRes` — confirmados por agentes
+- `carritosRecuperadosHoyRes` — tabla abandoned_carts
+- `sinCoberturaRes` — filtro por confirmation_status
+- `sinConfirmar24hRes` — ya tenía `.is('tracking_number', null)` explícito
+
+### También confirmado correcto
+`src/app/api/flujo-stats/route.ts` ya tenía todos los filtros correctos — tracking_number IS NOT NULL, separación por raw_status, ventana 60d para generadas, exclusión de anuladas/canceladas. No requirió cambios.
+
+### TypeScript
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+- EFI sync — cron sin cambios
+- SD local delivery — sin cambios
+- flujo-stats endpoint — sin cambios (ya era correcto)
+- Parser EFI — sin cambios (explícitamente excluido del scope)
+- Shopify sync — sin cambios
+
+---
+
+## FIX: Conteos EFI desincronizados — Generadas/Tránsito/Reparto/Novedad (2026-05-27 — sesión 17)
+
+### Síntoma
+
+Los KPIs de pipeline no reflejaban los conteos reales de EFI:
+
+| KPI | App (incorrecto) | EFI (real) | Diferencia |
+|---|---|---|---|
+| Generadas | 20 | 13 | +7 históricos |
+| En tránsito | 0 | 5 | lag de sync |
+| En reparto | 1 | 5 | lag de sync |
+| Novedad | 20 | 57 | lag de sync / órdenes no importadas |
+
+### Mapa de fuentes por KPI
+
+| KPI | Endpoint | Query principal |
+|---|---|---|
+| Generadas | `GET /api/flujo-stats` (FlujoKpis) + `GET /api/supervisor-ia/metrics` (`transitoGeneradasRes`) | `raw_status ILIKE '%generada%'` + `normalized_status NOT IN (returned,delivered,novedad,en_reparto)` |
+| En tránsito | Mismos endpoints | `normalized_status='in_transit'` + `raw_status NOT ILIKE '%generada%'` |
+| En reparto | Mismos endpoints | `normalized_status='en_reparto'` |
+| Novedad | `supervisor-ia` → `novedadesActivasRes`; página `/novedad` → `limit=200` fetch | `normalized_status='novedad'` (COUNT exacto, sin filtro fecha) |
+
+### Causa raíz por diferencia
+
+**Generadas +7 (BUG DE CÓDIGO — CORREGIDO):**
+- La query en `flujo-stats` y `supervisor-ia/metrics` no tenía filtro de fecha.
+- 7 órdenes históricas de meses anteriores están atascadas en `normalized_status='in_transit'` + `raw_status='Generada'` porque EFI ya no devuelve datos para esas guías (devuelve "Guía no encontrada"). El cron las intenta cada ciclo, falla, NO actualiza `last_tracking_update` → quedan al tope de Q1 (oldest first) perpetuamente consumiendo slots sin resolverse.
+- Fix: ventana operativa de 60 días (`shipment_created_at >= cutoff OR (shipment_created_at IS NULL AND created_at >= cutoff)`) aplicada a todas las queries de "generadas".
+
+**En tránsito 0 vs 5 (lag de sync — NO es bug de código):**
+- Los 5 pedidos que EFI muestra como "en tránsito" todavía tienen `raw_status='Generada'` en DB (cron corrió antes de que EFI los actualizara). Son contados como "generadas", no como "in_transit". El cron los actualizará en el próximo ciclo.
+
+**En reparto 1 vs 5 (lag de sync — NO es bug de código):**
+- 4 pedidos están como `normalized_status='in_transit'` en DB. Q1 (limit 60, oldest first) los procesará y actualizará a `en_reparto` en el siguiente ciclo.
+
+**Novedad 20 vs 57 (lag de sync grave + posibles órdenes no importadas):**
+- La DB genuinamente tiene 20 registros `normalized_status='novedad'` (el conteo `novedadesActivasRes` es un COUNT exacto, no afectado por limit). Los 37 faltantes son:
+  - Pedidos en `in_transit` o `en_reparto` en DB que Q1/Q2 del cron aún no han procesado
+  - Posibles órdenes que existen en EFI pero nunca fueron importadas a la app (creadas directamente en EFI sin pasar por flujo Shopify/Excel)
+- Investigar con las queries de debug SQL abajo.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/flujo-stats/route.ts` | Query generadas: agrega `.or(cutoff 60d)` con fallback `shipment_created_at → created_at` |
+| `src/app/api/supervisor-ia/metrics/route.ts` | `transitoGeneradasRes` y `generadas48hRes`: mismo filtro 60d. Nueva constante `cutoffGeneradas` + `generadasDateFilter`. |
+
+### SQL de diagnóstico (Supabase SQL Editor)
+
+```sql
+-- 1. Estado real por normalized_status (línea base)
+SELECT normalized_status, COUNT(*) AS total,
+  COUNT(*) FILTER (WHERE raw_status ILIKE '%generada%') AS raw_generada,
+  COUNT(*) FILTER (WHERE created_at >= '2026-05-01') AS desde_mayo
+FROM orders WHERE tracking_number IS NOT NULL
+GROUP BY normalized_status ORDER BY total DESC;
+
+-- 2. Generadas históricas que inflaban el conteo
+SELECT id, order_number, tracking_number, raw_status, normalized_status,
+       created_at, shopify_created_at, shipment_created_at, last_tracking_update
+FROM orders
+WHERE tracking_number IS NOT NULL
+  AND raw_status ILIKE '%generada%'
+  AND normalized_status NOT IN ('returned','delivered','novedad','en_reparto')
+  AND (shipment_created_at < '2026-05-01' OR (shipment_created_at IS NULL AND created_at < '2026-05-01'))
+ORDER BY created_at ASC;
+
+-- 3. Confirmar conteo real de novedad en DB
+SELECT COUNT(*) AS novedad_total,
+  MIN(status_since) AS mas_antigua, MAX(status_since) AS mas_reciente,
+  COUNT(*) FILTER (WHERE status_since >= '2026-05-01') AS desde_mayo
+FROM orders WHERE normalized_status = 'novedad' AND tracking_number IS NOT NULL;
+
+-- 4. In_transit sin sync reciente (candidatos a ser novedad/reparto en EFI)
+SELECT id, order_number, tracking_number, raw_status, normalized_status,
+       last_tracking_update, status_since, created_at
+FROM orders WHERE normalized_status = 'in_transit' AND tracking_number IS NOT NULL
+ORDER BY last_tracking_update ASC NULLS FIRST LIMIT 40;
+
+-- 5. En_reparto sin sync reciente (candidatos a ser novedad en EFI)
+SELECT id, order_number, tracking_number, raw_status, normalized_status,
+       last_tracking_update, status_since, created_at
+FROM orders WHERE normalized_status = 'en_reparto' AND tracking_number IS NOT NULL
+ORDER BY last_tracking_update ASC NULLS FIRST LIMIT 30;
+
+-- 6. Activos totales mayo vs histórico (cuantifica contaminación)
+SELECT normalized_status,
+  COUNT(*) AS total,
+  COUNT(*) FILTER (WHERE created_at >= '2026-05-01') AS desde_mayo,
+  COUNT(*) FILTER (WHERE created_at < '2026-05-01') AS previo_mayo
+FROM orders WHERE tracking_number IS NOT NULL
+  AND normalized_status NOT IN ('delivered','returned')
+GROUP BY normalized_status ORDER BY total DESC;
+```
+
+### Cómo probar el fix de Generadas
+
+1. Abrir `/supervisor-ia` → KPI "Generadas" debe mostrar ≤13 (solo órdenes de los últimos 60 días con raw='Generada')
+2. Abrir FlujoKpis en `/reparto` o `/novedad` → "Generadas" debe coincidir con el supervisor-ia
+3. Si sigue mostrando más que EFI: correr query 2 arriba para ver cuáles históricas siguen apareciendo (revisar si tienen `created_at` dentro de los 60 días)
+4. Para verificar novedad/tránsito/reparto: disparar el cron manualmente (`POST /api/tracking/auto` con header `x-cron-secret`) y re-verificar conteos 5 min después
+
+### Cómo diagnosticar el lag de novedad (57 vs 20)
+
+1. Correr query 1 → ver cuántos in_transit y en_reparto hay en DB
+2. Si in_transit > 0: esos deberían actualizarse por Q1 del cron (cap 60)
+3. Si en_reparto > 0: esos deberían actualizarse por Q2 del cron (cap 50)
+4. Si after cron run el conteo de novedad no sube: los 37 faltantes probablemente NO existen en DB → verificar importación de tracking numbers contra lista EFI
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- EFI sync — cron sin cambios
+- Shopify sync — sin cambios
+- Tracking cron — sin cambios
+- SD local — sin cambios
+- Devoluciones — sin cambios
+- Confirmación — sin cambios
+- Novedades — sin cambios (conteo novedad usa query sin fecha, correcto)
+- Reparto — sin cambios (conteo en_reparto usa query sin fecha, correcto)
+- In_transit — sin cambios (conteo in_transit activo usa query sin fecha, correcto)
+
+---
+
 ## FIX: Falsos positivos de cobertura en Santo Domingo (2026-05-27 — sesión 16)
 
 ### Causa raíz

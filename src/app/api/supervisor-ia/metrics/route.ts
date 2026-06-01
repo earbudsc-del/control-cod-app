@@ -37,6 +37,10 @@ export async function GET() {
     const cutoff7d  = new Date(now.getTime() - 7  * 24 * 60 * 60 * 1000).toISOString()
     const cutoff14d = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString()
     const hoyRD     = rdDayBounds(0)
+    // Ventana operativa para generadas: igual que en flujo-stats.
+    // Excluye guías históricas atascadas que EFI ya no sirve y que inflan el conteo.
+    const cutoffGeneradas = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000).toISOString()
+    const generadasDateFilter = `shipment_created_at.gte.${cutoffGeneradas},and(shipment_created_at.is.null,created_at.gte.${cutoffGeneradas})`
 
     // OR filter para criticidad por tiempo (reparto)
     const repOrFilter = `status_since.lt.${cutoff48h},and(status_since.is.null,last_tracking_update.lt.${cutoff48h}),and(status_since.is.null,last_tracking_update.is.null,updated_at.lt.${cutoff48h})`
@@ -53,47 +57,47 @@ export async function GET() {
       confirmadosHoyRes,
       // 3 - Operación: carritos recuperados hoy
       carritosRecuperadosHoyRes,
-      // 4 - Operación: entregados hoy
+      // 4 - Operación: entregados hoy (EFI — solo con tracking_number)
       entregadosHoyRes,
-      // 5 - Operación: novedades activas
+      // 5 - Operación: novedades activas (EFI — solo con tracking_number)
       novedadesActivasRes,
-      // 6 - Operación: reparto crítico +48h
+      // 6 - Operación: reparto crítico +48h (EFI — solo con tracking_number)
       reparto48hRes,
-      // 7 - Operación: tránsito crítico +48h (no generadas, no anuladas)
+      // 7 - Operación: tránsito crítico +48h (no generadas, no anuladas, solo con tracking_number)
       transito48hRes,
-      // 8 - Operación: generadas críticas +48h
+      // 8 - Operación: generadas críticas +48h (solo con tracking_number)
       generadas48hRes,
       // 9 - Operación: fuera de cobertura
       sinCoberturaRes,
       // 10 - Alertas: sin confirmar +24h
       sinConfirmar24hRes,
-      // 11 - Alertas: novedades con 2+ intentos (datos + count)
+      // 11 - Alertas: novedades con 2+ intentos (EFI — solo con tracking_number)
       novedad2IntentosRes,
-      // 12 - Alertas: novedad +7 días
+      // 12 - Alertas: novedad +7 días (EFI — solo con tracking_number)
       novedad7diasRes,
-      // 13 - Alertas: novedad +14 días
+      // 13 - Alertas: novedad +14 días (EFI — solo con tracking_number)
       novedad14diasRes,
-      // 14 - Alertas: guías anuladas/canceladas (returned)
+      // 14 - Alertas: guías anuladas/canceladas (EFI — solo con tracking_number)
       guiasAnuladasRes,
       // 15 - Alertas: carritos pendientes
       carritosPendientesRes,
-      // 16 - Posibles indemnizables (datos)
+      // 16 - Posibles indemnizables (EFI — solo con tracking_number)
       indemnizablesRes,
       // 17 - Módulo confirmación: inalcanzables
       confUnreachableRes,
       // 18 - Módulo confirmación: cancelados
       confCancelledRes,
-      // 19 - Módulo reparto: total en reparto
+      // 19 - Módulo reparto: total en reparto (EFI — solo con tracking_number)
       repartoTotalRes,
-      // 20 - Módulo tránsito: generadas (total, sin filtro tiempo)
+      // 20 - Módulo tránsito: generadas activas (EFI — solo con tracking_number, ventana 60d)
       transitoGeneradasRes,
-      // 21 - Módulo tránsito: en tránsito activo
+      // 21 - Módulo tránsito: en tránsito activo (EFI — solo con tracking_number, sin generadas/anuladas)
       transitoActivoRes,
       // 22 - Módulo carritos: contactados hoy
       carritosContactadosHoyRes,
       // 23 - Módulo carritos: recuperados total
       carritosRecuperadosTotalRes,
-      // 24 - Módulo novedad: recuperadas hoy (entregadas con intentos previos)
+      // 24 - Módulo novedad: recuperadas hoy (EFI — solo con tracking_number)
       novedadRecuperadasHoyRes,
     ] = await Promise.all([
 
@@ -112,29 +116,40 @@ export async function GET() {
         .gte('last_contacted_at', hoyRD.start)
         .lte('last_contacted_at', hoyRD.end),
 
+      // EFI deliveries only — SD local (no tracking_number) excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'delivered')
+        .not('tracking_number', 'is', null)
         .gte('last_tracking_update', hoyRD.start)
         .lte('last_tracking_update', hoyRD.end),
 
+      // EFI novedades only — SD local (no tracking_number) excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
-        .eq('normalized_status', 'novedad'),
+        .eq('normalized_status', 'novedad')
+        .not('tracking_number', 'is', null),
 
+      // EFI reparto crítico — SD local excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'en_reparto')
+        .not('tracking_number', 'is', null)
         .or(repOrFilter),
 
+      // EFI tránsito crítico — no generadas, no anuladas, SD local excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'in_transit')
+        .not('tracking_number', 'is', null)
         .not('raw_status', 'ilike', '%generada%')
         .not('raw_status', 'ilike', '%anulada%')
         .not('raw_status', 'ilike', '%cancelada%')
         .or(trOrFilter),
 
+      // EFI generadas críticas — within 60-day window, SD local excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'in_transit')
+        .not('tracking_number', 'is', null)
         .ilike('raw_status', '%generada%')
-        .or(trOrFilter),
+        .or(trOrFilter)
+        .or(generadasDateFilter),
 
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('confirmation_status', 'no_coverage'),
@@ -144,31 +159,41 @@ export async function GET() {
         .is('tracking_number', null)
         .lt('shopify_created_at', cutoff24h),
 
+      // EFI novedad 2+ intentos — SD local excluded
       supabase.from('orders')
         .select('id, tracking_number, customer_name, city, province, delivery_attempts, last_attempt_reason, customer_phone, cod_amount', { count: 'exact' })
         .eq('normalized_status', 'novedad')
+        .not('tracking_number', 'is', null)
         .gte('delivery_attempts', 2)
         .order('delivery_attempts', { ascending: false })
         .limit(50),
 
+      // EFI novedad +7 días — SD local excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'novedad')
+        .not('tracking_number', 'is', null)
         .or(nov7OrFilter),
 
+      // EFI novedad +14 días — SD local excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'novedad')
+        .not('tracking_number', 'is', null)
         .or(nov14OrFilter),
 
+      // EFI guías anuladas/canceladas — SD local excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'returned')
+        .not('tracking_number', 'is', null)
         .or('raw_status.ilike.%anulada%,raw_status.ilike.%cancelada%'),
 
       supabase.from('abandoned_carts').select('id', { count: 'exact', head: true })
         .eq('recovery_status', 'pending'),
 
+      // EFI posibles indemnizables — SD local excluded
       supabase.from('orders')
         .select('id, tracking_number, order_number, customer_name, customer_phone, city, province, delivery_attempts, last_attempt_reason, raw_status, normalized_status, cod_amount')
         .eq('normalized_status', 'returned')
+        .not('tracking_number', 'is', null)
         .gte('delivery_attempts', 2)
         .order('delivery_attempts', { ascending: false })
         .limit(50),
@@ -179,15 +204,22 @@ export async function GET() {
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('confirmation_status', 'cancelled'),
 
+      // EFI total en reparto — SD local (no tracking_number) excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
-        .eq('normalized_status', 'en_reparto'),
+        .eq('normalized_status', 'en_reparto')
+        .not('tracking_number', 'is', null),
 
+      // EFI generadas activas — raw_status='Generada', within 60-day window, SD local excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'in_transit')
-        .ilike('raw_status', '%generada%'),
+        .not('tracking_number', 'is', null)
+        .ilike('raw_status', '%generada%')
+        .or(generadasDateFilter),
 
+      // EFI en tránsito activo — raw_status≠Generada/Anulada/Cancelada, SD local excluded
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'in_transit')
+        .not('tracking_number', 'is', null)
         .not('raw_status', 'ilike', '%generada%')
         .not('raw_status', 'ilike', '%anulada%')
         .not('raw_status', 'ilike', '%cancelada%'),
@@ -200,8 +232,10 @@ export async function GET() {
       supabase.from('abandoned_carts').select('id', { count: 'exact', head: true })
         .eq('recovery_status', 'recovered'),
 
+      // EFI novedades recuperadas hoy — solo entregas EFI con intentos previos
       supabase.from('orders').select('id', { count: 'exact', head: true })
         .eq('normalized_status', 'delivered')
+        .not('tracking_number', 'is', null)
         .gt('delivery_attempts', 0)
         .gte('last_tracking_update', hoyRD.start)
         .lte('last_tracking_update', hoyRD.end),
