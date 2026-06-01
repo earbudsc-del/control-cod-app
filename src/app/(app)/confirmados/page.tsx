@@ -701,6 +701,7 @@ export default function ConfirmadosPage() {
                           duplicateAlert={order.duplicate_alert}
                           customerAddress={order.customer_address}
                           city={order.city}
+                          productSummary={order.product_summary}
                         />
                         {isSD && (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold

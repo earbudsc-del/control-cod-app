@@ -1,11 +1,12 @@
-import { AlertTriangle, MapPinOff, Navigation, HelpCircle, Building2 } from 'lucide-react'
-import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
+import { AlertTriangle, MapPinOff, Navigation, HelpCircle, Building2, CreditCard } from 'lucide-react'
+import { checkCoverage, isSantoDomingoOrder, isTransferOrder } from '@/lib/alert-helpers'
 
 interface AlertBadgesProps {
   duplicateAlert?:  boolean | null
   customerAddress?: string | null
   city?:            string | null
   province?:        string | null
+  productSummary?:  string | null
   className?:       string
 }
 
@@ -14,16 +15,18 @@ export function AlertBadges({
   customerAddress,
   city,
   province,
+  productSummary,
   className = '',
 }: AlertBadgesProps) {
-  const coverage    = checkCoverage(customerAddress, city, province)
-  const showDup     = !!duplicateAlert
-  const showOoc     = coverage.isOutOfCoverage
-  const showSpec    = !coverage.isOutOfCoverage && coverage.isSpecialDestination
-  const showUnknown = !coverage.isOutOfCoverage && !coverage.isSpecialDestination && coverage.isUnknownZone
-  const showSD      = isSantoDomingoOrder(city, province, customerAddress)
+  const coverage     = checkCoverage(customerAddress, city)
+  const showDup      = !!duplicateAlert
+  const showOoc      = coverage.isOutOfCoverage
+  const showSpec     = !coverage.isOutOfCoverage && coverage.isSpecialDestination
+  const showUnknown  = !coverage.isOutOfCoverage && !coverage.isSpecialDestination && coverage.isUnknownZone
+  const showSD       = isSantoDomingoOrder(city, province, customerAddress)
+  const showTransfer = isTransferOrder(productSummary)
 
-  if (!showDup && !showOoc && !showSpec && !showUnknown && !showSD) return null
+  if (!showDup && !showOoc && !showSpec && !showUnknown && !showSD && !showTransfer) return null
 
   return (
     <div className={`flex flex-wrap gap-1 mt-0.5 ${className}`}>
@@ -77,6 +80,17 @@ export function AlertBadges({
         >
           <Building2 className="w-2.5 h-2.5 shrink-0" />
           SD / Transporte local
+        </span>
+      )}
+      {showTransfer && (
+        <span
+          className="inline-flex items-center gap-0.5 bg-violet-600 text-white
+                     text-[10px] font-bold px-1.5 py-0.5
+                     rounded-full whitespace-nowrap"
+          title="Promoción LÜMA 3 uds — pagada por transferencia, NO es COD"
+        >
+          <CreditCard className="w-2.5 h-2.5 shrink-0" />
+          TRANSFERENCIA · NO COD
         </span>
       )}
     </div>
