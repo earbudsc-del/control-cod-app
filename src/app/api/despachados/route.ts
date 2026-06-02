@@ -18,6 +18,8 @@ export async function GET() {
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned')
         .neq('normalized_status', 'cancelled')
+        .not('raw_status', 'ilike', '%anulada%')
+        .not('raw_status', 'ilike', '%cancelada%')
         .order('last_tracking_update', { ascending: false, nullsFirst: false })
         .limit(200),
 
@@ -29,7 +31,9 @@ export async function GET() {
         .not('tracking_number', 'is', null)
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned')
-        .neq('normalized_status', 'cancelled'),
+        .neq('normalized_status', 'cancelled')
+        .not('raw_status', 'ilike', '%anulada%')
+        .not('raw_status', 'ilike', '%cancelada%'),
     ])
 
     if (ordersRes.error) throw ordersRes.error

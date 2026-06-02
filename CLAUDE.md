@@ -4,6 +4,12 @@
 
 ---
 
+## FIX: Despachados excluye guías anuladas/canceladas del conteo activo (2026-06-02)
+
+`/api/despachados` contaba guías con `raw_status ILIKE '%anulada%'` o `'%cancelada%'` como "En tránsito" activas, inflando el conteo vs Reparto (~30 vs ~10). Se agregaron `.not('raw_status','ilike','%anulada%')` y `.not('raw_status','ilike','%cancelada%')` a las dos queries (listado + stats). No se tocaron entregados, devueltos, ni ningún otro módulo.
+
+---
+
 ## FEATURE: Tab Reprogramados — reactivación de pedidos estancados (2026-05-25 — sesión 12)
 
 ### Problema resuelto
