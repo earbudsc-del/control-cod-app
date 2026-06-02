@@ -96,6 +96,28 @@ Todas las llamadas directas: `checkCoverage(order.customer_address, order.city)`
 
 ---
 
+## FEATURE: Filtro de Estado en Despachados (2026-06-02)
+
+Dropdown "Estado" agregado debajo del buscador en `/despachados`. Filtra en frontend sobre los datos ya cargados, sin tocar backend ni Supabase. Compatible con búsqueda, paginación y orden.
+
+**Opciones y lógica:**
+| Opción | Lógica |
+|---|---|
+| Todos | Sin filtro |
+| Generada | `raw_status` contains `'generada'` |
+| En tránsito | `normalized_status = 'in_transit'` AND raw_status NOT generada/anulada/cancelada |
+| En reparto | `normalized_status = 'en_reparto'` |
+| Novedad | `normalized_status = 'novedad'` |
+| Anulada | `raw_status` contains `'anulad'` o `'cancelad'` |
+
+**Patrón visual:** mismo estilo que el dropdown de Estado en `/confirmacion` (pill azul activo, `ListFilter` icon, botón ✕ Limpiar).
+
+**Archivos modificados:** `src/app/(app)/despachados/page.tsx` — tipo `DespachadoStatusFilter`, función `matchesDespachadoFilter`, estado `statusFilter`, `filteredOrders` useMemo, `useEffect` reset de página, dropdown JSX.
+
+`npx tsc --noEmit` → sin errores ✅
+
+---
+
 ## FIX: Despachados excluye guías anuladas/canceladas del conteo activo (2026-06-02)
 
 `/api/despachados` contaba guías con `raw_status ILIKE '%anulada%'` o `'%cancelada%'` como "En tránsito" activas, inflando el conteo vs Reparto (~30 vs ~10). Se agregaron `.not('raw_status','ilike','%anulada%')` y `.not('raw_status','ilike','%cancelada%')` a las dos queries (listado + stats). No se tocaron entregados, devueltos, ni ningún otro módulo.

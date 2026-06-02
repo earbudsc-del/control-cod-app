@@ -8,10 +8,26 @@ import { type Order, STATUS_LABELS, STATUS_COLORS } from '@/types'
 import {
   Truck, RefreshCw, MessageCircle, Phone,
   MapPin, ExternalLink, Search, ChevronLeft, ChevronRight,
-  Package, ClipboardList, CheckCircle2,
+  Package, ClipboardList, CheckCircle2, ListFilter,
 } from 'lucide-react'
 
 const PAGE_SIZE = 50
+
+type DespachadoStatusFilter = '' | 'generada' | 'in_transit' | 'en_reparto' | 'novedad' | 'anulada'
+
+function matchesDespachadoFilter(order: Order, sf: DespachadoStatusFilter): boolean {
+  if (!sf) return true
+  const raw = (order.raw_status ?? '').toLowerCase()
+  const ns  = order.normalized_status
+  switch (sf) {
+    case 'generada':    return raw.includes('generada')
+    case 'in_transit':  return ns === 'in_transit' && !raw.includes('generada') && !raw.includes('anulad') && !raw.includes('cancelad')
+    case 'en_reparto':  return ns === 'en_reparto'
+    case 'novedad':     return ns === 'novedad'
+    case 'anulada':     return raw.includes('anulad') || raw.includes('cancelad')
+    default:            return true
+  }
+}
 
 interface ApiResponse {
   data:     Order[]
@@ -52,8 +68,9 @@ export default function DespachadosPage() {
   const [byStatus, setByStatus]       = useState<Record<string, number>>({})
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
-  const [searchQuery, setSearchQuery] = useState('')
-  const [currentPage, setCurrentPage] = useState(1)
+  const [searchQuery, setSearchQuery]   = useState('')
+  const [currentPage, setCurrentPage]   = useState(1)
+  const [statusFilter, setStatusFilter] = useState<DespachadoStatusFilter>('')
   const [pipelineCounts, setPipelineCounts] = useState<{ pendingTotal: number; confirmadosSinGuia: number } | null>(null)
 
   const fetchData = useCallback(async () => {
@@ -85,19 +102,21 @@ export default function DespachadosPage() {
     return () => clearInterval(interval)
   }, [fetchData])
 
-  useEffect(() => { setCurrentPage(1) }, [searchQuery])
+  useEffect(() => { setCurrentPage(1) }, [searchQuery, statusFilter])
 
   const filteredOrders = useMemo(() => {
+    let result = orders
+    if (statusFilter) result = result.filter(o => matchesDespachadoFilter(o, statusFilter))
     const q = searchQuery.trim().toLowerCase()
-    if (!q) return orders
-    return orders.filter(o =>
+    if (!q) return result
+    return result.filter(o =>
       (o.customer_name    ?? '').toLowerCase().includes(q) ||
       (o.customer_phone   ?? '').toLowerCase().includes(q) ||
       (o.order_number     ?? '').toLowerCase().includes(q) ||
       (o.tracking_number  ?? '').toLowerCase().includes(q) ||
       (o.city             ?? '').toLowerCase().includes(q),
     )
-  }, [orders, searchQuery])
+  }, [orders, searchQuery, statusFilter])
 
   const pagedOrders = useMemo(
     () => filteredOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
@@ -270,6 +289,32 @@ export default function DespachadosPage() {
                            placeholder:text-gray-400 bg-white"
               />
             </div>
+          </div>
+
+          {/* Filtro de estado */}
+          <div className="px-3 py-2 border-b border-blue-100 flex items-center gap-2 flex-wrap bg-gray-50/60">
+            <ListFilter className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+            <select
+              value={statusFilter}
+              onChange={e => { setStatusFilter(e.target.value as DespachadoStatusFilter); setCurrentPage(1) }}
+              className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors cursor-pointer
+                ${statusFilter
+                  ? 'bg-blue-500 text-white border-blue-500'
+                  : 'text-gray-600 border-gray-200 bg-white hover:border-blue-300 hover:text-blue-600'}`}>
+              <option value=''>Estado: Todos</option>
+              <option value='generada'>Generada</option>
+              <option value='in_transit'>En tránsito</option>
+              <option value='en_reparto'>En reparto</option>
+              <option value='novedad'>Novedad</option>
+              <option value='anulada'>Anulada</option>
+            </select>
+            {statusFilter && (
+              <button
+                onClick={() => { setStatusFilter(''); setCurrentPage(1) }}
+                className="text-[11px] text-gray-400 hover:text-red-500 ml-auto shrink-0">
+                ✕ Limpiar
+              </button>
+            )}
           </div>
 
           {loading ? (
