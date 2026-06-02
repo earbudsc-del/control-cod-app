@@ -11,7 +11,7 @@ import {
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, RotateCcw, Clock, Inbox, TrendingUp,
   MapPinOff, ChevronLeft, ChevronRight, Search, Truck,
-  CalendarDays, ShoppingBag, Package,
+  CalendarDays, ShoppingBag, Package, ListFilter,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
@@ -25,9 +25,10 @@ const MS_24H       = 24 * 60 * 60 * 1000
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type ViewMode      = 'pedidos' | 'reintentar' | 'confirmados_sin_guia' | 'despachados'
-type ContactMethod = 'call' | 'whatsapp' | 'other'
-type DateFilter    = 'hoy' | 'ayer' | '7dias' | '30dias' | 'personalizado'
+type ViewMode           = 'pedidos' | 'reintentar' | 'confirmados_sin_guia' | 'despachados' | 'santo_domingo' | 'fuera_de_cobertura'
+type ContactMethod      = 'call' | 'whatsapp' | 'other'
+type DateFilter         = 'hoy' | 'ayer' | '7dias' | '30dias' | 'personalizado'
+type ConfirmStatusFilter = '' | 'pending' | 'reintentar' | 'confirmed' | 'cancelled' | 'no_coverage' | 'unreachable'
 
 interface ConfirmStats {
   nuevos:             number
@@ -44,6 +45,8 @@ interface ConfirmStats {
   despachados:        number
   santoDomingoPendientes?:         number
   santoDomingoConfirmadosSinGuia?: number
+  santoDomingoTotal?:              number
+  fueraDeCoberturaTotal?:          number
 }
 
 interface ConfirmResult {
@@ -149,6 +152,21 @@ function buildConfirmMsg(nombre: string, producto?: string | null, monto?: numbe
   const m = monto ? ` Monto a cancelar: RD$${monto.toLocaleString('es-DO')}.` : ''
   return [`Hola ${n} 😊,`, '', `Tu pedido de ${p} 📦 está próximo a ser entregado.`, '',
           `Por favor confirmanos si podrás recibirlo.${m}`, '', 'Quedamos atentos 🙏'].join('\n')
+}
+
+function matchesStatusFilter(order: Order, sf: ConfirmStatusFilter): boolean {
+  if (!sf) return true
+  const status   = (order.confirmation_status as string) ?? 'pending'
+  const attempts = order.confirmation_attempts ?? 0
+  switch (sf) {
+    case 'pending':     return status === 'pending' && attempts === 0
+    case 'reintentar':  return status === 'pending' && attempts > 0
+    case 'confirmed':   return status === 'confirmed'
+    case 'cancelled':   return status === 'cancelled'
+    case 'no_coverage': return status === 'no_coverage'
+    case 'unreachable': return status === 'unreachable' || status === 'wrong_number'
+    default: return true
+  }
 }
 
 function buildDateParams(
@@ -519,12 +537,13 @@ export default function ConfirmacionPage() {
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const [toast, setToast]             = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
 
-  // ── Search + date (shared) ──────────────────────────────────────────────────
-  const [searchQuery, setSearchQuery] = useState('')
-  const [dateFilter, setDateFilter]   = useState<DateFilter | null>(null)
-  const [dateFrom, setDateFrom]       = useState('')
-  const [dateTo, setDateTo]           = useState('')
-  const [dateApplied, setDateApplied] = useState(false)
+  // ── Search + date + status (shared) ────────────────────────────────────────
+  const [searchQuery, setSearchQuery]     = useState('')
+  const [dateFilter, setDateFilter]       = useState<DateFilter | null>(null)
+  const [dateFrom, setDateFrom]           = useState('')
+  const [dateTo, setDateTo]               = useState('')
+  const [dateApplied, setDateApplied]     = useState(false)
+  const [statusFilter, setStatusFilter]   = useState<ConfirmStatusFilter>('')
 
   // ── Vista "Pedidos" (server-paginated) ──────────────────────────────────────
   const [pedidosData, setPedidosData]     = useState<Order[]>([])
@@ -554,6 +573,20 @@ export default function ConfirmacionPage() {
   const [despachadosLoading, setDespachadosLoading] = useState(false)
   const [despachadosLoaded, setDespachadosLoaded]   = useState(false)
 
+  // ── Santo Domingo (server-paginated) ────────────────────────────────────────
+  const [sdData, setSdData]       = useState<Order[]>([])
+  const [sdTotal, setSdTotal]     = useState(0)
+  const [sdPage, setSdPage]       = useState(1)
+  const [sdPages, setSdPages]     = useState(0)
+  const [sdLoading, setSdLoading] = useState(false)
+
+  // ── Fuera de cobertura (server-paginated) ────────────────────────────────────
+  const [fcdData, setFcdData]       = useState<Order[]>([])
+  const [fcdTotal, setFcdTotal]     = useState(0)
+  const [fcdPage, setFcdPage]       = useState(1)
+  const [fcdPages, setFcdPages]     = useState(0)
+  const [fcdLoading, setFcdLoading] = useState(false)
+
   // ── Fetch: stats + perf ─────────────────────────────────────────────────────
   const fetchStats = useCallback(async () => {
     const [statsRes, perfRes] = await Promise.all([
@@ -565,12 +598,13 @@ export default function ConfirmacionPage() {
   }, [])
 
   // ── Fetch: pedidos (server-paginated) ───────────────────────────────────────
-  const fetchPedidos = useCallback(async (page: number, sq: string, df: DateFilter | null, dFrom: string, dTo: string, dApplied: boolean) => {
+  const fetchPedidos = useCallback(async (page: number, sq: string, df: DateFilter | null, dFrom: string, dTo: string, dApplied: boolean, sf: ConfirmStatusFilter = '') => {
     setPedidosLoading(true)
     try {
       const searchQs = sq ? `&search=${encodeURIComponent(sq)}` : ''
       const dateQs   = buildDateParams(df, dFrom, dTo, dApplied)
-      const res      = await fetch(`/api/confirmacion/pedidos?page=${page}&limit=50${searchQs}${dateQs}`)
+      const statusQs = sf ? `&status=${encodeURIComponent(sf)}` : ''
+      const res      = await fetch(`/api/confirmacion/pedidos?page=${page}&limit=50${searchQs}${dateQs}${statusQs}`)
         .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
       setPedidosData(res.data  ?? [])
       setPedidosTotal(res.total ?? 0)
@@ -626,17 +660,53 @@ export default function ConfirmacionPage() {
     }
   }, [])
 
+  // ── Fetch: Santo Domingo (server-paginated) ─────────────────────────────────
+  const fetchSD = useCallback(async (page: number, sq: string, sf: ConfirmStatusFilter = '') => {
+    setSdLoading(true)
+    try {
+      const searchQs = sq ? `&search=${encodeURIComponent(sq)}` : ''
+      const statusQs = sf ? `&status=${encodeURIComponent(sf)}` : ''
+      const res = await fetch(`/api/confirmacion/pedidos?filter=santo_domingo&page=${page}&limit=50${searchQs}${statusQs}`)
+        .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
+      setSdData(res.data   ?? [])
+      setSdTotal(res.total ?? 0)
+      setSdPage(res.page   ?? page)
+      setSdPages(res.pages ?? 0)
+    } finally {
+      setSdLoading(false)
+    }
+  }, [])
+
+  // ── Fetch: Fuera de cobertura (server-paginated) ─────────────────────────────
+  const fetchFCD = useCallback(async (page: number, sq: string, sf: ConfirmStatusFilter = '') => {
+    setFcdLoading(true)
+    try {
+      const searchQs = sq ? `&search=${encodeURIComponent(sq)}` : ''
+      const statusQs = sf ? `&status=${encodeURIComponent(sf)}` : ''
+      const res = await fetch(`/api/confirmacion/pedidos?filter=fuera_de_cobertura&page=${page}&limit=50${searchQs}${statusQs}`)
+        .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
+      setFcdData(res.data   ?? [])
+      setFcdTotal(res.total ?? 0)
+      setFcdPage(res.page   ?? page)
+      setFcdPages(res.pages ?? 0)
+    } finally {
+      setFcdLoading(false)
+    }
+  }, [])
+
   // ── Refresh maestro ─────────────────────────────────────────────────────────
   const refreshAll = useCallback(() => {
     setLastRefresh(new Date())
     fetchStats()
     if (viewMode === 'pedidos')
-      fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
-    if (viewMode === 'reintentar') fetchQueue()
+      fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
+    if (viewMode === 'reintentar')           fetchQueue()
     if (viewMode === 'confirmados_sin_guia') fetchConfirmados()
     if (viewMode === 'despachados')          fetchDespachados()
-  }, [viewMode, pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied,
-      fetchStats, fetchPedidos, fetchQueue, fetchConfirmados, fetchDespachados])
+    if (viewMode === 'santo_domingo')        fetchSD(sdPage, searchQuery, statusFilter)
+    if (viewMode === 'fuera_de_cobertura')   fetchFCD(fcdPage, searchQuery, statusFilter)
+  }, [viewMode, pedidosPage, sdPage, fcdPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter,
+      fetchStats, fetchPedidos, fetchQueue, fetchConfirmados, fetchDespachados, fetchSD, fetchFCD])
 
   // ── Mount: pre-cargar todo ──────────────────────────────────────────────────
   useEffect(() => {
@@ -656,27 +726,57 @@ export default function ConfirmacionPage() {
   useEffect(() => {
     setCurrentPage(1)
     if (viewMode === 'pedidos')
-      fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
-    if (viewMode === 'reintentar') fetchQueue()
+      fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
+    if (viewMode === 'reintentar')                          fetchQueue()
     if (viewMode === 'confirmados_sin_guia' && !confirmadosLoaded) fetchConfirmados()
     if (viewMode === 'despachados'          && !despachadosLoaded) fetchDespachados()
+    if (viewMode === 'santo_domingo')      { setSdPage(1);  fetchSD(1, searchQuery, statusFilter)  }
+    if (viewMode === 'fuera_de_cobertura') { setFcdPage(1); fetchFCD(1, searchQuery, statusFilter) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode])
 
-  // ── Cambios en búsqueda/fecha → re-fetch pedidos ────────────────────────────
+  // ── Cambios en búsqueda/fecha/estado → re-fetch pedidos ─────────────────────
   useEffect(() => {
     if (viewMode !== 'pedidos') return
     setPedidosPage(1)
-    fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
+    fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, dateFilter, dateApplied])
+  }, [searchQuery, dateFilter, dateApplied, statusFilter])
 
   // ── Cambio de página en pedidos ─────────────────────────────────────────────
   useEffect(() => {
     if (viewMode === 'pedidos')
-      fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied)
+      fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pedidosPage])
+
+  // ── Búsqueda/estado en tab Santo Domingo ────────────────────────────────────
+  useEffect(() => {
+    if (viewMode !== 'santo_domingo') return
+    setSdPage(1)
+    fetchSD(1, searchQuery, statusFilter)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, statusFilter])
+
+  // ── Cambio de página en Santo Domingo ────────────────────────────────────────
+  useEffect(() => {
+    if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery, statusFilter)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sdPage])
+
+  // ── Búsqueda/estado en tab Fuera de cobertura ────────────────────────────────
+  useEffect(() => {
+    if (viewMode !== 'fuera_de_cobertura') return
+    setFcdPage(1)
+    fetchFCD(1, searchQuery, statusFilter)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, statusFilter])
+
+  // ── Cambio de página en Fuera de cobertura ───────────────────────────────────
+  useEffect(() => {
+    if (viewMode === 'fuera_de_cobertura') fetchFCD(fcdPage, searchQuery, statusFilter)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fcdPage])
 
   // ── Scroll a pedido con tracking param ─────────────────────────────────────
   useEffect(() => {
@@ -729,6 +829,9 @@ export default function ConfirmacionPage() {
       const { from, to } = effectiveDateRange
       result = result.filter(o => { const ts = effectiveMs(o); return ts >= from && ts < to })
     }
+    if (statusFilter) {
+      result = result.filter(o => matchesStatusFilter(o, statusFilter))
+    }
     const q = searchQuery.trim().toLowerCase()
     if (!q) return result
     return result.filter(o =>
@@ -736,7 +839,7 @@ export default function ConfirmacionPage() {
       (o.customer_phone ?? '').toLowerCase().includes(q) ||
       (o.order_number   ?? '').toLowerCase().includes(q),
     )
-  }, [displayedOrders, effectiveDateRange, searchQuery])
+  }, [displayedOrders, effectiveDateRange, searchQuery, statusFilter])
 
   const pagedOrders  = useMemo(
     () => filteredOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
@@ -744,7 +847,7 @@ export default function ConfirmacionPage() {
   )
   const totalPages = Math.ceil(filteredOrders.length / PAGE_SIZE)
 
-  useEffect(() => { setCurrentPage(1) }, [searchQuery, dateFilter, dateApplied, viewMode])
+  useEffect(() => { setCurrentPage(1) }, [searchQuery, dateFilter, dateApplied, viewMode, statusFilter])
 
   // ── Toast ───────────────────────────────────────────────────────────────────
   function showToast(msg: string, type: 'success' | 'error') {
@@ -798,28 +901,44 @@ export default function ConfirmacionPage() {
     reintentar:           stats?.reintentar         ?? 0,
     confirmados_sin_guia: stats?.confirmadosSinGuia ?? 0,
     despachados:          stats?.despachados         ?? 0,
-  }), [pedidosTotal, stats])
+    // Preferir el total real cargado de la paginación; si aún no se cargó, usar stats
+    santo_domingo:        sdTotal  > 0 ? sdTotal  : (stats?.santoDomingoTotal    ?? 0),
+    fuera_de_cobertura:   fcdTotal > 0 ? fcdTotal : (stats?.fueraDeCoberturaTotal ?? 0),
+  }), [pedidosTotal, stats, sdTotal, fcdTotal])
 
   // ── Loading del view actual ─────────────────────────────────────────────────
   const isLoading =
     (viewMode === 'pedidos'              && pedidosLoading)     ||
     (viewMode === 'reintentar'           && queueLoading)       ||
     (viewMode === 'confirmados_sin_guia' && confirmadosLoading) ||
-    (viewMode === 'despachados'          && despachadosLoading)
+    (viewMode === 'despachados'          && despachadosLoading) ||
+    (viewMode === 'santo_domingo'        && sdLoading)          ||
+    (viewMode === 'fuera_de_cobertura'   && fcdLoading)
 
   // ── Datos del view actual ───────────────────────────────────────────────────
   const currentData: Order[] =
     viewMode === 'pedidos'              ? pedidosData    :
     viewMode === 'reintentar'           ? pagedOrders    :
     viewMode === 'confirmados_sin_guia' ? confirmadosData:
-    despachadosData
+    viewMode === 'despachados'          ? despachadosData:
+    viewMode === 'santo_domingo'        ? sdData         :
+    viewMode === 'fuera_de_cobertura'   ? fcdData        :
+    []
+
+  // Para confirmados/despachados (carga total client-side) aplicamos statusFilter en cliente
+  const clientFilteredData: Order[] =
+    (viewMode === 'confirmados_sin_guia' || viewMode === 'despachados') && statusFilter
+      ? currentData.filter(o => matchesStatusFilter(o, statusFilter))
+      : currentData
 
   // ── Metadatos de vistas ─────────────────────────────────────────────────────
   const VIEW_META: { mode: ViewMode; label: string; Icon: React.ElementType; color: string }[] = [
-    { mode: 'pedidos',              label: 'Pedidos',     Icon: ShoppingBag,  color: 'indigo' },
-    { mode: 'reintentar',           label: 'Reintentar',  Icon: RotateCcw,    color: 'amber'  },
-    { mode: 'confirmados_sin_guia', label: 'Confirmados', Icon: CheckCircle2, color: 'green'  },
-    { mode: 'despachados',          label: 'Despachados', Icon: Truck,        color: 'blue'   },
+    { mode: 'pedidos',              label: 'Pedidos',       Icon: ShoppingBag,  color: 'indigo' },
+    { mode: 'reintentar',           label: 'Reintentar',    Icon: RotateCcw,    color: 'amber'  },
+    { mode: 'confirmados_sin_guia', label: 'Confirmados',   Icon: CheckCircle2, color: 'green'  },
+    { mode: 'despachados',          label: 'Despachados',   Icon: Truck,        color: 'blue'   },
+    { mode: 'santo_domingo',        label: 'Sto. Domingo',  Icon: MapPin,       color: 'teal'   },
+    { mode: 'fuera_de_cobertura',   label: 'Sin cobertura', Icon: MapPinOff,    color: 'red'    },
   ]
 
   // ── Helpers de render ───────────────────────────────────────────────────────
@@ -898,7 +1017,10 @@ export default function ConfirmacionPage() {
                 </h1>
                 <span className="flex items-center gap-1.5 bg-white/20 text-white
                                  text-xs font-bold px-2.5 py-1 rounded-full capitalize">
-                  {viewMode === 'pedidos' ? 'total' : viewMode.replace('_', ' ')}
+                  {viewMode === 'pedidos'             ? 'total'
+                   : viewMode === 'santo_domingo'    ? 'Sto. Domingo'
+                   : viewMode === 'fuera_de_cobertura' ? 'Sin cobertura'
+                   : viewMode.replace('_', ' ')}
                 </span>
               </div>
               <p className="text-white font-semibold text-sm md:text-base">Pedidos Shopify</p>
@@ -909,7 +1031,11 @@ export default function ConfirmacionPage() {
                     ? '1–2 intentos sin respuesta'
                     : viewMode === 'confirmados_sin_guia'
                       ? 'Confirmados · Pendiente de despacho'
-                      : 'Con guía asignada · En logística'}
+                      : viewMode === 'santo_domingo'
+                        ? 'SD/DN · Transporte local · Todas las fechas'
+                        : viewMode === 'fuera_de_cobertura'
+                          ? 'Sin cobertura · Pedidos no entregables · Todas las fechas'
+                          : 'Con guía asignada · En logística'}
               </p>
             </div>
           </div>
@@ -1051,6 +1177,42 @@ export default function ConfirmacionPage() {
             ))}
           </div>
 
+          {/* ── Tabs rápidos: Santo Domingo + Fuera de cobertura ── */}
+          <div className="grid grid-cols-2 gap-2 md:gap-3">
+            {([
+              {
+                mode:   'santo_domingo'      as ViewMode,
+                count:  viewCounts.santo_domingo,
+                label:  'Santo Domingo',
+                sub:    'SD/DN · Transporte local · Todas las fechas',
+                Icon:   MapPin,
+                base:   'border-teal-200 bg-teal-50 text-teal-700',
+                active: 'border-teal-400  bg-teal-100  text-teal-800  ring-2 ring-teal-300/50',
+              },
+              {
+                mode:   'fuera_de_cobertura' as ViewMode,
+                count:  viewCounts.fuera_de_cobertura,
+                label:  'Fuera de cobertura',
+                sub:    'Sin cobertura · Pedidos no entregables · Todas las fechas',
+                Icon:   MapPinOff,
+                base:   'border-red-200 bg-red-50 text-red-700',
+                active: 'border-red-400  bg-red-100  text-red-800  ring-2 ring-red-300/50',
+              },
+            ]).map(({ mode, count, label, sub, Icon, base, active }) => (
+              <button key={mode}
+                onClick={() => setViewMode(prev => prev === mode ? 'pedidos' : mode)}
+                className={`flex items-center gap-2 md:gap-3 p-3 md:p-4 rounded-xl border-2 text-left transition-all
+                  ${viewMode === mode ? active : `${base} hover:opacity-80`}`}>
+                <div className="flex-1 min-w-0">
+                  <p className="text-2xl md:text-3xl font-black tabular-nums leading-none">{count}</p>
+                  <p className="text-xs md:text-sm font-bold mt-1">{label}</p>
+                  <p className="hidden md:block text-xs opacity-60 mt-0.5 truncate">{sub}</p>
+                </div>
+                <Icon className="w-6 md:w-7 h-6 md:h-7 opacity-25 shrink-0" />
+              </button>
+            ))}
+          </div>
+
           <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
             {([
               { label: 'Confirm. hoy',   count: stats.confirmadosHoy, cls: 'bg-green-50   text-green-700   border-green-100'  },
@@ -1082,7 +1244,11 @@ export default function ConfirmacionPage() {
                 ? 'Reintentar · 1–2 intentos sin respuesta'
                 : viewMode === 'confirmados_sin_guia'
                   ? 'Confirmados sin guía · Pendiente de despacho (solo lectura)'
-                  : 'Despachados · Con guía en logística (solo lectura)'}
+                  : viewMode === 'santo_domingo'
+                    ? 'Santo Domingo · Zona SD/DN · Todas las fechas · 50 por página'
+                    : viewMode === 'fuera_de_cobertura'
+                      ? 'Fuera de cobertura · Sin cobertura · Todas las fechas · 50 por página'
+                      : 'Despachados · Con guía en logística (solo lectura)'}
           </p>
         </div>
 
@@ -1143,6 +1309,33 @@ export default function ConfirmacionPage() {
           )}
         </div>
 
+        {/* ── Filtro de estado ── */}
+        <div className="px-3 py-2 border-b border-indigo-100 flex items-center gap-2 flex-wrap bg-gray-50/60">
+          <ListFilter className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+          <select
+            value={statusFilter}
+            onChange={e => { setStatusFilter(e.target.value as ConfirmStatusFilter); setCurrentPage(1) }}
+            className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors cursor-pointer
+              ${statusFilter
+                ? 'bg-indigo-500 text-white border-indigo-500'
+                : 'text-gray-600 border-gray-200 bg-white hover:border-indigo-300 hover:text-indigo-600'}`}>
+            <option value=''>Estado: Todos</option>
+            <option value='pending'>Pendiente</option>
+            <option value='reintentar'>No contesta</option>
+            <option value='confirmed'>Confirmado</option>
+            <option value='cancelled'>Canceló</option>
+            <option value='no_coverage'>Sin cobertura</option>
+            <option value='unreachable'>Inalcanzable</option>
+          </select>
+          {statusFilter && (
+            <button
+              onClick={() => { setStatusFilter(''); setCurrentPage(1) }}
+              className="text-[11px] text-gray-400 hover:text-red-500 ml-auto shrink-0">
+              ✕ Limpiar
+            </button>
+          )}
+        </div>
+
         {/* ── Tab bar (5 vistas) ── */}
         <>
           {/* Mobile: select */}
@@ -1181,7 +1374,7 @@ export default function ConfirmacionPage() {
           <div className="flex items-center justify-center py-16">
             <Spinner className="w-6 h-6 text-indigo-500" />
           </div>
-        ) : currentData.length === 0 ? (
+        ) : clientFilteredData.length === 0 ? (
           <div className="px-5 py-10 text-center">
             <p className="text-gray-500 font-medium">No hay pedidos en esta vista</p>
             {viewMode === 'reintentar' && (
@@ -1194,13 +1387,17 @@ export default function ConfirmacionPage() {
         ) : (
           <>
             {/* ──────────────────────────────────────────────────────────────── */}
-            {/* VISTA: PEDIDOS (estilo Shopify) */}
+            {/* VISTA: PEDIDOS / SANTO DOMINGO (estilo Shopify) */}
+            {/* Santo Domingo reutiliza el mismo rendering que Pedidos,          */}
+            {/* pero con sdData en lugar de pedidosData.                        */}
             {/* ──────────────────────────────────────────────────────────────── */}
-            {viewMode === 'pedidos' && (
+            {(viewMode === 'pedidos' || viewMode === 'santo_domingo') && (() => {
+              const displayData = viewMode === 'santo_domingo' ? sdData : pedidosData
+              return (
               <>
                 {/* Mobile cards */}
                 <div className="md:hidden divide-y divide-gray-100">
-                  {pedidosData.map(order => (
+                  {displayData.map(order => (
                     <div key={order.id} ref={el => { if (el) rowRefs.current.set(order.id, el) }}>
                       <PedidoCard
                         order={order} busy={!!loadingRow[order.id]} terminal={terminalMap[order.id]}
@@ -1227,7 +1424,7 @@ export default function ConfirmacionPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {pedidosData.map(order => {
+                      {displayData.map(order => {
                         const nombre      = order.customer_name ?? ''
                         const waUrl       = whatsAppUrl(order.customer_phone, buildConfirmMsg(nombre, order.product_summary, order.cod_amount))
                         const telUrl      = callUrl(order.customer_phone)
@@ -1271,8 +1468,7 @@ export default function ConfirmacionPage() {
                               </p>
                               <AlertBadges duplicateAlert={order.duplicate_alert}
                                 customerAddress={order.customer_address}
-                                city={order.city} province={order.province}
-                                productSummary={order.product_summary} />
+                                city={order.city} province={order.province} />
                             </td>
 
                             {/* Ciudad / Producto */}
@@ -1358,7 +1554,8 @@ export default function ConfirmacionPage() {
                   </table>
                 </div>
               </>
-            )}
+              )
+            })()}
 
             {/* ──────────────────────────────────────────────────────────────── */}
             {/* VISTA: REINTENTAR (cola operativa con acciones) */}
@@ -1439,8 +1636,7 @@ export default function ConfirmacionPage() {
                               )}
                               <AlertBadges duplicateAlert={order.duplicate_alert}
                                 customerAddress={order.customer_address}
-                                city={order.city} province={order.province}
-                                productSummary={order.product_summary} />
+                                city={order.city} province={order.province} />
                             </td>
 
                             <td className="px-3 py-2.5 max-w-[140px]">
@@ -1524,13 +1720,14 @@ export default function ConfirmacionPage() {
             )}
 
             {/* ──────────────────────────────────────────────────────────────── */}
-            {/* VISTAS: CONFIRMADOS SIN GUÍA / DESPACHADOS (read-only) */}
+            {/* VISTAS: CONFIRMADOS SIN GUÍA / DESPACHADOS / FUERA COBERTURA    */}
+            {/* (read-only — misma estructura de tabla, sin botones de acción)   */}
             {/* ──────────────────────────────────────────────────────────────── */}
-            {(viewMode === 'confirmados_sin_guia' || viewMode === 'despachados') && (
+            {(viewMode === 'confirmados_sin_guia' || viewMode === 'despachados' || viewMode === 'fuera_de_cobertura') && (
               <>
                 {/* Mobile cards */}
                 <div className="md:hidden divide-y divide-gray-100">
-                  {currentData.map(order => (
+                  {clientFilteredData.map(order => (
                     <div key={order.id}><ReadOnlyCard order={order} /></div>
                   ))}
                 </div>
@@ -1548,7 +1745,7 @@ export default function ConfirmacionPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {currentData.map(order => {
+                      {clientFilteredData.map(order => {
                         const confBadge = getConfirmBadge(order)
                         const logBadge  = getLogisticsBadge(order)
                         const hasDup    = !!order.duplicate_alert
@@ -1571,8 +1768,7 @@ export default function ConfirmacionPage() {
                               <p className="font-mono text-xs text-gray-500 mt-0.5">{order.customer_phone ?? '—'}</p>
                               <AlertBadges duplicateAlert={order.duplicate_alert}
                                 customerAddress={order.customer_address}
-                                city={order.city} province={order.province}
-                                productSummary={order.product_summary} />
+                                city={order.city} province={order.province} />
                             </td>
                             <td className="px-3 py-2.5">
                               <div className="flex items-center gap-1 text-gray-700">
@@ -1666,6 +1862,56 @@ export default function ConfirmacionPage() {
             <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}
               className="flex items-center gap-1.5 min-h-[40px] px-3 py-1.5 text-xs font-semibold rounded-lg
                          border border-indigo-200 text-indigo-700 bg-white hover:bg-indigo-50
+                         disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+              Siguiente<ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* ── Paginación: Santo Domingo ── */}
+        {viewMode === 'santo_domingo' && !sdLoading && sdPages > 1 && (
+          <div className="flex items-center justify-between px-4 md:px-5 py-3 border-t border-teal-100 bg-teal-50/40">
+            <button onClick={() => setSdPage(p => Math.max(1, p - 1))} disabled={sdPage === 1}
+              className="flex items-center gap-1.5 min-h-[40px] px-3 py-1.5 text-xs font-semibold rounded-lg
+                         border border-teal-200 text-teal-700 bg-white hover:bg-teal-50
+                         disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+              <ChevronLeft className="w-3.5 h-3.5" />Anterior
+            </button>
+            <span className="text-xs text-gray-500 tabular-nums">
+              <span className="hidden md:inline">Página </span>
+              <span className="font-bold text-gray-800">{sdPage}</span>
+              <span className="hidden md:inline"> de </span><span className="md:hidden">/</span>
+              <span className="font-bold text-gray-800">{sdPages}</span>
+              <span className="hidden md:inline"> · <span className="text-gray-400">{sdTotal} pedidos SD</span></span>
+            </span>
+            <button onClick={() => setSdPage(p => Math.min(sdPages, p + 1))} disabled={sdPage === sdPages}
+              className="flex items-center gap-1.5 min-h-[40px] px-3 py-1.5 text-xs font-semibold rounded-lg
+                         border border-teal-200 text-teal-700 bg-white hover:bg-teal-50
+                         disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+              Siguiente<ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* ── Paginación: Fuera de cobertura ── */}
+        {viewMode === 'fuera_de_cobertura' && !fcdLoading && fcdPages > 1 && (
+          <div className="flex items-center justify-between px-4 md:px-5 py-3 border-t border-red-100 bg-red-50/40">
+            <button onClick={() => setFcdPage(p => Math.max(1, p - 1))} disabled={fcdPage === 1}
+              className="flex items-center gap-1.5 min-h-[40px] px-3 py-1.5 text-xs font-semibold rounded-lg
+                         border border-red-200 text-red-700 bg-white hover:bg-red-50
+                         disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+              <ChevronLeft className="w-3.5 h-3.5" />Anterior
+            </button>
+            <span className="text-xs text-gray-500 tabular-nums">
+              <span className="hidden md:inline">Página </span>
+              <span className="font-bold text-gray-800">{fcdPage}</span>
+              <span className="hidden md:inline"> de </span><span className="md:hidden">/</span>
+              <span className="font-bold text-gray-800">{fcdPages}</span>
+              <span className="hidden md:inline"> · <span className="text-gray-400">{fcdTotal} sin cobertura</span></span>
+            </span>
+            <button onClick={() => setFcdPage(p => Math.min(fcdPages, p + 1))} disabled={fcdPage === fcdPages}
+              className="flex items-center gap-1.5 min-h-[40px] px-3 py-1.5 text-xs font-semibold rounded-lg
+                         border border-red-200 text-red-700 bg-white hover:bg-red-50
                          disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
               Siguiente<ChevronRight className="w-3.5 h-3.5" />
             </button>
