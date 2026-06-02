@@ -25,6 +25,7 @@ interface ConfirmadoOrder {
   customer_phone:            string | null
   customer_address:          string | null
   city:                      string | null
+  province:                  string | null
   product_summary:           string | null
   cod_amount:                number | null
   confirmation_method:       string | null
@@ -159,8 +160,8 @@ export default function ConfirmadosPage() {
 
   const alertCounts = useMemo(() => ({
     duplicados:   orders.filter(o => o.duplicate_alert).length,
-    cobertura:    orders.filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage).length,
-    unknown:      orders.filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone).length,
+    cobertura:    orders.filter(o => checkCoverage(o.customer_address, o.city, o.province).isOutOfCoverage).length,
+    unknown:      orders.filter(o => checkCoverage(o.customer_address, o.city, o.province).isUnknownZone).length,
     santoDomingo: orders.filter(o => isSantoDomingoOrder(o.city, null, o.customer_address)).length,
     recuperados:  orders.filter(o => o.recovered_cart_id !== null).length,
   }), [orders])
@@ -169,8 +170,8 @@ export default function ConfirmadosPage() {
     let base = orders
 
     if (alertFilter === 'duplicados')       base = base.filter(o => o.duplicate_alert)
-    if (alertFilter === 'cobertura')        base = base.filter(o => checkCoverage(o.customer_address, o.city).isOutOfCoverage)
-    if (alertFilter === 'zona_desconocida') base = base.filter(o => checkCoverage(o.customer_address, o.city).isUnknownZone)
+    if (alertFilter === 'cobertura')        base = base.filter(o => checkCoverage(o.customer_address, o.city, o.province).isOutOfCoverage)
+    if (alertFilter === 'zona_desconocida') base = base.filter(o => checkCoverage(o.customer_address, o.city, o.province).isUnknownZone)
     if (alertFilter === 'santo_domingo')    base = base.filter(o => isSantoDomingoOrder(o.city, null, o.customer_address))
 
     if (!searchQuery.trim()) return base
@@ -663,7 +664,7 @@ export default function ConfirmadosPage() {
                     ? (METHOD_BADGE[order.confirmation_method] ?? METHOD_BADGE['other'])
                     : null
                   const hasDup       = !!order.duplicate_alert
-                  const cov          = checkCoverage(order.customer_address, order.city)
+                  const cov          = checkCoverage(order.customer_address, order.city, order.province)
                   const hasAlert     = hasDup || cov.isOutOfCoverage || cov.isUnknownZone
                   const isSD         = isSantoDomingoOrder(order.city, null, order.customer_address)
                   const isRecovered  = !!order.recovered_cart_id

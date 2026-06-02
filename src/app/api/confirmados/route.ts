@@ -60,7 +60,7 @@ export async function GET(request: Request) {
     // Excluye en_reparto: son pedidos SD local ya despachados que siguen sin tracking EFI.
     let query = supabase
       .from('orders')
-      .select('id, order_number, shopify_order_id, customer_name, customer_phone, customer_address, city, product_summary, cod_amount, confirmation_method, last_confirmation_attempt, created_at, duplicate_alert, duplicate_of_order_id, duplicate_reason')
+      .select('id, order_number, shopify_order_id, customer_name, customer_phone, customer_address, city, province, product_summary, cod_amount, confirmation_method, last_confirmation_attempt, created_at, duplicate_alert, duplicate_of_order_id, duplicate_reason')
       .eq('confirmation_status', 'confirmed')
       .is('tracking_number', null)
       .neq('normalized_status', 'delivered')

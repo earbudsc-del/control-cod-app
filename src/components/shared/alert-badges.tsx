@@ -18,7 +18,7 @@ export function AlertBadges({
   productSummary,
   className = '',
 }: AlertBadgesProps) {
-  const coverage     = checkCoverage(customerAddress, city)
+  const coverage     = checkCoverage(customerAddress, city, province)
   const showDup      = !!duplicateAlert
   const showOoc      = coverage.isOutOfCoverage
   const showSpec     = !coverage.isOutOfCoverage && coverage.isSpecialDestination
@@ -65,10 +65,10 @@ export function AlertBadges({
           className="inline-flex items-center gap-0.5 bg-yellow-50 text-yellow-700
                      border border-yellow-200 text-[10px] font-bold px-1.5 py-0.5
                      rounded-full whitespace-nowrap"
-          title="Ciudad no registrada en la matriz de cobertura"
+          title="Zona no verificada — confirmar dirección antes de despachar"
         >
           <HelpCircle className="w-2.5 h-2.5 shrink-0" />
-          Zona desconocida
+          Validar dirección
         </span>
       )}
       {showSD && (

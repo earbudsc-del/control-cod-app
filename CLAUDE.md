@@ -4,6 +4,98 @@
 
 ---
 
+## FEATURE: Coverage Engine v2 — detección inteligente con confianza (2026-06-02)
+
+### Problema resuelto
+
+El motor de cobertura producía falsos positivos y falsos negativos en casos específicos:
+1. **Luperón falso OOC**: "Av. Luperón, Herrera, Santo Domingo" marcaba OOC porque Luperón es un municipio OOC de Puerto Plata, pero es también una avenida muy común en SDO.
+2. **Jima Rincón sin detección**: "Jima Rincón, La Vega" no marcaba OOC porque el alias no existía (solo "Jima Abajo").
+3. **Badge largo "Zona desconocida"**: texto inadecuado para móvil.
+4. **Province ignorada**: `checkCoverage` no incluía `province` en el haystack → fallos en casos como `province = "Santo Domingo"` + `city = "Pedro Brand"` + `address = "Av. Luperón"`.
+
+### Cambios implementados
+
+#### `src/lib/alert-helpers.ts`
+
+**`CoverageCheck` interface ampliada:**
+```typescript
+confidence:     'high' | 'low'         // nueva
+coverageStatus: 'covered' | 'no_coverage' | 'review_required'  // nueva
+```
+
+**Nuevo alias OOC — Jima Rincón:**
+```typescript
+{ name: 'Jima Rincón', province: 'La Vega', terms: ['jima rincon', 'jima rincón', 'jima arriba'] }
+```
+Captura: "Jima Rincón", "Jima Rincon" (sin tilde), "Jima Arriba". Se omite "jima" solo para evitar falso positivo con "Jimaní" (ciudad cubierta, independencia).
+
+**Protección SD/DN (`SD_PROTECTED_ZONE_NAMES`):**
+```typescript
+const SD_PROTECTED_ZONE_NAMES = new Set(['Luperón'])
+```
+Cuando `SD_PATTERN` (ya existente: `/santo domingo|distrito nacional|\bdn\b/`) detecta contexto SD en el haystack, se suprimen los matches OOC de estas zonas. Luperón (Puerto Plata) es OOC pero también es una avenida muy común en SDO → falso positivo suprimido.
+
+**`checkCoverage` actualizada:**
+```typescript
+export function checkCoverage(
+  address:   string | null | undefined,
+  city:      string | null | undefined,
+  province?: string | null | undefined,   // ← nueva, backward compatible
+): CoverageCheck
+```
+- Haystack ahora incluye `province` → detecta contexto SD aunque `city` sea un sector (ej. "Pedro Brand") y `province` sea "Santo Domingo".
+- `isOutOfCoverage` usa `filteredOoc` (después de suprimir SD urban refs) en lugar de `matchedOoc` directamente.
+- Devuelve `confidence` y `coverageStatus` adicionales.
+
+**Todos los callers existentes siguen funcionando** (`province` es opcional con default void → `${undefined}` = vacío en el haystack, mismo comportamiento anterior).
+
+#### `src/components/shared/alert-badges.tsx`
+
+- `checkCoverage(customerAddress, city)` → `checkCoverage(customerAddress, city, province)` (ya recibía `province` como prop, ahora lo pasa).
+- Badge "Zona desconocida" → **"Validar dirección"** (más corto, mobile-first, más operativo).
+
+#### `src/app/(app)/confirmacion/page.tsx`
+
+Todas las llamadas directas: `checkCoverage(order.customer_address, order.city)` → agrega `order.province`.
+
+#### `src/app/(app)/confirmados/page.tsx`
+
+- `ConfirmadoOrder` interface agrega campo `province: string | null`.
+- Todas las llamadas: `checkCoverage(o.customer_address, o.city)` → agrega `o.province`.
+
+#### `src/app/api/confirmados/route.ts`
+
+`.select(...)` agrega `province` a los campos de la query para que llegue al frontend.
+
+#### `src/app/(app)/orders/[id]/page.tsx`
+
+`checkCoverage(order.customer_address, order.city)` → agrega `order.province`.
+
+### Casos de prueba
+
+| Caso | Input | Resultado esperado | Resultado real |
+|---|---|---|---|
+| **Pantoja** | city="Santo Domingo Oeste", address="Pantoja, sector X" | Cobertura / SD local | ✅ Sin OOC (Pantoja está en COVERAGE_ZONES) |
+| **La Vega + Jima Rincón** | city="La Vega", address="Jima Rincón" | Sin cobertura | ✅ OOC via alias `jima rincon` |
+| **SD + Luperón** | province="Santo Domingo", city="Herrera", address="Av. Luperón 45" | Cobertura (SD local) | ✅ Luperón suprimido por protección SD |
+| **Gaspar Hernández** | city="Gaspar Hernández" o address="Gaspar Hernández" | Sin cobertura | ✅ OOC ya estaba en lista |
+| **Dirección ambigua** | city="San Juan", address="calle 5" (sin zona conocida) | "Validar dirección" | ✅ isUnknownZone=true → badge "Validar dirección" |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Todos los callers existentes de `checkCoverage` (province = undefined → mismo comportamiento).
+- `isOutOfCoverage`, `isSpecialDestination`, `isUnknownZone`, `matchedZones` — misma semántica, solo se filtra Luperón en SD context.
+- Tab "Sin cobertura" en confirmación — sigue funcionando (usa `isOutOfCoverage`).
+- Tab "Zona desconocida" / filtro — renombrado a "Validar dirección" en badge, pero el código interno `isUnknownZone` no cambió.
+- EFI, tracking cron, SD local, devoluciones — sin cambios.
+
+---
+
 ## FIX: Despachados excluye guías anuladas/canceladas del conteo activo (2026-06-02)
 
 `/api/despachados` contaba guías con `raw_status ILIKE '%anulada%'` o `'%cancelada%'` como "En tránsito" activas, inflando el conteo vs Reparto (~30 vs ~10). Se agregaron `.not('raw_status','ilike','%anulada%')` y `.not('raw_status','ilike','%cancelada%')` a las dos queries (listado + stats). No se tocaron entregados, devueltos, ni ningún otro módulo.

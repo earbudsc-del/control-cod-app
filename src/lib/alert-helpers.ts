@@ -9,8 +9,11 @@ export interface ZoneEntry {
 export interface CoverageCheck {
   isOutOfCoverage:      boolean
   isSpecialDestination: boolean
-  isUnknownZone:        boolean    // ciudad no reconocida en ninguna lista de la matriz
-  matchedZones:         string[]   // nombres de zonas detectadas
+  isUnknownZone:        boolean       // ciudad no reconocida en ninguna lista de la matriz
+  matchedZones:         string[]      // nombres de zonas detectadas
+  // v2 — confianza y estado semántico
+  confidence:           'high' | 'low'
+  coverageStatus:       'covered' | 'no_coverage' | 'review_required'
 }
 
 // ── Normalización ─────────────────────────────────────────────────────────────
@@ -93,6 +96,9 @@ export const OUT_OF_COVERAGE_ZONES: ZoneEntry[] = [
   // La Vega
   { name: 'Constanza',                province: 'La Vega' },
   { name: 'Jima Abajo',               province: 'La Vega' },
+  // aliases: "Jima Rincón", "Jima Rincon", "Jima Arriba" — todos sectores sin cobertura en La Vega
+  // "jima" solo no se usa para evitar falso positivo con "Jimaní" (ciudad cubierta)
+  { name: 'Jima Rincón',             province: 'La Vega', terms: ['jima rincon', 'jima rincón', 'jima arriba'] },
   // María Trinidad Sánchez
   { name: 'Cabrera',                  province: 'María Trinidad Sánchez' },
   { name: 'Río San Juan',             province: 'María Trinidad Sánchez' },
@@ -332,6 +338,11 @@ const _specIndex = SPECIAL_DESTINATION_ZONES.map(e  => ({ entry: e, terms: e.ter
 // Usado únicamente para determinar si la zona es "conocida" (no genera alertas propias)
 const _covIndex  = COVERAGE_ZONES.map(e             => ({ entry: e, terms: e.terms ?? termsFromName(e.name) }))
 
+// ── Protección SD/DN — zonas OOC que también son avenidas/referencias urbanas en SD ──────
+// Cuando el contexto indica Santo Domingo / Distrito Nacional se suprimen estos matches
+// para evitar falsos positivos (ej: "Av. Luperón" en Herrera no es la ciudad Luperón/Puerto Plata)
+const SD_PROTECTED_ZONE_NAMES = new Set(['Luperón'])
+
 // ── Santo Domingo / Transporte local ─────────────────────────────────────────
 
 // Pedidos a SD/DN se despachan por transporte local, no por EFI.
@@ -356,28 +367,48 @@ export function isTransferOrder(productSummary: string | null | undefined): bool
 // ── Función principal de detección ────────────────────────────────────────────
 
 export function checkCoverage(
-  address: string | null | undefined,
-  city:    string | null | undefined,
+  address:  string | null | undefined,
+  city:     string | null | undefined,
+  province?: string | null | undefined,
 ): CoverageCheck {
-  const haystack = normalize(`${address ?? ''} ${city ?? ''}`)
+  const haystack = normalize(`${address ?? ''} ${city ?? ''} ${province ?? ''}`)
 
   if (!haystack.trim()) {
-    return { isOutOfCoverage: false, isSpecialDestination: false, isUnknownZone: false, matchedZones: [] }
+    return {
+      isOutOfCoverage: false, isSpecialDestination: false, isUnknownZone: false, matchedZones: [],
+      confidence: 'low', coverageStatus: 'review_required',
+    }
   }
 
   const matchedOoc  = _oocIndex.filter(e  => e.terms.some(t => haystack.includes(t)))
   const matchedSpec = _specIndex.filter(e => e.terms.some(t => haystack.includes(t)))
   const matchedCov  = _covIndex.filter(e  => e.terms.some(t => haystack.includes(t)))
 
-  const knownZone = matchedOoc.length > 0 || matchedSpec.length > 0 || matchedCov.length > 0
+  // Suprimir zonas OOC que son también referencias urbanas en SD/DN para evitar falsos positivos
+  // Ejemplo: "Av. Luperón" en Santo Domingo no es la ciudad Luperón (Puerto Plata, OOC)
+  const sdContext   = SD_PATTERN.test(haystack)
+  const filteredOoc = sdContext
+    ? matchedOoc.filter(m => !SD_PROTECTED_ZONE_NAMES.has(m.entry.name))
+    : matchedOoc
+
+  const isOoc     = filteredOoc.length > 0
+  const knownZone = isOoc || matchedSpec.length > 0 || matchedCov.length > 0
+
+  const coverageStatus: CoverageCheck['coverageStatus'] = isOoc
+    ? 'no_coverage'
+    : (matchedSpec.length > 0 || matchedCov.length > 0)
+      ? 'covered'
+      : 'review_required'
 
   return {
-    isOutOfCoverage:      matchedOoc.length > 0,
+    isOutOfCoverage:      isOoc,
     isSpecialDestination: matchedSpec.length > 0,
     isUnknownZone:        !knownZone,
     matchedZones:         [
-      ...matchedOoc.map(e  => e.entry.name),
+      ...filteredOoc.map(e => e.entry.name),
       ...matchedSpec.map(e => e.entry.name),
     ],
+    confidence:    isOoc || matchedSpec.length > 0 || matchedCov.length > 0 ? 'high' : 'low',
+    coverageStatus,
   }
 }
