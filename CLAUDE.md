@@ -4,6 +4,74 @@
 
 ---
 
+## FIX: Conteos incorrectos en Reparto — last_tracking_update → status_since (2026-06-02)
+
+### Síntoma
+
+KPIs inflados en módulo Reparto:
+- `entregadosHoy: 442` (real: ~pocos)
+- `entregadosAyer: 0`
+
+### Causa raíz exacta
+
+`entregadosHoy` y `entregadosAyer` en `/api/reparto/performance` usaban **`last_tracking_update`** como campo de fecha.
+
+El cron Q4 re-valida órdenes `delivered`/`returned` de los últimos 21 días y llama `updateOrderTracking()`, el cual siempre escribe `last_tracking_update = now()`. Esto hace que órdenes entregadas hace semanas aparezcan como entregadas "hoy".
+
+El campo correcto es **`status_since`**: se escribe una sola vez cuando EFI detecta por primera vez el estado `delivered`. No se modifica en re-syncs posteriores.
+
+### Fix aplicado — sólo en `/api/reparto/performance`
+
+```typescript
+// ANTES (buggy) — entregadosHoy:
+.eq('normalized_status', 'delivered')
+.gte('last_tracking_update', todayIso)
+
+// DESPUÉS (correcto) — entregadosHoy:
+.eq('normalized_status', 'delivered')
+.not('status_since', 'is', null)
+.gte('status_since', todayIso)
+
+// ANTES (buggy) — entregadosAyer:
+.gte('last_tracking_update', yesterdayIso)
+.lt('last_tracking_update', todayIso)
+
+// DESPUÉS (correcto) — entregadosAyer:
+.not('status_since', 'is', null)
+.gte('status_since', yesterdayIso)
+.lt('status_since', todayIso)
+```
+
+El `.not('status_since', 'is', null)` es guard explícito — Postgres excluye nulls en comparaciones gte/lt de todos modos, pero se hace explícito para claridad.
+
+### NO se tocó
+
+- `src/app/api/tracking/auto/route.ts` — cron sin cambios
+- `src/lib/tracking/update-order.ts` — sin cambios
+- Todos los demás KPIs de `/api/reparto/performance` — sin cambios
+- Frontend Reparto — sin cambios
+
+### Campo correcto por KPI (referencia definitiva)
+
+| KPI | Campo fecha | Razón |
+|---|---|---|
+| `entregadosHoy` | `status_since` | Cuándo EFI confirmó entrega por primera vez |
+| `entregadosAyer` | `status_since` | Ídem |
+| `criticosActivos` | `status_since` | Cuánto tiempo lleva en en_reparto (sin cambios — era correcto) |
+| `contactadosHoy/Ayer` | `agent_actions.created_at` | Acciones del agente (sin cambios) |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/reparto/performance/route.ts` | `entregadosHoy`/`entregadosAyer`: `last_tracking_update` → `status_since` + guard `.not('status_since', 'is', null)` |
+
+---
+
 ## FEATURE: Coverage Engine v2 — detección inteligente con confianza (2026-06-02)
 
 ### Problema resuelto

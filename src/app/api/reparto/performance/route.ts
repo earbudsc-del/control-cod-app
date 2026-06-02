@@ -30,12 +30,13 @@ export async function GET() {
       { count: contactadosAyer },
     ] = await Promise.all([
 
-      // Entregados hoy: EFI confirmó entrega hoy (cron fija last_tracking_update al detectar)
+      // Entregados hoy: status_since registra cuándo EFI confirmó entrega real
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('normalized_status', 'delivered')
-        .gte('last_tracking_update', todayIso),
+        .not('status_since', 'is', null)
+        .gte('status_since', todayIso),
 
       // Contactados: cualquier acción de tipo 'contacted' hoy
       supabase
@@ -69,13 +70,14 @@ export async function GET() {
         .eq('normalized_status', 'en_reparto')
         .lt('status_since', cutoff48h),
 
-      // Entregados ayer: EFI confirmó entrega ayer
+      // Entregados ayer: status_since registra cuándo EFI confirmó entrega real
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('normalized_status', 'delivered')
-        .gte('last_tracking_update', yesterdayIso)
-        .lt('last_tracking_update', todayIso),
+        .not('status_since', 'is', null)
+        .gte('status_since', yesterdayIso)
+        .lt('status_since', todayIso),
 
       // Contactados ayer
       supabase
