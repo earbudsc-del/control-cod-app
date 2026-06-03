@@ -25,9 +25,10 @@ export async function GET() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
 
-    // Límites de tiempo: hoy RD y corte de 48h
+    // Límites de tiempo: hoy RD y cortes de 24h y 48h
     const todayStartRD = rdTodayStartISO()
     const todayIso     = new Date().setHours(0, 0, 0, 0), todayIsoStr = new Date(todayIso).toISOString()
+    const cutoff24h    = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
     const cutoff48h    = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
 
     // Base idéntica a /api/confirmacion/route.ts: pending + sin tracking + normalized pending
@@ -56,6 +57,8 @@ export async function GET() {
       { count: nuevos },
       { count: reintentar },
       { count: atrasados },
+      { count: atrasados24h },
+      { count: sinTocarTotal },
       { count: confirmadosHoy },
       { count: contactadosHoy },
       { count: inalcanzables },
@@ -78,8 +81,14 @@ export async function GET() {
       // 1–2 intentos sin éxito (sin importar fecha)
       pendingBase().gte('confirmation_attempts', 1).lte('confirmation_attempts', 2),
 
-      // Atrasados: más de 48h desde shopify_created_at (o created_at), sin tracking, aún pending
+      // Atrasados críticos: más de 48h desde shopify_created_at, sin tracking, aún pending
       pendingBase().lt('shopify_created_at', cutoff48h),
+
+      // Atrasados 24h: entre 24h y 48h (zona amarilla — riesgo)
+      pendingBase().lt('shopify_created_at', cutoff24h).gte('shopify_created_at', cutoff48h),
+
+      // Sin tocar: 0 intentos de confirmación, todas las fechas (acumulado real pendiente)
+      pendingBase().or('confirmation_attempts.is.null,confirmation_attempts.eq.0'),
 
       // Confirmados hoy (métrica histórica, solo pedidos Shopify)
       supabase
@@ -183,6 +192,8 @@ export async function GET() {
       nuevos:                         nuevos                         ?? 0,
       reintentar:                     reintentar                     ?? 0,
       atrasados:                      atrasados                      ?? 0,
+      atrasados24h:                   atrasados24h                   ?? 0,
+      sinTocarTotal:                  sinTocarTotal                  ?? 0,
       confirmadosHoy:                 confirmadosHoy                 ?? 0,
       contactadosHoy:                 contactadosHoy                 ?? 0,
       sinRespuesta:                   reintentar                     ?? 0,

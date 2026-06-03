@@ -4,6 +4,118 @@
 
 ---
 
+## FEATURE: Monitor de Confirmación — vista read-only para dispatch_agent (2026-06-03)
+
+### Qué se implementó
+
+Dashboard de solo lectura en `/confirmados/monitor` para que el `dispatch_agent` y el `admin` puedan monitorear el estado de la cola de confirmación sin realizar ninguna acción. Cero mutaciones, cero botones de acción.
+
+### Acceso y roles
+
+| Rol | Acceso |
+|---|---|
+| `admin` | ✅ Sí — link en sidebar entre Confirmados y Despachados |
+| `dispatch_agent` | ✅ Sí — link en sidebar |
+| Resto de roles | ❌ Middleware ya bloquea `/confirmados/*` para no-admin y no-dispatch_agent |
+
+El middleware existente cubre `/confirmados` y por extensión `/confirmados/monitor` sin cambios adicionales.
+
+### Archivos creados
+
+| Archivo | Descripción |
+|---|---|
+| `src/app/(app)/confirmados/monitor/page.tsx` | **NUEVO.** Página read-only del monitor. |
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/confirmacion/stats/route.ts` | +2 stats: `atrasados24h` (entre 24h y 48h) y `sinTocarTotal` (0 intentos, todas las fechas). +1 variable `cutoff24h`. |
+| `src/components/layout/sidebar.tsx` | Import `Activity`. Link `Monitor Confirmación` añadido a `admin` (entre Confirmados y Despachados) y `dispatch_agent`. |
+
+### Nuevos campos en `/api/confirmacion/stats`
+
+| Campo | Lógica |
+|---|---|
+| `atrasados24h` | `pending + source=shopify_webhook + tracking IS NULL + shopify_created_at BETWEEN cutoff48h AND cutoff24h` |
+| `sinTocarTotal` | `pending + source=shopify_webhook + tracking IS NULL + confirmation_attempts = 0 (o null)` — todas las fechas |
+
+Ambos campos son opcionales hacia atrás — si la stats API no los devuelve por alguna razón, la página cae a 0 sin error.
+
+### Estructura del monitor
+
+**KPIs (6 cards):**
+| Card | Fuente |
+|---|---|
+| Pendientes | `stats.pendingTotal` |
+| Sin tocar | `stats.sinTocarTotal` |
+| +24h sin confirmar | `stats.atrasados24h` |
+| +48h críticos | `stats.atrasados` |
+| Confirmados hoy | `stats.confirmadosHoy` |
+| Tasa confirmación | `confirmadosHoy / (confirmadosHoy + pendingTotal) × 100` |
+
+**Tabs (5):**
+| Tab | Datos |
+|---|---|
+| Resumen | KPIs + barra de tasa + alertas contextuales |
+| Pendientes | Todos los pedidos pending filtrados por `source=shopify_webhook` + búsqueda |
+| Alertas | Pedidos con ≥24h en cola, ordenados por mayor antigüedad primero |
+| Santo Domingo | Filtrado client-side via `isSantoDomingoOrder` |
+| Confirmados hoy | `confirmation_status='confirmed'` + `customer_confirmed_at` o `last_confirmation_attempt` en el día RD actual |
+
+**Filtros y source:**
+
+`/api/orders?confirmationStatus=pending` no soporta `source` como param → se filtra client-side: `order.source === 'shopify_webhook'`. Además se excluyen estados terminales (`delivered`, `returned`, `cancelled`, `indemnizacion`) antes de mostrar.
+
+**Tiempo en cola:**
+
+Calculado desde `order.shopify_created_at ?? order.created_at`. Muestra label relativo ("Hace 3h", "Hace 1d 6h") + badge de alerta (+24h naranja, +48h rojo pulsante).
+
+**Datos mostrados por fila (pendientes):**
+
+- Número de orden + fecha de ingreso + tiempo en cola + badge alerta
+- Nombre del cliente + teléfono
+- AlertBadges (duplicado, fuera de cobertura, destino especial, zona desconocida, SD, LÜMA transferencia)
+- Ubicación (ciudad + provincia) + badge "SD local" si aplica
+- Intentos de confirmación (badge color según cantidad)
+- Último contacto (`last_confirmation_attempt`)
+
+**Auto-refresh:** cada 3 minutos vía `setInterval`. Botón manual "Actualizar" con timestamp del último refresh.
+
+### Riesgos considerados
+
+- **Sin modificar `/api/orders`:** No se agregó `source` como param en el endpoint general para no romper otros módulos. Filtrado client-side es suficiente para el volumen esperado (≤500 pedidos pending).
+- **`confirmationStatus=confirmed` devuelve histórico completo:** La tabla "Confirmados hoy" filtra client-side por `customer_confirmed_at >= todayRD` para no mostrar el histórico completo.
+- **`atrasados24h` puede solaparse con `atrasados`:** Son rangos mutuamente excluyentes — `atrasados24h` es [cutoff24h, cutoff48h) y `atrasados` es (<cutoff48h). No se duplican.
+
+### Cómo probar
+
+1. `npm run dev` en `control-cod-app/`
+2. Login como `dispatch_agent` → sidebar muestra "Monitor Confirmación" (icono Activity, punto índigo)
+3. Ir a `/confirmados/monitor` → carga con 6 KPIs
+4. Verificar tab "Alertas": muestra pedidos con +24h, ordenados más viejos primero
+5. Verificar tab "Santo Domingo": solo pedidos de zona SD
+6. Verificar tab "Confirmados hoy": muestra confirmaciones del día en zona RD
+7. Usar buscador en tab "Pendientes" → filtra client-side
+8. Click "Actualizar" → datos se refrescan + timestamp actualiza
+9. Verificar que NO hay botones de acción en ninguna fila
+10. Login como `confirmation_agent` → NO puede acceder a `/confirmados/monitor` (redirige a /my-tasks)
+11. `npx tsc --noEmit` → sin errores ✅
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- `/api/orders` — sin cambios
+- `/api/confirmacion/stats` — los nuevos campos son aditivos, todos los callers existentes reciben los mismos campos de antes + 2 nuevos
+- `/confirmados`, `/confirmacion`, `/despachados` — sin cambios
+- Middleware — sin cambios
+- EFI sync, tracking cron, Shopify sync — sin cambios
+
+---
+
 ## FIX: Conteos incorrectos en Novedad — last_tracking_update → status_since (2026-06-03)
 
 ### Síntoma

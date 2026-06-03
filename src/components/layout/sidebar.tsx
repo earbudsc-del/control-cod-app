@@ -8,7 +8,7 @@ import {
   LayoutDashboard, Package, Upload, BarChart2,
   Settings, LogOut, Truck, Bike, AlertCircle, ClipboardList,
   ListTodo, TrendingUp, Box, CheckCircle2, X, ShoppingCart, Brain,
-  RotateCcw, Link2, MapPin,
+  RotateCcw, Link2, MapPin, Activity,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
@@ -35,6 +35,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/devoluciones',           label: 'Devoluciones',         icon: RotateCcw,       alert: 'red'    },
     { href: '/confirmacion',           label: 'Confirmación',         icon: ClipboardList,   alert: 'indigo' },
     { href: '/confirmados',            label: 'Confirmados',          icon: CheckCircle2,    alert: 'green'  },
+    { href: '/confirmados/monitor',    label: 'Monitor Confirmación', icon: Activity,        alert: 'indigo' },
     { href: '/despachados',            label: 'Despachados',          icon: Truck,           alert: null     },
     { href: '/carritos-abandonados',   label: 'Carritos abandonados', icon: ShoppingCart,    alert: null     },
     { href: '/orders',                 label: 'Pedidos',              icon: Package,         alert: null     },
@@ -79,8 +80,9 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
   ],
 
   dispatch_agent: [
-    { href: '/mi-rendimiento', label: 'Mi rendimiento', icon: TrendingUp,  alert: null    },
-    { href: '/confirmados',    label: 'Confirmados',    icon: CheckCircle2, alert: 'green' },
+    { href: '/mi-rendimiento',       label: 'Mi rendimiento',       icon: TrendingUp,  alert: null     },
+    { href: '/confirmados',          label: 'Confirmados',          icon: CheckCircle2, alert: 'green' },
+    { href: '/confirmados/monitor',  label: 'Monitor Confirmación', icon: Activity,    alert: 'indigo' },
   ],
 
   agent: [
