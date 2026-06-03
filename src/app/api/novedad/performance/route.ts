@@ -116,7 +116,8 @@ export async function GET() {
         .select('*', { count: 'exact', head: true })
         .eq('normalized_status', 'delivered')
         .or('delivery_attempts.gt.0,last_attempt_reason.not.is.null')
-        .gte('last_tracking_update', todayIso),
+        .not('status_since', 'is', null)
+        .gte('status_since', todayIso),
 
       // Novedades entregadas ayer
       supabase
@@ -124,8 +125,9 @@ export async function GET() {
         .select('*', { count: 'exact', head: true })
         .eq('normalized_status', 'delivered')
         .or('delivery_attempts.gt.0,last_attempt_reason.not.is.null')
-        .gte('last_tracking_update', yesterdayIso)
-        .lt('last_tracking_update', todayIso),
+        .not('status_since', 'is', null)
+        .gte('status_since', yesterdayIso)
+        .lt('status_since', todayIso),
     ])
 
     // Calcular distintos (Supabase no soporta COUNT DISTINCT directamente)

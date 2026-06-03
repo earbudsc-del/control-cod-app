@@ -4,6 +4,57 @@
 
 ---
 
+## FIX: Conteos incorrectos en Novedad — last_tracking_update → status_since (2026-06-03)
+
+### Síntoma
+
+KPIs incorrectos en módulo Novedad después de medianoche:
+- `recuperadasHoy: 53` (real: ~165 antes de medianoche → caen a 53 tras reset)
+- `recuperadasAyer: 113` (real: 0 antes de medianoche)
+
+### Causa raíz exacta
+
+`recuperadasHoy` y `recuperadasAyer` en `/api/novedad/performance` usaban **`last_tracking_update`** como campo de fecha. El cron Q4 re-valida órdenes `delivered` de los últimos 21 días y escribe `last_tracking_update = now()`, haciendo que entregas históricas aparezcan como "de hoy".
+
+El campo correcto es **`status_since`**: se escribe una sola vez cuando EFI detecta por primera vez el estado `delivered`. No se modifica en re-syncs.
+
+### Fix aplicado — solo en `/api/novedad/performance`
+
+```typescript
+// ANTES (buggy):
+.gte('last_tracking_update', todayIso)
+
+// DESPUÉS (correcto):
+.not('status_since', 'is', null)
+.gte('status_since', todayIso)
+
+// ANTES (buggy):
+.gte('last_tracking_update', yesterdayIso).lt('last_tracking_update', todayIso)
+
+// DESPUÉS (correcto):
+.not('status_since', 'is', null)
+.gte('status_since', yesterdayIso).lt('status_since', todayIso)
+```
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/novedad/performance/route.ts` | `recuperadasHoy`/`recuperadasAyer`: `last_tracking_update` → `status_since` + guard `.not('status_since', 'is', null)` |
+
+### NO se tocó
+
+- `src/app/api/tracking/auto/route.ts` — cron sin cambios
+- `src/lib/tracking/update-order.ts` — sin cambios
+- Todos los demás KPIs de `/api/novedad/performance` — sin cambios
+- Frontend Novedad — sin cambios
+
+---
+
 ## FIX: Conteos incorrectos en Reparto — last_tracking_update → status_since (2026-06-02)
 
 ### Síntoma
