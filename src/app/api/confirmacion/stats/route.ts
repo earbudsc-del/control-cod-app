@@ -19,17 +19,28 @@ function rdTodayStartISO(): string {
   return new Date(Date.UTC(y, m - 1, d, 4, 0, 0, 0)).toISOString()
 }
 
+/** Calcula el inicio de un día relativo al hoy RD (negativo = pasado). */
+function rdOffsetISO(days: number): string {
+  const now   = new Date()
+  const rdStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Santo_Domingo' })
+  const [y, m, d] = rdStr.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d + days, 4, 0, 0, 0)).toISOString()
+}
+
 export async function GET() {
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
 
-    // Límites de tiempo: hoy RD y cortes de 24h y 48h
-    const todayStartRD = rdTodayStartISO()
-    const todayIso     = new Date().setHours(0, 0, 0, 0), todayIsoStr = new Date(todayIso).toISOString()
-    const cutoff24h    = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-    const cutoff48h    = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
+    // Límites de tiempo: hoy RD y cortes de 24h, 48h y antigüedad
+    const todayStartRD  = rdTodayStartISO()
+    const todayIso      = new Date().setHours(0, 0, 0, 0), todayIsoStr = new Date(todayIso).toISOString()
+    const cutoff24h     = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    const cutoff48h     = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
+    const yesterdayStart = rdOffsetISO(-1)   // ayer 04:00 UTC
+    const sevenDaysAgo   = rdOffsetISO(-7)   // hace 7 días 04:00 UTC
+    const thirtyDaysAgo  = rdOffsetISO(-30)  // hace 30 días 04:00 UTC
 
     // Base idéntica a /api/confirmacion/route.ts: pending + sin tracking + normalized pending
     const pendingBase = () =>
@@ -71,6 +82,20 @@ export async function GET() {
       { count: santoDomingoConfirmadosSinGuia },
       { count: santoDomingoTotal },
       { count: fueraDeCoberturaTotal },
+      { count: entrantesHoy },
+      { count: pendientesHoy },
+      { count: sinTocarHoy },
+      // Sección A — nuevas
+      { count: sinRespuestaHoy },
+      // Sección B — antigüedad (buckets exclusivos, rolling windows)
+      { count: pendientesAyer },
+      { count: pendientesSemana },
+      { count: pendientesMes },
+      { count: pendientesMas30d },
+      // Sección C — causa
+      { count: tresMasIntentosPendientes },
+      { count: duplicadosPendientes },
+      { count: numeroIncorrecto },
     ] = await Promise.all([
 
       // Nuevos: pedidos de HOY (en RD) con 0 intentos de contacto — sin contacto previo
@@ -186,6 +211,62 @@ export async function GET() {
         .select('*', { count: 'exact', head: true })
         .eq('source', 'shopify_webhook')
         .eq('confirmation_status', 'no_coverage'),
+
+      // Entrantes hoy: todos los pedidos Shopify activos creados hoy en RD (cualquier status)
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('source', 'shopify_webhook')
+        .gte('shopify_created_at', todayStartRD)
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned')
+        .neq('normalized_status', 'cancelled'),
+
+      // Pendientes de hoy: creados hoy y aún en cola de confirmación
+      pendingBase().gte('shopify_created_at', todayStartRD),
+
+      // Sin tocar hoy: creados hoy con 0 intentos de confirmación
+      pendingBase()
+        .gte('shopify_created_at', todayStartRD)
+        .or('confirmation_attempts.is.null,confirmation_attempts.eq.0'),
+
+      // Sin respuesta hoy: creados hoy, al menos 1 intento, aún pendientes
+      pendingBase()
+        .gte('shopify_created_at', todayStartRD)
+        .gte('confirmation_attempts', 1),
+
+      // Pendientes de ayer (bucket exclusivo: [yesterdayStart, todayStartRD))
+      pendingBase()
+        .gte('shopify_created_at', yesterdayStart)
+        .lt( 'shopify_created_at', todayStartRD),
+
+      // Pendientes de esta semana (últimos 7 días, excl. ayer y hoy)
+      pendingBase()
+        .gte('shopify_created_at', sevenDaysAgo)
+        .lt( 'shopify_created_at', yesterdayStart),
+
+      // Pendientes de este mes (últimos 30 días, excl. últimos 7 días)
+      pendingBase()
+        .gte('shopify_created_at', thirtyDaysAgo)
+        .lt( 'shopify_created_at', sevenDaysAgo),
+
+      // Más de 30 días en cola
+      pendingBase().lt('shopify_created_at', thirtyDaysAgo),
+
+      // 3+ intentos sin confirmar
+      pendingBase().gte('confirmation_attempts', 3),
+
+      // Duplicados en cola
+      pendingBase().eq('duplicate_alert', true),
+
+      // Número incorrecto (no terminales)
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('source', 'shopify_webhook')
+        .eq('confirmation_status', 'wrong_number')
+        .neq('normalized_status', 'delivered')
+        .neq('normalized_status', 'returned'),
     ])
 
     return NextResponse.json({
@@ -207,6 +288,20 @@ export async function GET() {
       santoDomingoConfirmadosSinGuia: santoDomingoConfirmadosSinGuia ?? 0,
       santoDomingoTotal:              santoDomingoTotal              ?? 0,
       fueraDeCoberturaTotal:          fueraDeCoberturaTotal          ?? 0,
+      entrantesHoy:                   entrantesHoy                   ?? 0,
+      pendientesHoy:                  pendientesHoy                  ?? 0,
+      sinTocarHoy:                    sinTocarHoy                    ?? 0,
+      // Sección A — nuevas
+      sinRespuestaHoy:                sinRespuestaHoy                ?? 0,
+      // Sección B — antigüedad
+      pendientesAyer:                 pendientesAyer                 ?? 0,
+      pendientesSemana:               pendientesSemana               ?? 0,
+      pendientesMes:                  pendientesMes                  ?? 0,
+      pendientesMas30d:               pendientesMas30d               ?? 0,
+      // Sección C — causa
+      tresMasIntentosPendientes:      tresMasIntentosPendientes      ?? 0,
+      duplicadosPendientes:           duplicadosPendientes           ?? 0,
+      numeroIncorrecto:               numeroIncorrecto               ?? 0,
     })
   } catch (err) {
     console.error('[GET /api/confirmacion/stats]', err)

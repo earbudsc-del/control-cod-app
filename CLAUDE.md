@@ -4,6 +4,169 @@
 
 ---
 
+## FEATURE: Monitor de Confirmación — gestión operativa completa (2026-06-04)
+
+### Problema resuelto
+
+El monitor era un monitor de conteos. El nuevo monitor es un monitor de **gestión operativa**: permite al Supervisor, Admin o perfil Confirmados responder en 5 segundos:
+1. ¿Qué está entrando hoy?
+2. ¿Qué está siendo confirmado?
+3. ¿Qué se está quedando atrás?
+4. ¿Por qué se está quedando atrás?
+5. ¿Es responsabilidad del agente o del cliente?
+
+### Nuevas secciones
+
+**Sección A — Operación del día (6 KPI cards):**
+
+| Card | Métrica | Fuente |
+|---|---|---|
+| Entrantes hoy | Pedidos Shopify activos creados hoy | `stats.entrantesHoy` |
+| Contactados hoy | Intentos registrados hoy (cualquier status) | `stats.contactadosHoy` |
+| Confirmados hoy | Confirmados hoy | `stats.confirmadosHoy` |
+| Pendientes de hoy | Creados hoy con status pending | `stats.pendientesHoy` |
+| Sin tocar hoy | Creados hoy con 0 intentos | `stats.sinTocarHoy` |
+| Sin respuesta hoy | Creados hoy, 1+ intentos, aún pending | `stats.sinRespuestaHoy` (nuevo) |
+
+Grid `2×3` en desktop. Barra "Avance del día" = `confirmadosHoy / entrantesHoy`.
+
+**Sección B — Pendientes por antigüedad (barras proporcionales):**
+
+Buckets exclusivos usando ventanas rolling (no calendario, evita edge cases de lunes/día 1):
+
+| Bucket | Rango `shopify_created_at` | Clave |
+|---|---|---|
+| Hoy | >= todayStartRD | `pendientesHoy` (existente) |
+| Ayer | [yesterdayStart, todayStart) | `pendientesAyer` (nuevo) |
+| Esta semana | [7daysAgo, yesterdayStart) | `pendientesSemana` (nuevo) |
+| Este mes | [30daysAgo, 7daysAgo) | `pendientesMes` (nuevo) |
+| Más de 30 días | < 30daysAgo | `pendientesMas30d` (nuevo) |
+
+Visualización: barras horizontales proporcionales al total. Colores: verde → amarillo → naranja → rojo → gris.
+
+**Sección C — Pendientes por causa (2 sub-grids):**
+
+Grupo 1 "En cola — trabajo del agente":
+- Sin tocar (`sinTocarTotal`) · 1-2 intentos (`reintentar`) · 3+ intentos (`tresMasIntentosPendientes` nuevo) · Duplicados (`duplicadosPendientes` nuevo)
+
+Grupo 2 "Bloqueados — requieren acción externa":
+- Sin respuesta (`inalcanzables`) · Número incorrecto (`numeroIncorrecto` nuevo) · Sin cobertura (`sinCobertura`)
+
+**Sección D — Evaluación del Supervisor (client-side, sin API):**
+
+Motor de evaluación determinístico basado en los KPIs de Sección A:
+
+| Nivel | Condición |
+|---|---|
+| Excelente | tasaConfirm >= 70% AND pctSinTocar <= 15% |
+| Correcto | tasaConfirm >= 40% AND pctSinTocar <= 35% |
+| Riesgo | pctSinTocar > 35% OR tasaConfirm < 40% |
+| Crítico | pctSinTocar > 60% O entrantesHoy > 5 con confirmadosHoy = 0 |
+
+Mensajes autogenerados: "Entraron N. X confirmados. Y contactados. Z sin tocar. Evaluación: …"
+
+### Nuevos campos en `/api/confirmacion/stats`
+
+| Campo | Lógica | Tipo |
+|---|---|---|
+| `sinRespuestaHoy` | `pendingBase()` + `shopify_created_at >= todayStartRD` + `confirmation_attempts >= 1` | Sección A |
+| `pendientesAyer` | `pendingBase()` + `shopify_created_at` en [yesterdayStart, todayStart) | Sección B |
+| `pendientesSemana` | `pendingBase()` + `shopify_created_at` en [7daysAgo, yesterdayStart) | Sección B |
+| `pendientesMes` | `pendingBase()` + `shopify_created_at` en [30daysAgo, 7daysAgo) | Sección B |
+| `pendientesMas30d` | `pendingBase()` + `shopify_created_at < 30daysAgo` | Sección B |
+| `tresMasIntentosPendientes` | `pendingBase()` + `confirmation_attempts >= 3` | Sección C |
+| `duplicadosPendientes` | `pendingBase()` + `duplicate_alert = true` | Sección C |
+| `numeroIncorrecto` | `source=shopify_webhook` + `confirmation_status='wrong_number'` + no terminal | Sección C |
+
+Función helper `rdOffsetISO(days: number)` añadida al route.
+
+Todos los campos son aditivos — no rompen ningún caller existente.
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/confirmacion/stats/route.ts` | `rdOffsetISO` helper + 3 date vars + 8 queries + 8 campos en response |
+| `src/app/(app)/confirmados/monitor/page.tsx` | `StatsData` expandido + Sección A (6 cards) + Sección B (barras) + Sección C (causas) + Sección D (evaluación) |
+
+### NO se rompió
+
+- Todos los campos existentes en `/api/confirmacion/stats` — sin cambios
+- Tabs existentes (Hoy / Pendientes / Santo Domingo / Confirmados hoy) — sin cambios
+- Acceso y roles — sin cambios (middleware intacto)
+- 100% read-only — sin mutaciones
+
+---
+
+## REDISEÑO: Monitor de Confirmación — operación diaria primero (2026-06-03)
+
+### Problema resuelto
+
+La vista original mostraba como prioridad el backlog acumulado (+24h, +48h, total pendientes), comunicando una narrativa de crisis antes que el rendimiento del agente. La pregunta clave "¿cómo va el agente hoy?" era difícil de responder en menos de 5 segundos.
+
+### Nueva estructura visual
+
+**Sección A — Operación del día (4 KPI cards, primera en pantalla):**
+| Card | Métrica | Fuente |
+|---|---|---|
+| Entrantes hoy | Pedidos Shopify activos creados hoy en RD | `stats.entrantesHoy` (nuevo) |
+| Confirmados hoy | Confirmados hoy | `stats.confirmadosHoy` |
+| Pendientes de hoy | Creados hoy con `confirmation_status='pending'` | `stats.pendientesHoy` (nuevo) |
+| Sin tocar hoy | Creados hoy con 0 intentos | `stats.sinTocarHoy` (nuevo) |
+
+Barra de **Avance del día** = `confirmadosHoy / entrantesHoy`. Se llama "Avance del día" (no "tasa") porque `confirmadosHoy` puede incluir pedidos de días anteriores confirmados hoy.
+
+**Sección B — Backlog acumulado (3 KPI cards, contexto operativo):**
+- Pendientes totales · +24h en riesgo · +48h críticos
+
+**Tabs (4, antes 5):**
+| Tab | Antes | Cambio |
+|---|---|---|
+| Hoy (default) | era "Resumen" | Nuevo: lista solo pedidos de hoy, 0 intentos primero |
+| Backlog | era "Pendientes" + "Alertas" | Unificado con badges +24h/+48h por fila + buscador |
+| Santo Domingo | sin cambio | — |
+| Confirmados hoy | sin cambio | — |
+
+Tab "Alertas" eliminado — las alertas viven dentro de "Backlog" como contexto inline.
+
+### Nuevos campos en `/api/confirmacion/stats`
+
+| Campo | Lógica | Zona horaria |
+|---|---|---|
+| `entrantesHoy` | `source=shopify_webhook` + `shopify_created_at >= todayRD` + `NOT (delivered\|returned\|cancelled)` | RD (UTC-4) |
+| `pendientesHoy` | `pendingBase()` + `shopify_created_at >= todayRD` | RD (UTC-4) |
+| `sinTocarHoy` | `pendingBase()` + `shopify_created_at >= todayRD` + 0 intentos | RD (UTC-4) |
+
+Campos aditivos — no rompen ningún caller existente. Todos usan `todayStartRD` (medianoche RD = 04:00 UTC).
+
+### Tab "Hoy" — ordenamiento
+
+Pedidos de hoy ordenados: 0 intentos primero, luego por `shopify_created_at ASC` (más viejos del día al tope).
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/api/confirmacion/stats/route.ts` | +3 queries aditivas: `entrantesHoy`, `pendientesHoy`, `sinTocarHoy`. +3 campos en response JSON. |
+| `src/app/(app)/confirmados/monitor/page.tsx` | Rediseño completo. Tab type: `hoy\|backlog\|santo_domingo\|confirmados_hoy`. StatsData ampliado. Secciones A y B separadas. Tab Hoy con `pedidosHoy` memo. Tab Backlog reemplaza Pendientes+Alertas. `avancePct` reemplaza `tasa`. |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- `/api/confirmacion/stats` — todos los campos existentes sin cambios; nuevos son aditivos
+- Acceso y roles — sin cambios (middleware intacto)
+- `/confirmacion`, `/confirmados`, `/despachados` — sin cambios
+- EFI sync, tracking cron, SD delivery — sin cambios
+
+---
+
 ## FEATURE: Monitor de Confirmación — vista read-only para dispatch_agent (2026-06-03)
 
 ### Qué se implementó

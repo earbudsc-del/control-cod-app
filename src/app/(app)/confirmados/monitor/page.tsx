@@ -5,7 +5,8 @@ import { AlertBadges } from '@/components/shared/alert-badges'
 import { isSantoDomingoOrder } from '@/lib/alert-helpers'
 import {
   RefreshCw, Clock, CheckCircle2, AlertTriangle, Users,
-  Phone, MapPin, TrendingUp, Activity, Search, X,
+  Phone, MapPin, Activity, Search, X, ArrowDownCircle,
+  PhoneOff, BarChart2, ShieldAlert, Copy, XCircle, Bot,
 } from 'lucide-react'
 import type { Order } from '@/types'
 
@@ -53,15 +54,33 @@ function isActive(order: Order): boolean {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type Tab = 'resumen' | 'pendientes' | 'alertas' | 'santo_domingo' | 'confirmados_hoy'
+type Tab = 'hoy' | 'backlog' | 'santo_domingo' | 'confirmados_hoy'
 
 interface StatsData {
-  pendingTotal:  number
-  sinTocarTotal: number
-  atrasados24h:  number
-  atrasados:     number     // +48h
-  confirmadosHoy: number
-  contactadosHoy: number
+  pendingTotal:              number
+  sinTocarTotal:             number
+  atrasados24h:              number
+  atrasados:                 number
+  confirmadosHoy:            number
+  contactadosHoy:            number
+  entrantesHoy:              number
+  pendientesHoy:             number
+  sinTocarHoy:               number
+  // Sección A — nuevas
+  sinRespuestaHoy:           number
+  // Sección B — antigüedad
+  pendientesAyer:            number
+  pendientesSemana:          number
+  pendientesMes:             number
+  pendientesMas30d:          number
+  // Sección C — causa (en cola)
+  reintentar:                number
+  tresMasIntentosPendientes: number
+  duplicadosPendientes:      number
+  // Sección C — causa (bloqueados)
+  inalcanzables:             number
+  sinCobertura:              number
+  numeroIncorrecto:          number
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -121,7 +140,7 @@ function SinceBadge({ ms }: { ms: number }) {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function MonitorConfirmacionPage() {
-  const [activeTab,    setActiveTab]    = useState<Tab>('resumen')
+  const [activeTab,    setActiveTab]    = useState<Tab>('hoy')
   const [pending,      setPending]      = useState<Order[]>([])
   const [confirmed,    setConfirmed]    = useState<Order[]>([])
   const [stats,        setStats]        = useState<StatsData | null>(null)
@@ -148,12 +167,26 @@ export default function MonitorConfirmacionPage() {
       setPending(pendingOrders)
       setConfirmed(confirmedOrders)
       setStats({
-        pendingTotal:   statsRes.pendingTotal   ?? pendingOrders.length,
-        sinTocarTotal:  statsRes.sinTocarTotal  ?? 0,
-        atrasados24h:   statsRes.atrasados24h   ?? 0,
-        atrasados:      statsRes.atrasados      ?? 0,
-        confirmadosHoy: statsRes.confirmadosHoy ?? 0,
-        contactadosHoy: statsRes.contactadosHoy ?? 0,
+        pendingTotal:              statsRes.pendingTotal              ?? pendingOrders.length,
+        sinTocarTotal:             statsRes.sinTocarTotal             ?? 0,
+        atrasados24h:              statsRes.atrasados24h              ?? 0,
+        atrasados:                 statsRes.atrasados                 ?? 0,
+        confirmadosHoy:            statsRes.confirmadosHoy            ?? 0,
+        contactadosHoy:            statsRes.contactadosHoy            ?? 0,
+        entrantesHoy:              statsRes.entrantesHoy              ?? 0,
+        pendientesHoy:             statsRes.pendientesHoy             ?? 0,
+        sinTocarHoy:               statsRes.sinTocarHoy               ?? 0,
+        sinRespuestaHoy:           statsRes.sinRespuestaHoy           ?? 0,
+        pendientesAyer:            statsRes.pendientesAyer            ?? 0,
+        pendientesSemana:          statsRes.pendientesSemana          ?? 0,
+        pendientesMes:             statsRes.pendientesMes             ?? 0,
+        pendientesMas30d:          statsRes.pendientesMas30d          ?? 0,
+        reintentar:                statsRes.reintentar                ?? 0,
+        tresMasIntentosPendientes: statsRes.tresMasIntentosPendientes ?? 0,
+        duplicadosPendientes:      statsRes.duplicadosPendientes      ?? 0,
+        inalcanzables:             statsRes.inalcanzables             ?? 0,
+        sinCobertura:              statsRes.sinCobertura              ?? 0,
+        numeroIncorrecto:          statsRes.numeroIncorrecto          ?? 0,
       })
       setLastRefresh(new Date())
     } finally {
@@ -180,10 +213,22 @@ export default function MonitorConfirmacionPage() {
     )
   }, [pending, search])
 
-  const alertas = useMemo(() =>
-    pending.filter(o => sinceMs(o) >= 24 * 3_600_000)
-           .sort((a, b) => sinceMs(b) - sinceMs(a))
-  , [pending])
+  // Pedidos creados hoy: filtra del backlog total y ordena por 0 intentos primero
+  const pedidosHoy = useMemo(() =>
+    pending
+      .filter(o => {
+        const ts = o.shopify_created_at ?? o.created_at
+        return new Date(ts).getTime() >= todayStartMs
+      })
+      .sort((a, b) => {
+        const aAttempts = a.confirmation_attempts ?? 0
+        const bAttempts = b.confirmation_attempts ?? 0
+        if (aAttempts !== bAttempts) return aAttempts - bAttempts
+        const aTs = new Date(a.shopify_created_at ?? a.created_at).getTime()
+        const bTs = new Date(b.shopify_created_at ?? b.created_at).getTime()
+        return aTs - bTs
+      })
+  , [pending, todayStartMs])
 
   const santoDomingo = useMemo(() =>
     pending.filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address))
@@ -202,29 +247,25 @@ export default function MonitorConfirmacionPage() {
     })
   , [confirmed, todayStartMs, tomorrowMs])
 
-  const tasa = stats
-    ? stats.confirmadosHoy + (stats.pendingTotal ?? 0) > 0
-      ? Math.round((stats.confirmadosHoy / (stats.confirmadosHoy + (stats.pendingTotal ?? 0))) * 100)
-      : 0
+  const avancePct = stats && stats.entrantesHoy > 0
+    ? Math.min(100, Math.round((stats.confirmadosHoy / stats.entrantesHoy) * 100))
     : 0
 
   // ── Tab counts ────────────────────────────────────────────────────────────
   const tabCounts: Record<Tab, number> = {
-    resumen:         0,
-    pendientes:      pending.length,
-    alertas:         alertas.length,
+    hoy:             pedidosHoy.length,
+    backlog:         pending.length,
     santo_domingo:   santoDomingo.length,
     confirmados_hoy: confirmadosHoy.length,
   }
 
   // ── Order row ─────────────────────────────────────────────────────────────
   function OrderRow({ order, showSince = true }: { order: Order; showSince?: boolean }) {
-    const ms    = sinceMs(order)
-    const isSD  = isSantoDomingoOrder(order.city, order.province, order.customer_address)
+    const ms   = sinceMs(order)
+    const isSD = isSantoDomingoOrder(order.city, order.province, order.customer_address)
 
     return (
       <tr className="border-b border-gray-100 hover:bg-gray-50/50">
-        {/* Fecha / Orden */}
         <td className="py-3 px-4 text-xs text-gray-500 whitespace-nowrap">
           <p className="font-medium text-gray-700">{order.order_number ?? '—'}</p>
           <p>{formatAbsolute(order.shopify_created_at ?? order.created_at)}</p>
@@ -236,7 +277,6 @@ export default function MonitorConfirmacionPage() {
           )}
         </td>
 
-        {/* Cliente */}
         <td className="py-3 px-4">
           <p className="text-sm font-medium text-gray-800 truncate max-w-[140px]">
             {order.customer_name ?? '—'}
@@ -255,7 +295,6 @@ export default function MonitorConfirmacionPage() {
           />
         </td>
 
-        {/* Ubicación */}
         <td className="py-3 px-4 text-xs text-gray-500 hidden md:table-cell">
           <div className="flex items-center gap-1">
             <MapPin className="w-3 h-3 shrink-0" />
@@ -268,12 +307,10 @@ export default function MonitorConfirmacionPage() {
           )}
         </td>
 
-        {/* Intentos */}
         <td className="py-3 px-4 text-center hidden sm:table-cell">
           <AttemptsBadge attempts={order.confirmation_attempts} />
         </td>
 
-        {/* Último contacto */}
         <td className="py-3 px-4 text-xs text-gray-500 hidden lg:table-cell whitespace-nowrap">
           {order.last_confirmation_attempt
             ? formatAbsolute(order.last_confirmation_attempt)
@@ -379,11 +416,10 @@ export default function MonitorConfirmacionPage() {
   }
 
   const TAB_META: { key: Tab; label: string; shortLabel: string }[] = [
-    { key: 'resumen',         label: 'Resumen',          shortLabel: 'Resumen' },
-    { key: 'pendientes',      label: 'Pendientes',        shortLabel: 'Pend.' },
-    { key: 'alertas',         label: `Alertas`,           shortLabel: 'Alertas' },
-    { key: 'santo_domingo',   label: 'Santo Domingo',     shortLabel: 'SD' },
-    { key: 'confirmados_hoy', label: 'Confirmados hoy',   shortLabel: 'Conf. hoy' },
+    { key: 'hoy',             label: 'Hoy',              shortLabel: 'Hoy'       },
+    { key: 'backlog',         label: 'Pendientes',       shortLabel: 'Pend.'     },
+    { key: 'santo_domingo',   label: 'Santo Domingo',    shortLabel: 'SD'        },
+    { key: 'confirmados_hoy', label: 'Confirmados hoy',  shortLabel: 'Conf. hoy' },
   ]
 
   return (
@@ -412,61 +448,283 @@ export default function MonitorConfirmacionPage() {
         </button>
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <KpiCard
-          label="Pendientes"
-          value={stats?.pendingTotal ?? pending.length}
-          sub="Total en cola"
-          color="bg-indigo-50 border-indigo-200"
-          icon={Users}
-          onClick={() => setActiveTab('pendientes')}
-          active={activeTab === 'pendientes'}
-        />
-        <KpiCard
-          label="Sin tocar"
-          value={stats?.sinTocarTotal ?? 0}
-          sub="0 intentos, todas las fechas"
-          color="bg-amber-50 border-amber-200"
-          icon={Clock}
-          onClick={() => setActiveTab('pendientes')}
-          active={false}
-        />
-        <KpiCard
-          label="+24h sin confirmar"
-          value={stats?.atrasados24h ?? 0}
-          sub="Entre 24h y 48h"
-          color="bg-orange-50 border-orange-200"
-          icon={AlertTriangle}
-          onClick={() => setActiveTab('alertas')}
-          active={activeTab === 'alertas' && (stats?.atrasados24h ?? 0) > 0}
-        />
-        <KpiCard
-          label="+48h críticos"
-          value={stats?.atrasados ?? 0}
-          sub="Más de 48h en cola"
-          color="bg-red-50 border-red-200"
-          icon={AlertTriangle}
-          onClick={() => setActiveTab('alertas')}
-          active={activeTab === 'alertas' && (stats?.atrasados ?? 0) > 0}
-        />
-        <KpiCard
-          label="Confirmados hoy"
-          value={stats?.confirmadosHoy ?? 0}
-          sub="En zona RD"
-          color="bg-green-50 border-green-200"
-          icon={CheckCircle2}
-          onClick={() => setActiveTab('confirmados_hoy')}
-          active={activeTab === 'confirmados_hoy'}
-        />
-        <KpiCard
-          label="Tasa confirmación"
-          value={`${tasa}%`}
-          sub="Hoy vs pendientes"
-          color="bg-blue-50 border-blue-200"
-          icon={TrendingUp}
-        />
+      {/* ─── A: Operación del día ─────────────────────────────────────── */}
+      <div className="space-y-3">
+        <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
+          Operación del día
+        </p>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <KpiCard
+            label="Entrantes hoy"
+            value={stats?.entrantesHoy ?? 0}
+            sub="Pedidos recibidos hoy"
+            color="bg-indigo-50 border-indigo-200"
+            icon={ArrowDownCircle}
+          />
+          <KpiCard
+            label="Contactados hoy"
+            value={stats?.contactadosHoy ?? 0}
+            sub="Intentos registrados hoy"
+            color="bg-blue-50 border-blue-200"
+            icon={Phone}
+          />
+          <KpiCard
+            label="Confirmados hoy"
+            value={stats?.confirmadosHoy ?? 0}
+            sub="Listos para despacho"
+            color="bg-green-50 border-green-200"
+            icon={CheckCircle2}
+            onClick={() => setActiveTab('confirmados_hoy')}
+            active={activeTab === 'confirmados_hoy'}
+          />
+          <KpiCard
+            label="Pendientes de hoy"
+            value={stats?.pendientesHoy ?? 0}
+            sub="Sin confirmar todavía"
+            color="bg-amber-50 border-amber-200"
+            icon={Clock}
+            onClick={() => setActiveTab('hoy')}
+            active={activeTab === 'hoy'}
+          />
+          <KpiCard
+            label="Sin tocar hoy"
+            value={stats?.sinTocarHoy ?? 0}
+            sub="0 intentos registrados"
+            color={(stats?.sinTocarHoy ?? 0) > 0 && (stats?.pendientesHoy ?? 0) > 0 && (stats?.sinTocarHoy ?? 0) / (stats?.pendientesHoy ?? 1) >= 0.5
+              ? 'bg-rose-50 border-rose-300'
+              : 'bg-rose-50 border-rose-200'}
+            icon={AlertTriangle}
+            onClick={() => setActiveTab('hoy')}
+          />
+          <KpiCard
+            label="Sin respuesta hoy"
+            value={stats?.sinRespuestaHoy ?? 0}
+            sub="Contactados, aún pendientes"
+            color="bg-orange-50 border-orange-200"
+            icon={PhoneOff}
+          />
+        </div>
+
+        {/* Avance del día */}
+        <div className="bg-white rounded-xl border border-gray-200 px-4 py-3">
+          <div className="flex justify-between text-xs text-gray-500 mb-1.5">
+            <span>Avance del día</span>
+            <span className="font-semibold text-gray-700">{avancePct}%</span>
+          </div>
+          <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+            <div
+              className="h-2 rounded-full transition-all duration-500"
+              style={{
+                width: `${avancePct}%`,
+                background: avancePct >= 70 ? '#22c55e' : avancePct >= 40 ? '#f59e0b' : '#ef4444',
+              }}
+            />
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            {stats?.confirmadosHoy ?? 0} confirmados
+            {(stats?.entrantesHoy ?? 0) > 0
+              ? ` de ${stats?.entrantesHoy} pedidos recibidos hoy`
+              : ' · sin pedidos nuevos hoy todavía'}
+          </p>
+        </div>
       </div>
+
+      {/* ─── B: Pendientes por antigüedad ────────────────────────────── */}
+      {(() => {
+        const total = stats?.pendingTotal ?? pending.length
+        const buckets = [
+          { label: 'Hoy',           value: stats?.pendientesHoy    ?? 0, bar: 'bg-emerald-400', text: 'text-emerald-700' },
+          { label: 'Ayer',          value: stats?.pendientesAyer   ?? 0, bar: 'bg-yellow-400',  text: 'text-yellow-700' },
+          { label: 'Esta semana',   value: stats?.pendientesSemana ?? 0, bar: 'bg-orange-400',  text: 'text-orange-700' },
+          { label: 'Este mes',      value: stats?.pendientesMes    ?? 0, bar: 'bg-red-400',     text: 'text-red-700'    },
+          { label: 'Más de 30 días',value: stats?.pendientesMas30d ?? 0, bar: 'bg-gray-300',    text: 'text-gray-500'   },
+        ]
+        return (
+          <div className="space-y-3">
+            <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
+              Pendientes por antigüedad
+            </p>
+            <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                  <BarChart2 className="w-4 h-4 text-gray-400" />
+                  Distribución del backlog
+                </p>
+                <button
+                  onClick={() => setActiveTab('backlog')}
+                  className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                >
+                  Ver todos →
+                </button>
+              </div>
+              <div className="space-y-2.5">
+                {buckets.map(({ label, value, bar, text }) => (
+                  <div key={label} className="flex items-center gap-3">
+                    <span className="text-xs text-gray-500 w-28 shrink-0">{label}</span>
+                    <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
+                      <div
+                        className={`h-2 rounded-full transition-all duration-500 ${bar}`}
+                        style={{ width: total > 0 ? `${Math.max(value > 0 ? 3 : 0, Math.round((value / total) * 100))}%` : '0%' }}
+                      />
+                    </div>
+                    <span className={`text-xs font-semibold w-8 text-right ${value > 0 ? text : 'text-gray-300'}`}>
+                      {value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="pt-1 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
+                <span>Total pendientes: <strong className="text-gray-600">{total}</strong></span>
+                {(stats?.atrasados ?? 0) > 0 && (
+                  <span className="flex items-center gap-1 text-red-500">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse inline-block" />
+                    {stats?.atrasados ?? 0} críticos +48h
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ─── C: Pendientes por causa ──────────────────────────────────── */}
+      <div className="space-y-3">
+        <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
+          Pendientes por causa
+        </p>
+
+        {/* Grupo 1: En cola */}
+        <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            En cola — trabajo del agente
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <KpiCard
+              label="Sin tocar"
+              value={stats?.sinTocarTotal ?? 0}
+              sub="0 intentos, todas las fechas"
+              color="bg-gray-50 border-gray-200"
+              icon={Clock}
+              onClick={() => setActiveTab('backlog')}
+            />
+            <KpiCard
+              label="1-2 intentos"
+              value={stats?.reintentar ?? 0}
+              sub="En proceso, sin confirmar"
+              color="bg-yellow-50 border-yellow-200"
+              icon={Phone}
+              onClick={() => setActiveTab('backlog')}
+            />
+            <KpiCard
+              label="3+ intentos"
+              value={stats?.tresMasIntentosPendientes ?? 0}
+              sub="Difícil de confirmar"
+              color={(stats?.tresMasIntentosPendientes ?? 0) > 5 ? 'bg-orange-50 border-orange-300' : 'bg-orange-50 border-orange-200'}
+              icon={AlertTriangle}
+              onClick={() => setActiveTab('backlog')}
+            />
+            <KpiCard
+              label="Duplicados"
+              value={stats?.duplicadosPendientes ?? 0}
+              sub="Con alerta de duplicado"
+              color="bg-amber-50 border-amber-200"
+              icon={Copy}
+            />
+          </div>
+        </div>
+
+        {/* Grupo 2: Bloqueados */}
+        <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Bloqueados — requieren acción externa
+          </p>
+          <div className="grid grid-cols-3 gap-3">
+            <KpiCard
+              label="Sin respuesta"
+              value={stats?.inalcanzables ?? 0}
+              sub="Inalcanzables (3+ intentos)"
+              color="bg-slate-50 border-slate-200"
+              icon={PhoneOff}
+            />
+            <KpiCard
+              label="Número incorrecto"
+              value={stats?.numeroIncorrecto ?? 0}
+              sub="Dato de contacto erróneo"
+              color={(stats?.numeroIncorrecto ?? 0) > 0 ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}
+              icon={XCircle}
+            />
+            <KpiCard
+              label="Sin cobertura"
+              value={stats?.sinCobertura ?? 0}
+              sub="Zona no cubierta"
+              color="bg-purple-50 border-purple-200"
+              icon={ShieldAlert}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* ─── D: Evaluación del Supervisor ─────────────────────────────── */}
+      {(() => {
+        if (!stats || stats.entrantesHoy === 0) return null
+
+        const { entrantesHoy, confirmadosHoy, contactadosHoy,
+                pendientesHoy, sinTocarHoy, sinRespuestaHoy } = stats
+
+        const pctSinTocar  = pendientesHoy > 0 ? sinTocarHoy / pendientesHoy : 0
+        const tasaConfirm  = entrantesHoy  > 0 ? confirmadosHoy / entrantesHoy : 0
+
+        let nivel: 'excelente' | 'correcto' | 'riesgo' | 'critico'
+        if (pctSinTocar > 0.60 || (entrantesHoy > 5 && confirmadosHoy === 0))   nivel = 'critico'
+        else if (pctSinTocar > 0.35 || tasaConfirm < 0.40)                       nivel = 'riesgo'
+        else if (tasaConfirm >= 0.70 && pctSinTocar <= 0.15)                     nivel = 'excelente'
+        else                                                                      nivel = 'correcto'
+
+        const resumenPartes: string[] = []
+        resumenPartes.push(`Entraron ${entrantesHoy}`)
+        if (confirmadosHoy > 0)   resumenPartes.push(`${confirmadosHoy} confirmados`)
+        if (contactadosHoy > 0)   resumenPartes.push(`${contactadosHoy} contactados`)
+        if (sinTocarHoy > 0)      resumenPartes.push(`${sinTocarHoy} sin tocar`)
+        if (sinRespuestaHoy > 0)  resumenPartes.push(`${sinRespuestaHoy} sin respuesta`)
+
+        const evaluaciones = {
+          excelente: 'El agente está gestionando correctamente.',
+          correcto:  'La gestión del día va en buen ritmo.',
+          riesgo:    pctSinTocar > 0.35
+            ? `Riesgo: ${Math.round(pctSinTocar * 100)}% de los pedidos del día sin gestión.`
+            : 'Riesgo: tasa de confirmación baja.',
+          critico:   pctSinTocar > 0.60
+            ? 'Riesgo alto. La mayoría de los pedidos del día sin gestión — revisar con el agente.'
+            : 'Riesgo alto. Sin confirmaciones registradas — revisar con el agente.',
+        }
+
+        const estilos = {
+          excelente: { bg: 'bg-green-50 border-green-200',  dot: 'bg-green-500', label: 'text-green-700'  },
+          correcto:  { bg: 'bg-blue-50 border-blue-200',    dot: 'bg-blue-500',  label: 'text-blue-700'   },
+          riesgo:    { bg: 'bg-amber-50 border-amber-200',  dot: 'bg-amber-500', label: 'text-amber-700'  },
+          critico:   { bg: 'bg-red-50 border-red-200',      dot: 'bg-red-500 animate-pulse', label: 'text-red-700' },
+        }
+
+        const e = estilos[nivel]
+
+        return (
+          <div className={`rounded-xl border p-4 space-y-2 ${e.bg}`}>
+            <div className="flex items-center gap-2">
+              <Bot className="w-4 h-4 text-gray-400 shrink-0" />
+              <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
+                Evaluación del Supervisor
+              </p>
+            </div>
+            <p className="text-sm text-gray-600">
+              {resumenPartes.join(' · ')}.
+            </p>
+            <p className={`text-sm font-semibold flex items-center gap-2 ${e.label}`}>
+              <span className={`w-2 h-2 rounded-full inline-block ${e.dot}`} />
+              {evaluaciones[nivel]}
+            </p>
+          </div>
+        )
+      })()}
 
       {/* Tabs */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
@@ -477,7 +735,6 @@ export default function MonitorConfirmacionPage() {
             {TAB_META.map(({ key, label, shortLabel }) => {
               const count  = tabCounts[key]
               const active = activeTab === key
-              const hasAlert = (key === 'alertas' && (alertas.length > 0))
 
               return (
                 <button
@@ -488,16 +745,14 @@ export default function MonitorConfirmacionPage() {
                     active
                       ? 'border-indigo-600 text-indigo-700'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300',
-                    hasAlert && !active ? 'text-red-500' : '',
                   ].join(' ')}
                 >
                   <span className="hidden sm:inline">{label}</span>
                   <span className="sm:hidden">{shortLabel}</span>
-                  {key !== 'resumen' && (
+                  {key !== 'hoy' && (
                     <span className={[
                       'text-xs rounded-full px-1.5 py-0.5 font-semibold min-w-[1.25rem] text-center',
                       active ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-500',
-                      hasAlert && !active ? 'bg-red-100 text-red-600' : '',
                     ].join(' ')}>
                       {count}
                     </span>
@@ -511,89 +766,44 @@ export default function MonitorConfirmacionPage() {
         {/* Tab content */}
         <div className="p-4">
 
-          {/* ── RESUMEN ─────────────────────────────────────────────────────── */}
-          {activeTab === 'resumen' && (
-            <div className="space-y-6">
-              {/* Estado rápido */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="rounded-lg bg-gray-50 p-4 space-y-1">
-                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Pendientes totales</p>
-                  <p className="text-3xl font-bold text-gray-900">{stats?.pendingTotal ?? pending.length}</p>
-                  <p className="text-xs text-gray-400">
-                    {stats?.sinTocarTotal ?? 0} sin ningún intento
-                  </p>
-                </div>
-                <div className="rounded-lg bg-green-50 p-4 space-y-1">
-                  <p className="text-xs font-semibold text-green-600 uppercase tracking-wide">Confirmados hoy</p>
-                  <p className="text-3xl font-bold text-green-700">{stats?.confirmadosHoy ?? 0}</p>
-                  <p className="text-xs text-green-500">
-                    {stats?.contactadosHoy ?? 0} contactados hoy
-                  </p>
-                </div>
-                <div className={`rounded-lg p-4 space-y-1 ${(stats?.atrasados ?? 0) > 0 ? 'bg-red-50' : 'bg-gray-50'}`}>
-                  <p className={`text-xs font-semibold uppercase tracking-wide ${(stats?.atrasados ?? 0) > 0 ? 'text-red-500' : 'text-gray-500'}`}>
-                    Críticos +48h
-                  </p>
-                  <p className={`text-3xl font-bold ${(stats?.atrasados ?? 0) > 0 ? 'text-red-700' : 'text-gray-900'}`}>
-                    {stats?.atrasados ?? 0}
-                  </p>
-                  <p className="text-xs text-gray-400">
-                    +24h: {stats?.atrasados24h ?? 0} en riesgo
-                  </p>
-                </div>
+          {/* ── HOY ─────────────────────────────────────────────────────── */}
+          {activeTab === 'hoy' && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm bg-indigo-50/50 rounded-lg px-4 py-2.5 border border-indigo-100">
+                <span className="text-gray-600">{stats?.entrantesHoy ?? pedidosHoy.length} entrantes</span>
+                <span className="text-gray-300">·</span>
+                <span className="text-green-700 font-medium">{stats?.confirmadosHoy ?? 0} confirmados</span>
+                <span className="text-gray-300">·</span>
+                <span className="text-amber-700">{stats?.pendientesHoy ?? pedidosHoy.length} pendientes</span>
+                <span className="text-gray-300">·</span>
+                <span className="text-rose-600">{stats?.sinTocarHoy ?? 0} sin tocar</span>
               </div>
-
-              {/* Barra de tasa */}
-              <div>
-                <div className="flex justify-between text-xs text-gray-500 mb-1">
-                  <span>Tasa de confirmación hoy</span>
-                  <span className="font-semibold text-gray-700">{tasa}%</span>
-                </div>
-                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div
-                    className="h-2 rounded-full transition-all duration-500"
-                    style={{
-                      width: `${tasa}%`,
-                      background: tasa >= 70 ? '#22c55e' : tasa >= 40 ? '#f59e0b' : '#ef4444',
-                    }}
-                  />
-                </div>
-                <p className="text-xs text-gray-400 mt-1">
-                  {stats?.confirmadosHoy ?? 0} confirmados / {(stats?.confirmadosHoy ?? 0) + (stats?.pendingTotal ?? 0)} gestionados
-                </p>
-              </div>
-
-              {/* Distribución rápida */}
-              {(stats?.atrasados ?? 0) > 0 && (
-                <div className="rounded-lg border border-red-100 bg-red-50 p-4 flex items-start gap-3">
-                  <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-                  <div className="text-sm text-red-700">
-                    <strong>{stats?.atrasados ?? 0} pedido{(stats?.atrasados ?? 0) !== 1 ? 's' : ''}</strong> llevan más de 48h en cola sin confirmar.
-                    {(stats?.atrasados24h ?? 0) > 0 && (
-                      <> Además, <strong>{stats?.atrasados24h}</strong> están entre 24h y 48h (riesgo).</>
-                    )}
-                    {' '}Ve al tab <span className="font-semibold">Alertas</span> para verlos.
-                  </div>
-                </div>
-              )}
-
-              {/* SD */}
-              {santoDomingo.length > 0 && (
-                <div className="rounded-lg border border-purple-100 bg-purple-50 p-4 flex items-start gap-3">
-                  <MapPin className="w-4 h-4 text-purple-500 mt-0.5 shrink-0" />
-                  <p className="text-sm text-purple-700">
-                    <strong>{santoDomingo.length}</strong> pedido{santoDomingo.length !== 1 ? 's' : ''} de zona Santo Domingo pendientes.
-                    {' '}Ve al tab <span className="font-semibold">Santo Domingo</span>.
-                  </p>
-                </div>
-              )}
+              <OrderTable
+                orders={pedidosHoy}
+                emptyText="No hay pedidos de hoy en cola. ¡Todo al día!"
+              />
             </div>
           )}
 
-          {/* ── PENDIENTES ────────────────────────────────────────────────── */}
-          {activeTab === 'pendientes' && (
+          {/* ── BACKLOG ──────────────────────────────────────────────────── */}
+          {activeTab === 'backlog' && (
             <div className="space-y-3">
-              {/* Buscador */}
+              {((stats?.atrasados ?? 0) > 0 || (stats?.atrasados24h ?? 0) > 0) && (
+                <div className="flex gap-3 flex-wrap text-xs text-gray-500">
+                  {(stats?.atrasados ?? 0) > 0 && (
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-red-400 inline-block animate-pulse" />
+                      +48h críticos: <strong className="text-red-600">{stats?.atrasados ?? 0}</strong>
+                    </span>
+                  )}
+                  {(stats?.atrasados24h ?? 0) > 0 && (
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-orange-400 inline-block" />
+                      +24h riesgo: <strong className="text-orange-600">{stats?.atrasados24h ?? 0}</strong>
+                    </span>
+                  )}
+                </div>
+              )}
               <div className="relative max-w-sm">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                 <input
@@ -610,34 +820,8 @@ export default function MonitorConfirmacionPage() {
               </div>
               <OrderTable
                 orders={pendingFiltered}
-                emptyText={search ? 'Sin resultados para esa búsqueda.' : 'No hay pedidos pendientes. ¡Excelente!'}
+                emptyText={search ? 'Sin resultados para esa búsqueda.' : 'No hay pedidos en el backlog. ¡Excelente!'}
               />
-            </div>
-          )}
-
-          {/* ── ALERTAS ───────────────────────────────────────────────────── */}
-          {activeTab === 'alertas' && (
-            <div className="space-y-4">
-              {alertas.length === 0 ? (
-                <div className="text-center py-16 text-gray-400">
-                  <CheckCircle2 className="w-10 h-10 mx-auto mb-3 text-green-400 opacity-50" />
-                  <p className="text-sm">Sin pedidos en riesgo. Todo dentro de las 24h.</p>
-                </div>
-              ) : (
-                <>
-                  <div className="flex gap-3 flex-wrap text-xs text-gray-500">
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-red-400 inline-block animate-pulse" />
-                      +48h críticos: <strong className="text-red-600">{alertas.filter(o => sinceMs(o) >= 48 * 3_600_000).length}</strong>
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-orange-400 inline-block" />
-                      +24h riesgo: <strong className="text-orange-600">{alertas.filter(o => sinceMs(o) < 48 * 3_600_000).length}</strong>
-                    </span>
-                  </div>
-                  <OrderTable orders={alertas} emptyText="Sin alertas." />
-                </>
-              )}
             </div>
           )}
 
