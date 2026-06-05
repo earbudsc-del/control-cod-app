@@ -4,6 +4,52 @@
 
 ---
 
+## FEATURE: delivery_agent accede a /confirmacion (2026-06-05)
+
+### Qué se implementó
+
+`delivery_agent` ahora tiene acceso al módulo operativo `/confirmacion` para poder ayudar a confirmar pedidos cuando sea necesario.
+
+### Acceso y roles
+
+| Rol | Acceso a /confirmacion |
+|---|---|
+| `admin` | ✅ Sin cambios |
+| `confirmation_agent` | ✅ Sin cambios |
+| `delivery_agent` | ✅ Nuevo — link "Confirmaciones" en sidebar |
+| Resto de roles | ❌ No aparece en su sidebar |
+
+### Capacidades del delivery_agent en /confirmacion
+
+- Ver pedidos pendientes
+- Buscar pedidos
+- Abrir WhatsApp
+- Llamar
+- Confirmar pedido
+- Cancelar pedido
+- Agregar notas
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/components/layout/sidebar.tsx` | Agrega `{ href: '/confirmacion', label: 'Confirmaciones', icon: ClipboardList, alert: 'indigo' }` al nav de `delivery_agent` |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se tocó
+
+- Middleware — `/confirmacion` no estaba bloqueado y sigue igual
+- APIs de confirmación — sin cambios
+- RLS — sin cambios
+- Página `/confirmacion` — sin cambios
+- Flujo de `confirmation_agent` — intacto
+- Monitor Confirmación / `/confirmados` — intactos
+
+---
+
 ## FEATURE: Monitor de Confirmación — gestión operativa completa (2026-06-04)
 
 ### Problema resuelto

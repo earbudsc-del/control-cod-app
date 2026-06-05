@@ -69,9 +69,10 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
   ],
 
   delivery_agent: [
-    { href: '/mi-rendimiento', label: 'Mi rendimiento', icon: TrendingUp, alert: null    },
-    { href: '/reparto',        label: 'En Reparto',     icon: Bike,       alert: 'amber' },
-    { href: '/transito',       label: 'Tránsito',       icon: Box,        alert: null    },
+    { href: '/mi-rendimiento', label: 'Mi rendimiento', icon: TrendingUp,    alert: null     },
+    { href: '/confirmacion',   label: 'Confirmaciones', icon: ClipboardList, alert: 'indigo' },
+    { href: '/reparto',        label: 'En Reparto',     icon: Bike,          alert: 'amber'  },
+    { href: '/transito',       label: 'Tránsito',       icon: Box,           alert: null     },
   ],
 
   santo_domingo_delivery_agent: [
