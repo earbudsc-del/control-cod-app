@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { isSantoDomingoOrder } from '@/lib/alert-helpers'
 import {
-  RefreshCw, Clock, CheckCircle2, AlertTriangle, Users,
+  RefreshCw, Clock, CheckCircle2, AlertTriangle,
   Phone, MapPin, Activity, Search, X, ArrowDownCircle,
   PhoneOff, BarChart2, ShieldAlert, Copy, XCircle, Bot,
 } from 'lucide-react'
@@ -55,6 +55,25 @@ function isActive(order: Order): boolean {
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type Tab = 'hoy' | 'backlog' | 'santo_domingo' | 'confirmados_hoy'
+
+type DrillFilter =
+  | 'entrantes_hoy' | 'contactados_hoy' | 'confirmados_hoy'
+  | 'pendientes_hoy' | 'sin_tocar_hoy' | 'sin_respuesta_hoy'
+  | 'ayer' | 'semana' | 'mes' | 'mas_30'
+  | null
+
+const DRILL_META: Record<NonNullable<DrillFilter>, { title: string; sub: string; isConfirmed?: boolean }> = {
+  entrantes_hoy:     { title: 'Entrantes hoy',         sub: 'Pedidos recibidos hoy' },
+  contactados_hoy:   { title: 'Contactados hoy',        sub: 'Con intentos registrados hoy, aún en cola' },
+  confirmados_hoy:   { title: 'Confirmados hoy',        sub: 'Pedidos confirmados hoy', isConfirmed: true },
+  pendientes_hoy:    { title: 'Pendientes de hoy',      sub: 'Recibidos hoy, sin confirmar' },
+  sin_tocar_hoy:     { title: 'Sin tocar hoy',          sub: 'Recibidos hoy · 0 intentos' },
+  sin_respuesta_hoy: { title: 'Sin respuesta hoy',      sub: 'Contactados hoy, aún pendientes' },
+  ayer:              { title: 'Pendientes de ayer',     sub: 'Creados ayer, aún en cola' },
+  semana:            { title: 'Pendientes esta semana', sub: 'Últimos 7 días · excl. ayer y hoy' },
+  mes:               { title: 'Pendientes este mes',    sub: 'Últimos 30 días · excl. esta semana' },
+  mas_30:            { title: 'Más de 30 días',         sub: 'Más de 30 días en cola sin confirmar' },
+}
 
 interface StatsData {
   pendingTotal:              number
@@ -147,9 +166,13 @@ export default function MonitorConfirmacionPage() {
   const [loading,      setLoading]      = useState(true)
   const [lastRefresh,  setLastRefresh]  = useState<Date>(new Date())
   const [search,       setSearch]       = useState('')
+  const [drillFilter,  setDrillFilter]  = useState<DrillFilter>(null)
 
-  const todayStartMs = rdMidnightUTC(0)
-  const tomorrowMs   = rdMidnightUTC(1)
+  const todayStartMs    = rdMidnightUTC(0)
+  const tomorrowMs      = rdMidnightUTC(1)
+  const yesterdayMs     = rdMidnightUTC(-1)
+  const sevenDaysAgoMs  = rdMidnightUTC(-7)
+  const thirtyDaysAgoMs = rdMidnightUTC(-30)
 
   const fetchData = useCallback(async () => {
     try {
@@ -246,6 +269,49 @@ export default function MonitorConfirmacionPage() {
       return bTs.localeCompare(aTs)
     })
   , [confirmed, todayStartMs, tomorrowMs])
+
+  // Lista filtrada para el panel de detalle (drill-down)
+  const drillResult = useMemo((): { orders: Order[]; isConfirmed: boolean } => {
+    if (!drillFilter) return { orders: [], isConfirmed: false }
+    const ts = (o: Order) => new Date(o.shopify_created_at ?? o.created_at).getTime()
+    switch (drillFilter) {
+      case 'entrantes_hoy': {
+        const p = pending.filter(o => ts(o) >= todayStartMs)
+        const c = confirmed.filter(o => ts(o) >= todayStartMs)
+        return {
+          orders: [...p, ...c].sort((a, b) => ts(b) - ts(a)),
+          isConfirmed: false,
+        }
+      }
+      case 'contactados_hoy':
+        return {
+          orders: pending.filter(o =>
+            o.last_confirmation_attempt &&
+            new Date(o.last_confirmation_attempt).getTime() >= todayStartMs
+          ),
+          isConfirmed: false,
+        }
+      case 'confirmados_hoy':
+        return { orders: confirmadosHoy, isConfirmed: true }
+      case 'pendientes_hoy':
+        return { orders: pedidosHoy, isConfirmed: false }
+      case 'sin_tocar_hoy':
+        return { orders: pedidosHoy.filter(o => !(o.confirmation_attempts ?? 0)), isConfirmed: false }
+      case 'sin_respuesta_hoy':
+        return { orders: pedidosHoy.filter(o => (o.confirmation_attempts ?? 0) >= 1), isConfirmed: false }
+      case 'ayer':
+        return { orders: pending.filter(o => ts(o) >= yesterdayMs && ts(o) < todayStartMs), isConfirmed: false }
+      case 'semana':
+        return { orders: pending.filter(o => ts(o) >= sevenDaysAgoMs && ts(o) < yesterdayMs), isConfirmed: false }
+      case 'mes':
+        return { orders: pending.filter(o => ts(o) >= thirtyDaysAgoMs && ts(o) < sevenDaysAgoMs), isConfirmed: false }
+      case 'mas_30':
+        return { orders: pending.filter(o => ts(o) < thirtyDaysAgoMs), isConfirmed: false }
+      default:
+        return { orders: [], isConfirmed: false }
+    }
+  }, [drillFilter, pending, confirmed, pedidosHoy, confirmadosHoy,
+      todayStartMs, yesterdayMs, sevenDaysAgoMs, thirtyDaysAgoMs])
 
   const avancePct = stats && stats.entrantesHoy > 0
     ? Math.min(100, Math.round((stats.confirmadosHoy / stats.entrantesHoy) * 100))
@@ -460,6 +526,8 @@ export default function MonitorConfirmacionPage() {
             sub="Pedidos recibidos hoy"
             color="bg-indigo-50 border-indigo-200"
             icon={ArrowDownCircle}
+            onClick={() => setDrillFilter('entrantes_hoy')}
+            active={drillFilter === 'entrantes_hoy'}
           />
           <KpiCard
             label="Contactados hoy"
@@ -467,6 +535,8 @@ export default function MonitorConfirmacionPage() {
             sub="Intentos registrados hoy"
             color="bg-blue-50 border-blue-200"
             icon={Phone}
+            onClick={() => setDrillFilter('contactados_hoy')}
+            active={drillFilter === 'contactados_hoy'}
           />
           <KpiCard
             label="Confirmados hoy"
@@ -474,8 +544,8 @@ export default function MonitorConfirmacionPage() {
             sub="Listos para despacho"
             color="bg-green-50 border-green-200"
             icon={CheckCircle2}
-            onClick={() => setActiveTab('confirmados_hoy')}
-            active={activeTab === 'confirmados_hoy'}
+            onClick={() => setDrillFilter('confirmados_hoy')}
+            active={drillFilter === 'confirmados_hoy'}
           />
           <KpiCard
             label="Pendientes de hoy"
@@ -483,8 +553,8 @@ export default function MonitorConfirmacionPage() {
             sub="Sin confirmar todavía"
             color="bg-amber-50 border-amber-200"
             icon={Clock}
-            onClick={() => setActiveTab('hoy')}
-            active={activeTab === 'hoy'}
+            onClick={() => setDrillFilter('pendientes_hoy')}
+            active={drillFilter === 'pendientes_hoy'}
           />
           <KpiCard
             label="Sin tocar hoy"
@@ -494,7 +564,8 @@ export default function MonitorConfirmacionPage() {
               ? 'bg-rose-50 border-rose-300'
               : 'bg-rose-50 border-rose-200'}
             icon={AlertTriangle}
-            onClick={() => setActiveTab('hoy')}
+            onClick={() => setDrillFilter('sin_tocar_hoy')}
+            active={drillFilter === 'sin_tocar_hoy'}
           />
           <KpiCard
             label="Sin respuesta hoy"
@@ -502,6 +573,8 @@ export default function MonitorConfirmacionPage() {
             sub="Contactados, aún pendientes"
             color="bg-orange-50 border-orange-200"
             icon={PhoneOff}
+            onClick={() => setDrillFilter('sin_respuesta_hoy')}
+            active={drillFilter === 'sin_respuesta_hoy'}
           />
         </div>
 
@@ -532,12 +605,12 @@ export default function MonitorConfirmacionPage() {
       {/* ─── B: Pendientes por antigüedad ────────────────────────────── */}
       {(() => {
         const total = stats?.pendingTotal ?? pending.length
-        const buckets = [
-          { label: 'Hoy',           value: stats?.pendientesHoy    ?? 0, bar: 'bg-emerald-400', text: 'text-emerald-700' },
-          { label: 'Ayer',          value: stats?.pendientesAyer   ?? 0, bar: 'bg-yellow-400',  text: 'text-yellow-700' },
-          { label: 'Esta semana',   value: stats?.pendientesSemana ?? 0, bar: 'bg-orange-400',  text: 'text-orange-700' },
-          { label: 'Este mes',      value: stats?.pendientesMes    ?? 0, bar: 'bg-red-400',     text: 'text-red-700'    },
-          { label: 'Más de 30 días',value: stats?.pendientesMas30d ?? 0, bar: 'bg-gray-300',    text: 'text-gray-500'   },
+        const buckets: { label: string; value: number; bar: string; text: string; drill: DrillFilter }[] = [
+          { label: 'Hoy',            value: stats?.pendientesHoy    ?? 0, bar: 'bg-emerald-400', text: 'text-emerald-700', drill: 'pendientes_hoy' },
+          { label: 'Ayer',           value: stats?.pendientesAyer   ?? 0, bar: 'bg-yellow-400',  text: 'text-yellow-700', drill: 'ayer'           },
+          { label: 'Esta semana',    value: stats?.pendientesSemana ?? 0, bar: 'bg-orange-400',  text: 'text-orange-700', drill: 'semana'         },
+          { label: 'Este mes',       value: stats?.pendientesMes    ?? 0, bar: 'bg-red-400',     text: 'text-red-700',    drill: 'mes'            },
+          { label: 'Más de 30 días', value: stats?.pendientesMas30d ?? 0, bar: 'bg-gray-300',    text: 'text-gray-500',   drill: 'mas_30'         },
         ]
         return (
           <div className="space-y-3">
@@ -557,21 +630,35 @@ export default function MonitorConfirmacionPage() {
                   Ver todos →
                 </button>
               </div>
-              <div className="space-y-2.5">
-                {buckets.map(({ label, value, bar, text }) => (
-                  <div key={label} className="flex items-center gap-3">
-                    <span className="text-xs text-gray-500 w-28 shrink-0">{label}</span>
-                    <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
-                      <div
-                        className={`h-2 rounded-full transition-all duration-500 ${bar}`}
-                        style={{ width: total > 0 ? `${Math.max(value > 0 ? 3 : 0, Math.round((value / total) * 100))}%` : '0%' }}
-                      />
-                    </div>
-                    <span className={`text-xs font-semibold w-8 text-right ${value > 0 ? text : 'text-gray-300'}`}>
-                      {value}
-                    </span>
-                  </div>
-                ))}
+              <div className="space-y-1.5">
+                {buckets.map(({ label, value, bar, text, drill }) => {
+                  const isActive = drillFilter === drill
+                  return (
+                    <button
+                      key={label}
+                      onClick={() => setDrillFilter(isActive ? null : drill)}
+                      className={[
+                        'w-full flex items-center gap-3 px-2 py-1.5 rounded-lg transition-all text-left',
+                        isActive
+                          ? 'bg-gray-100 ring-1 ring-gray-300'
+                          : 'hover:bg-gray-50 active:bg-gray-100',
+                        value === 0 ? 'opacity-50 cursor-default' : 'cursor-pointer',
+                      ].join(' ')}
+                      disabled={value === 0}
+                    >
+                      <span className="text-xs text-gray-500 w-28 shrink-0">{label}</span>
+                      <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
+                        <div
+                          className={`h-2 rounded-full transition-all duration-500 ${bar}`}
+                          style={{ width: total > 0 ? `${Math.max(value > 0 ? 3 : 0, Math.round((value / total) * 100))}%` : '0%' }}
+                        />
+                      </div>
+                      <span className={`text-xs font-semibold w-8 text-right ${value > 0 ? text : 'text-gray-300'}`}>
+                        {value}
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
               <div className="pt-1 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
                 <span>Total pendientes: <strong className="text-gray-600">{total}</strong></span>
@@ -739,7 +826,7 @@ export default function MonitorConfirmacionPage() {
               return (
                 <button
                   key={key}
-                  onClick={() => setActiveTab(key)}
+                  onClick={() => { setDrillFilter(null); setActiveTab(key) }}
                   className={[
                     'px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition-colors flex items-center gap-1.5',
                     active
@@ -763,11 +850,39 @@ export default function MonitorConfirmacionPage() {
           </div>
         </div>
 
-        {/* Tab content */}
+        {/* Tab / Drill content */}
         <div className="p-4">
 
+          {/* ── Panel de detalle (drill-down) ─────────────────────────── */}
+          {drillFilter && (() => {
+            const meta = DRILL_META[drillFilter]
+            return (
+              <div className="space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-800">{meta.title}</p>
+                    <p className="text-xs text-gray-400 mt-0.5">{meta.sub}</p>
+                  </div>
+                  <button
+                    onClick={() => setDrillFilter(null)}
+                    className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2.5 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors shrink-0"
+                  >
+                    <X className="w-3 h-3" />
+                    Cerrar
+                  </button>
+                </div>
+                <OrderTable
+                  orders={drillResult.orders}
+                  showSince={!drillResult.isConfirmed}
+                  isConfirmed={drillResult.isConfirmed}
+                  emptyText="Sin pedidos para este filtro."
+                />
+              </div>
+            )
+          })()}
+
           {/* ── HOY ─────────────────────────────────────────────────────── */}
-          {activeTab === 'hoy' && (
+          {!drillFilter && activeTab === 'hoy' && (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm bg-indigo-50/50 rounded-lg px-4 py-2.5 border border-indigo-100">
                 <span className="text-gray-600">{stats?.entrantesHoy ?? pedidosHoy.length} entrantes</span>
@@ -786,7 +901,7 @@ export default function MonitorConfirmacionPage() {
           )}
 
           {/* ── BACKLOG ──────────────────────────────────────────────────── */}
-          {activeTab === 'backlog' && (
+          {!drillFilter && activeTab === 'backlog' && (
             <div className="space-y-3">
               {((stats?.atrasados ?? 0) > 0 || (stats?.atrasados24h ?? 0) > 0) && (
                 <div className="flex gap-3 flex-wrap text-xs text-gray-500">
@@ -826,7 +941,7 @@ export default function MonitorConfirmacionPage() {
           )}
 
           {/* ── SANTO DOMINGO ─────────────────────────────────────────────── */}
-          {activeTab === 'santo_domingo' && (
+          {!drillFilter && activeTab === 'santo_domingo' && (
             <OrderTable
               orders={santoDomingo}
               emptyText="Sin pedidos de zona Santo Domingo pendientes."
@@ -834,7 +949,7 @@ export default function MonitorConfirmacionPage() {
           )}
 
           {/* ── CONFIRMADOS HOY ───────────────────────────────────────────── */}
-          {activeTab === 'confirmados_hoy' && (
+          {!drillFilter && activeTab === 'confirmados_hoy' && (
             <div className="space-y-3">
               {confirmadosHoy.length > 0 && (
                 <p className="text-xs text-gray-500 flex items-center gap-1.5">
