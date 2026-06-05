@@ -4,11 +4,13 @@
 
 ---
 
-## FEATURE: delivery_agent accede a /confirmacion (2026-06-05)
+## FEATURE: dispatch_agent accede a /confirmacion (2026-06-05)
 
 ### Qué se implementó
 
-`delivery_agent` ahora tiene acceso al módulo operativo `/confirmacion` para poder ayudar a confirmar pedidos cuando sea necesario.
+`dispatch_agent` (perfil Confirmados/Despacho) ahora tiene acceso al módulo operativo `/confirmacion` para poder ayudar a confirmar pedidos cuando sea necesario.
+
+> **Nota:** el rol real del perfil "Confirmados/Despacho" es `dispatch_agent`, no `delivery_agent`.
 
 ### Acceso y roles
 
@@ -16,10 +18,19 @@
 |---|---|
 | `admin` | ✅ Sin cambios |
 | `confirmation_agent` | ✅ Sin cambios |
-| `delivery_agent` | ✅ Nuevo — link "Confirmaciones" en sidebar |
+| `dispatch_agent` | ✅ Nuevo — link "Confirmaciones" en sidebar (entre "Mi rendimiento" y "Confirmados") |
 | Resto de roles | ❌ No aparece en su sidebar |
 
-### Capacidades del delivery_agent en /confirmacion
+### Sidebar dispatch_agent (resultado final)
+
+```
+Mi rendimiento
+Confirmaciones     ← nuevo
+Confirmados
+Monitor Confirmación
+```
+
+### Capacidades del dispatch_agent en /confirmacion
 
 - Ver pedidos pendientes
 - Buscar pedidos
@@ -33,7 +44,7 @@
 
 | Archivo | Cambio |
 |---|---|
-| `src/components/layout/sidebar.tsx` | Agrega `{ href: '/confirmacion', label: 'Confirmaciones', icon: ClipboardList, alert: 'indigo' }` al nav de `delivery_agent` |
+| `src/components/layout/sidebar.tsx` | Agrega `{ href: '/confirmacion', label: 'Confirmaciones', icon: ClipboardList, alert: 'indigo' }` al nav de `dispatch_agent` |
 
 ### TypeScript
 

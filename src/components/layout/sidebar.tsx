@@ -81,9 +81,10 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
   ],
 
   dispatch_agent: [
-    { href: '/mi-rendimiento',       label: 'Mi rendimiento',       icon: TrendingUp,  alert: null     },
-    { href: '/confirmados',          label: 'Confirmados',          icon: CheckCircle2, alert: 'green' },
-    { href: '/confirmados/monitor',  label: 'Monitor Confirmación', icon: Activity,    alert: 'indigo' },
+    { href: '/mi-rendimiento',       label: 'Mi rendimiento',       icon: TrendingUp,   alert: null     },
+    { href: '/confirmacion',         label: 'Confirmaciones',       icon: ClipboardList, alert: 'indigo' },
+    { href: '/confirmados',          label: 'Confirmados',          icon: CheckCircle2, alert: 'green'  },
+    { href: '/confirmados/monitor',  label: 'Monitor Confirmación', icon: Activity,     alert: 'indigo' },
   ],
 
   agent: [
