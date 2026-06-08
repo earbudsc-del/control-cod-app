@@ -20,12 +20,20 @@ interface MetaWebhookContact {
   wa_id?:   string
 }
 
+interface MetaWebhookStatus {
+  id:           string
+  status:       'sent' | 'delivered' | 'read' | 'failed'
+  timestamp:    string
+  recipient_id: string
+  errors?:      Array<{ code: number; [key: string]: unknown }>
+}
+
 interface MetaWebhookValue {
   messaging_product: string
   metadata:          { phone_number_id: string; display_phone_number: string }
   contacts?:         MetaWebhookContact[]
   messages?:         MetaWebhookMessage[]
-  statuses?:         unknown[]   // procesado en Fase 1C
+  statuses?:         MetaWebhookStatus[]
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -155,24 +163,34 @@ export async function POST(request: Request) {
       const changes = (entry.changes as Array<Record<string, unknown>>) ?? []
       for (const change of changes) {
         const value = change.value as MetaWebhookValue | undefined
-        if (!value?.messages?.length) continue
+        if (!value) continue
 
-        // Mapa de contactos para lookup de display_name por wa_id
-        const contactsMap = new Map<string, MetaWebhookContact>()
-        for (const c of value.contacts ?? []) {
-          if (c.wa_id) contactsMap.set(c.wa_id, c)
-        }
-
-        for (const msg of value.messages) {
-          // Fase 1B: solo mensajes text inbound.
-          // Otros tipos (image, audio, document) se procesan en Fase 1C.
-          if (msg.type !== 'text') {
-            console.log('[wa-webhook] tipo', msg.type, 'omitido — Fase 1B solo text')
-            continue
+        // ── Mensajes inbound ────────────────────────────────────────────────
+        if (value.messages?.length) {
+          // Mapa de contactos para lookup de display_name por wa_id
+          const contactsMap = new Map<string, MetaWebhookContact>()
+          for (const c of value.contacts ?? []) {
+            if (c.wa_id) contactsMap.set(c.wa_id, c)
           }
 
-          const displayName = contactsMap.get(msg.from)?.profile?.name ?? null
-          await processInboundMessage(supabase, storeId, msg, displayName)
+          for (const msg of value.messages) {
+            // Fase 1B: solo mensajes text inbound.
+            // Otros tipos (image, audio, document) se procesan en Fase 1C.
+            if (msg.type !== 'text') {
+              console.log('[wa-webhook] tipo', msg.type, 'omitido — Fase 1B solo text')
+              continue
+            }
+
+            const displayName = contactsMap.get(msg.from)?.profile?.name ?? null
+            await processInboundMessage(supabase, storeId, msg, displayName)
+          }
+        }
+
+        // ── Status updates outbound ─────────────────────────────────────────
+        if (value.statuses?.length) {
+          for (const status of value.statuses) {
+            await processStatusUpdate(supabase, status)
+          }
         }
       }
     }
@@ -182,6 +200,75 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json({ ok: true })
+}
+
+// ── Core: actualizar status de mensaje outbound ───────────────────────────────
+
+async function processStatusUpdate(
+  supabase: ServiceClient,
+  status:   MetaWebhookStatus,
+): Promise<void> {
+  console.log('[wa-webhook] procesando status update — wa_msg_id:', status.id, 'status:', status.status)
+
+  const { data: msg, error: selectErr } = await supabase
+    .from('wa_messages')
+    .select('id, status, delivered_at')
+    .eq('wa_msg_id', status.id)
+    .maybeSingle()
+
+  if (selectErr) {
+    console.error('[wa-webhook] ✖ Error buscando mensaje para status update:', selectErr.message)
+    return
+  }
+
+  if (!msg) {
+    console.warn('[wa-webhook] ⚠ wa_msg_id no encontrado para status update — ignorando:', status.id)
+    return
+  }
+
+  const ts = new Date(parseInt(status.timestamp, 10) * 1000).toISOString()
+  const updates: Record<string, unknown> = {}
+
+  if (status.status === 'sent') {
+    if (msg.status === 'delivered' || msg.status === 'read') {
+      console.log('[wa-webhook] ⏭ sent: skip downgrade desde', msg.status, '— wa_msg_id:', status.id)
+      return
+    }
+    if (msg.status !== 'pending' && msg.status !== 'sent') {
+      console.log('[wa-webhook] ⏭ sent: estado actual no es pending/sent, skip — wa_msg_id:', status.id)
+      return
+    }
+    updates.status = 'sent'
+  } else if (status.status === 'delivered') {
+    updates.status      = 'delivered'
+    updates.delivered_at = ts
+  } else if (status.status === 'read') {
+    updates.status  = 'read'
+    updates.read_at = ts
+    if (!msg.delivered_at) {
+      updates.delivered_at = ts
+    }
+  } else if (status.status === 'failed') {
+    updates.status = 'failed'
+    const errorCode = status.errors?.[0]?.code
+    if (errorCode !== undefined) {
+      updates.error_code = String(errorCode)
+    }
+  }
+
+  if (Object.keys(updates).length === 0) return
+
+  const { error: updateErr } = await supabase
+    .from('wa_messages')
+    .update(updates)
+    .eq('id', msg.id)
+
+  if (updateErr) {
+    console.error('[wa-webhook] ✖ Error actualizando status de mensaje:', updateErr.message)
+    return
+  }
+
+  console.log('[wa-webhook] ✓ status actualizado — wa_msg_id:', status.id, 'nuevo status:', updates.status ?? msg.status)
 }
 
 // ── Core: persistir un mensaje text inbound ───────────────────────────────────
