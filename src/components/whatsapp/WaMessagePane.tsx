@@ -1,0 +1,193 @@
+'use client'
+
+import React, { useState, useRef, useCallback } from 'react'
+import type { RefObject } from 'react'
+import { ArrowLeft, MessageSquare, Send } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import type { WaConversation, WaMessage } from './types'
+
+const RD_TZ = 'America/Santo_Domingo'
+
+const STATUS_LABEL: Record<string, string> = {
+  open:    'Abierta',
+  pending: 'Pendiente',
+  closed:  'Cerrada',
+}
+
+const STATUS_COLOR: Record<string, string> = {
+  open:    'bg-green-100 text-green-700',
+  pending: 'bg-yellow-100 text-yellow-700',
+  closed:  'bg-gray-100 text-gray-600',
+}
+
+function formatMsgTime(iso: string | null): string {
+  if (!iso) return ''
+  return new Intl.DateTimeFormat('es-DO', {
+    timeZone: RD_TZ, hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(new Date(iso))
+}
+
+function MessageBubble({ msg }: { msg: WaMessage }) {
+  const inbound = msg.direction === 'inbound'
+  return (
+    <div className={cn('flex mb-2', inbound ? 'justify-start' : 'justify-end')}>
+      <div className={cn(
+        'max-w-[75%] px-3 py-2 rounded-2xl text-sm',
+        inbound
+          ? 'bg-white text-gray-900 rounded-tl-sm shadow-sm'
+          : 'bg-indigo-600 text-white rounded-tr-sm',
+      )}>
+        {msg.body ? (
+          <p className="whitespace-pre-wrap break-words">{msg.body}</p>
+        ) : (
+          <p className={cn('italic text-xs', inbound ? 'text-gray-400' : 'text-indigo-200')}>
+            [{msg.message_type}]
+          </p>
+        )}
+        <p className={cn(
+          'text-[10px] mt-1 text-right',
+          inbound ? 'text-gray-400' : 'text-indigo-200',
+        )}>
+          {formatMsgTime(msg.sent_at)}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function Spinner() {
+  return (
+    <div className="flex items-center justify-center h-full">
+      <div className="w-6 h-6 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+    </div>
+  )
+}
+
+interface Props {
+  conversation:   WaConversation | null
+  messages:       WaMessage[]
+  loading:        boolean
+  messagesEndRef: RefObject<HTMLDivElement | null>
+  onBack?:        () => void
+  onSend?:        (text: string) => Promise<void>
+}
+
+export default function WaMessagePane({ conversation, messages, loading, messagesEndRef, onBack, onSend }: Props) {
+  const [text, setText]       = useState('')
+  const [sending, setSending] = useState(false)
+  const textareaRef           = useRef<HTMLTextAreaElement>(null)
+
+  const handleSend = useCallback(async () => {
+    const trimmed = text.trim()
+    if (!trimmed || sending || !onSend) return
+    setSending(true)
+    try {
+      await onSend(trimmed)
+      setText('')
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    } finally {
+      setSending(false)
+    }
+  }, [text, sending, onSend])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
+  }, [handleSend])
+
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setText(e.target.value)
+    const el = e.target
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 96)}px`
+  }, [])
+
+  if (!conversation) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center bg-gray-50 gap-3 text-gray-400">
+        <MessageSquare className="w-12 h-12 opacity-20" />
+        <p className="text-sm">Selecciona una conversación</p>
+      </div>
+    )
+  }
+
+  const contact   = conversation.contact
+  const label     = contact.display_name?.trim() || contact.phone_normalized
+  const statusKey = conversation.status
+
+  return (
+    <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="h-14 flex-shrink-0 border-b border-gray-200 bg-white flex items-center px-4 gap-3">
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="md:hidden p-1 -ml-1 text-gray-500 hover:text-gray-700"
+            aria-label="Volver"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+        )}
+        <div className="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
+          {label.slice(0, 2).toUpperCase()}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-sm text-gray-900 truncate">{label}</p>
+          <p className="text-xs text-gray-400 truncate">{contact.phone_normalized}</p>
+        </div>
+        <span className={cn(
+          'text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0',
+          STATUS_COLOR[statusKey] ?? 'bg-gray-100 text-gray-600',
+        )}>
+          {STATUS_LABEL[statusKey] ?? statusKey}
+        </span>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 bg-gray-50">
+        {loading ? (
+          <Spinner />
+        ) : messages.length === 0 ? (
+          <div className="flex items-center justify-center h-full text-sm text-gray-400">
+            Sin mensajes
+          </div>
+        ) : (
+          messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <div className="flex-shrink-0 border-t border-gray-200 bg-white px-3 py-2">
+        <div className="flex items-end gap-2">
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            placeholder="Escribe un mensaje..."
+            disabled={sending}
+            rows={1}
+            className={cn(
+              'flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm',
+              'min-h-[36px] max-h-[96px] overflow-y-auto',
+              'focus:outline-none focus:ring-1 focus:ring-indigo-500',
+              'placeholder:text-gray-400 disabled:opacity-50',
+            )}
+          />
+          <button
+            onClick={handleSend}
+            disabled={!text.trim() || sending}
+            aria-label="Enviar"
+            className={cn(
+              'flex-shrink-0 rounded-lg bg-indigo-600 p-2 text-white',
+              'hover:bg-indigo-700 transition-colors',
+              'disabled:opacity-40 disabled:cursor-not-allowed',
+            )}
+          >
+            <Send className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -8,7 +8,7 @@ import {
   LayoutDashboard, Package, Upload, BarChart2,
   Settings, LogOut, Truck, Bike, AlertCircle, ClipboardList,
   ListTodo, TrendingUp, Box, CheckCircle2, X, ShoppingCart, Brain,
-  RotateCcw, Link2, MapPin, Activity,
+  RotateCcw, Link2, MapPin, Activity, MessageSquare,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
@@ -38,7 +38,9 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/confirmados/monitor',    label: 'Monitor Confirmación', icon: Activity,        alert: 'indigo' },
     { href: '/despachados',            label: 'Despachados',          icon: Truck,           alert: null     },
     { href: '/carritos-abandonados',   label: 'Carritos abandonados', icon: ShoppingCart,    alert: null     },
+    { href: '/inbox',                  label: 'Inbox WhatsApp',       icon: MessageSquare,   alert: null     },
     { href: '/orders',                 label: 'Pedidos',              icon: Package,         alert: null     },
+
     { href: '/imports',                label: 'Importar',             icon: Upload,          alert: null     },
     { href: '/efi-import',             label: 'Importar guías EFI',   icon: Link2,           alert: null     },
     { href: '/performance',            label: 'Rendimiento',          icon: BarChart2,       alert: null     },
@@ -58,6 +60,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/mi-rendimiento',           label: 'Mi rendimiento',       icon: TrendingUp,    alert: null     },
     { href: '/confirmacion',             label: 'Confirmaciones',       icon: ClipboardList, alert: 'indigo' },
     { href: '/carritos-abandonados',     label: 'Carritos abandonados', icon: ShoppingCart,  alert: null     },
+    { href: '/inbox',                    label: 'Inbox WhatsApp',       icon: MessageSquare, alert: null     },
   ],
 
   novelty_agent: [
@@ -66,6 +69,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/reparto',        label: 'En Reparto',     icon: Bike,        alert: 'amber'  },
     { href: '/transito',       label: 'Tránsito',       icon: Box,         alert: null     },
     { href: '/devoluciones',   label: 'Devoluciones',   icon: RotateCcw,   alert: 'red'    },
+    { href: '/inbox',          label: 'Inbox WhatsApp', icon: MessageSquare, alert: null   },
   ],
 
   delivery_agent: [
@@ -85,6 +89,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/confirmacion',         label: 'Confirmaciones',       icon: ClipboardList, alert: 'indigo' },
     { href: '/confirmados',          label: 'Confirmados',          icon: CheckCircle2, alert: 'green'  },
     { href: '/confirmados/monitor',  label: 'Monitor Confirmación', icon: Activity,     alert: 'indigo' },
+    { href: '/inbox',                label: 'Inbox WhatsApp',       icon: MessageSquare, alert: null    },
   ],
 
   agent: [
