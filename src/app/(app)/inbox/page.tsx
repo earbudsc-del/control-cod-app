@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import WaConversationList from '@/components/whatsapp/WaConversationList'
 import WaMessagePane    from '@/components/whatsapp/WaMessagePane'
 import type { WaConversation, WaMessage } from '@/components/whatsapp/types'
+import { createClient } from '@/lib/supabase/client'
 
 export default function InboxPage() {
   const [conversations,    setConversations]    = useState<WaConversation[]>([])
@@ -15,6 +16,7 @@ export default function InboxPage() {
   const [showPane,         setShowPane]         = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const selectedIdRef  = useRef<string | null>(null)
 
   const loadConversations = useCallback(async () => {
     setLoadingConvs(true)
@@ -38,6 +40,71 @@ export default function InboxPage() {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
   }, [messages])
+
+  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+
+  useEffect(() => {
+    const supabase = createClient()
+    const channel = supabase
+      .channel('inbox-realtime')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'wa_messages' },
+        (payload) => {
+          const msg = payload.new as WaMessage & { conversation_id: string }
+          if (msg.conversation_id === selectedIdRef.current) {
+            setMessages(prev =>
+              prev.some(m => m.id === msg.id) ? prev : [...prev, msg]
+            )
+          }
+          setConversations(prev =>
+            prev.map(c => {
+              if (c.id !== msg.conversation_id) return c
+              const isOpen = c.id === selectedIdRef.current
+              return {
+                ...c,
+                last_message_preview: msg.body ?? c.last_message_preview,
+                last_message_at:      msg.sent_at ?? c.last_message_at,
+                unread_count: isOpen
+                  ? 0
+                  : c.unread_count + (msg.direction === 'inbound' ? 1 : 0),
+              }
+            })
+          )
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'wa_conversations' },
+        (payload) => {
+          const updated = payload.new as {
+            id: string
+            status: WaConversation['status']
+            last_message_preview: string | null
+            last_message_at: string | null
+            unread_count: number
+            assigned_to: string | null
+          }
+          setConversations(prev =>
+            prev.map(c => {
+              if (c.id !== updated.id) return c
+              const isOpen = c.id === selectedIdRef.current
+              return {
+                ...c,
+                status:               updated.status,
+                last_message_preview: updated.last_message_preview,
+                last_message_at:      updated.last_message_at,
+                unread_count:         isOpen ? 0 : updated.unread_count,
+                assigned_to:          updated.assigned_to,
+              }
+            })
+          )
+        },
+      )
+      .subscribe((status) => console.log('[wa-realtime]', status))
+
+    return () => { supabase.removeChannel(channel) }
+  }, [])
 
   async function selectConversation(conv: WaConversation) {
     setSelectedId(conv.id)
