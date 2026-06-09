@@ -70,9 +70,11 @@ interface Props {
   messagesEndRef: RefObject<HTMLDivElement | null>
   onBack?:        () => void
   onSend?:        (text: string) => Promise<void>
+  currentUserId?: string | null
+  onTake?:        (conv: WaConversation) => void
 }
 
-export default function WaMessagePane({ conversation, messages, loading, messagesEndRef, onBack, onSend }: Props) {
+export default function WaMessagePane({ conversation, messages, loading, messagesEndRef, onBack, onSend, currentUserId, onTake }: Props) {
   const [text, setText]       = useState('')
   const [sending, setSending] = useState(false)
   const textareaRef           = useRef<HTMLTextAreaElement>(null)
@@ -142,6 +144,14 @@ export default function WaMessagePane({ conversation, messages, loading, message
         )}>
           {STATUS_LABEL[statusKey] ?? statusKey}
         </span>
+        {currentUserId && conversation.assigned_to !== currentUserId && onTake && (
+          <button
+            onClick={() => onTake(conversation)}
+            className="text-xs px-3 py-1 rounded-full bg-indigo-600 text-white hover:bg-indigo-700 transition-colors flex-shrink-0"
+          >
+            Tomar
+          </button>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 bg-gray-50">

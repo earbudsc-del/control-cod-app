@@ -14,6 +14,7 @@ export interface WaConversation {
   last_message_at: string | null
   last_message_preview: string | null
   assigned_to: string | null
+  ai_enabled: boolean
   created_at: string
   updated_at: string
   contact: WaContact

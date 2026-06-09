@@ -14,6 +14,7 @@ export default function InboxPage() {
   const [loadingConvs,     setLoadingConvs]     = useState(true)
   const [loadingMessages,  setLoadingMessages]  = useState(false)
   const [showPane,         setShowPane]         = useState(false)
+  const [currentUserId,    setCurrentUserId]    = useState<string | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const selectedIdRef  = useRef<string | null>(null)
@@ -42,6 +43,11 @@ export default function InboxPage() {
   }, [messages])
 
   useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+
+  useEffect(() => {
+    const supabase = createClient()
+    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data.user?.id ?? null))
+  }, [])
 
   useEffect(() => {
     const supabase = createClient()
@@ -176,6 +182,19 @@ export default function InboxPage() {
     }
   }
 
+  async function handleTakeConversation(conv: WaConversation) {
+    const res = await fetch(`/api/whatsapp/conversations/${conv.id}/take`, {
+      method: 'PATCH',
+    })
+    if (res.ok) {
+      const { data } = await res.json()
+      setSelectedConv(data)
+      setConversations(prev =>
+        prev.map(c => c.id === conv.id ? { ...c, ...data } : c)
+      )
+    }
+  }
+
   return (
     <div className="-mx-4 -mb-4 md:-mx-6 md:-mb-6 h-[calc(100vh-56px)] md:h-screen flex overflow-hidden">
       <div className={`
@@ -201,6 +220,8 @@ export default function InboxPage() {
           messagesEndRef={messagesEndRef}
           onBack={handleBack}
           onSend={handleSend}
+          currentUserId={currentUserId}
+          onTake={handleTakeConversation}
         />
       </div>
     </div>
