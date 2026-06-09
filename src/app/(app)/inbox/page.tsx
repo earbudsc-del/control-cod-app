@@ -107,6 +107,7 @@ export default function InboxPage() {
   }, [])
 
   async function selectConversation(conv: WaConversation) {
+    selectedIdRef.current = conv.id
     setSelectedId(conv.id)
     setSelectedConv(conv)
     setShowPane(true)
