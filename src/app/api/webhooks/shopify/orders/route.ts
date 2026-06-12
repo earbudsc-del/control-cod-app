@@ -368,7 +368,29 @@ export async function POST(request: Request) {
     priority: 'high',
   })
 
-  // 11. Auto-recuperar carritos abandonados por phone match
+  // 11. Encolar template WhatsApp de confirmación (FASE 6A)
+  //     Solo si el pedido tiene teléfono. scheduled_at = ahora + 5 min para que
+  //     el cliente pueda escribir primero. ON CONFLICT ignoreDuplicates absorbe
+  //     reintentos del webhook sin fallar ni duplicar.
+  if (customerPhone) {
+    const scheduledAt = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+    const { error: queueErr } = await supabase
+      .from('wa_template_queue')
+      .upsert(
+        {
+          store_id:      storeId,
+          order_id:      newOrder.id,
+          template_name: 'order-confirmation-cod',
+          scheduled_at:  scheduledAt,
+        },
+        { onConflict: 'order_id,template_name', ignoreDuplicates: true },
+      )
+    if (queueErr) {
+      console.warn('[shopify-webhook] wa_template_queue upsert warn:', queueErr.message)
+    }
+  }
+
+  // 12. Auto-recuperar carritos abandonados por phone match
   //     Cuando un pedido entra, marca como 'recovered' cualquier carrito pendiente
   //     del mismo teléfono (coincidencia normalizada sin dígitos).
   if (customerPhone) {
