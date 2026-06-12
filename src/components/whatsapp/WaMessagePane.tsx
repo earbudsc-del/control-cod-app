@@ -72,9 +72,10 @@ interface Props {
   onSend?:        (text: string) => Promise<void>
   currentUserId?: string | null
   onTake?:        (conv: WaConversation) => void
+  onRelease?:     (conv: WaConversation) => void
 }
 
-export default function WaMessagePane({ conversation, messages, loading, messagesEndRef, onBack, onSend, currentUserId, onTake }: Props) {
+export default function WaMessagePane({ conversation, messages, loading, messagesEndRef, onBack, onSend, currentUserId, onTake, onRelease }: Props) {
   const [text, setText]       = useState('')
   const [sending, setSending] = useState(false)
   const textareaRef           = useRef<HTMLTextAreaElement>(null)
@@ -144,7 +145,25 @@ export default function WaMessagePane({ conversation, messages, loading, message
         )}>
           {STATUS_LABEL[statusKey] ?? statusKey}
         </span>
-        {currentUserId && conversation.assigned_to !== currentUserId && onTake && (
+        {currentUserId && conversation.assigned_to === currentUserId && (
+          <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 bg-indigo-100 text-indigo-700">
+            Tomada por mí
+          </span>
+        )}
+        {currentUserId && conversation.assigned_to && conversation.assigned_to !== currentUserId && (
+          <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 bg-amber-100 text-amber-700">
+            En atención
+          </span>
+        )}
+        {currentUserId && conversation.assigned_to === currentUserId && onRelease && (
+          <button
+            onClick={() => onRelease(conversation)}
+            className="text-xs px-3 py-1 rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300 transition-colors flex-shrink-0"
+          >
+            Liberar
+          </button>
+        )}
+        {currentUserId && !conversation.assigned_to && onTake && (
           <button
             onClick={() => onTake(conversation)}
             className="text-xs px-3 py-1 rounded-full bg-indigo-600 text-white hover:bg-indigo-700 transition-colors flex-shrink-0"

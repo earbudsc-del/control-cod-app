@@ -90,6 +90,7 @@ export default function InboxPage() {
             last_message_at: string | null
             unread_count: number
             assigned_to: string | null
+            ai_enabled: boolean
           }
           setConversations(prev =>
             prev.map(c => {
@@ -102,6 +103,7 @@ export default function InboxPage() {
                 last_message_at:      updated.last_message_at,
                 unread_count:         isOpen ? 0 : updated.unread_count,
                 assigned_to:          updated.assigned_to,
+                ai_enabled:           updated.ai_enabled,
               }
             })
           )
@@ -195,6 +197,19 @@ export default function InboxPage() {
     }
   }
 
+  async function handleReleaseConversation(conv: WaConversation) {
+    const res = await fetch(`/api/whatsapp/conversations/${conv.id}/release`, {
+      method: 'PATCH',
+    })
+    if (res.ok) {
+      const { data } = await res.json()
+      setSelectedConv(data)
+      setConversations(prev =>
+        prev.map(c => c.id === conv.id ? { ...c, ...data } : c)
+      )
+    }
+  }
+
   return (
     <div className="-mx-4 -mb-4 md:-mx-6 md:-mb-6 h-[calc(100vh-56px)] md:h-screen flex overflow-hidden">
       <div className={`
@@ -222,7 +237,9 @@ export default function InboxPage() {
           onSend={handleSend}
           currentUserId={currentUserId}
           onTake={handleTakeConversation}
+          onRelease={handleReleaseConversation}
         />
+
       </div>
     </div>
   )
