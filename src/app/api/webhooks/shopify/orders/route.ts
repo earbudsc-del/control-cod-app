@@ -378,10 +378,11 @@ export async function POST(request: Request) {
       .from('wa_template_queue')
       .upsert(
         {
-          store_id:      storeId,
-          order_id:      newOrder.id,
-          template_name: 'order-confirmation-cod',
-          scheduled_at:  scheduledAt,
+          store_id:        storeId,
+          order_id:        newOrder.id,
+          template_name:   'order-confirmation-cod',
+          phone_normalized: customerPhone.replace(/\D/g, ''),
+          scheduled_at:    scheduledAt,
         },
         { onConflict: 'order_id,template_name', ignoreDuplicates: true },
       )
