@@ -109,6 +109,25 @@ export default function InboxPage() {
           )
         },
       )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'wa_conversations' },
+        async (payload) => {
+          const convId = (payload.new as { id: string }).id
+          try {
+            const res = await fetch(`/api/whatsapp/conversations/${convId}`)
+            if (!res.ok) return
+            const json = await res.json()
+            const conv: WaConversation = json.data
+            if (!conv) return
+            setConversations(prev =>
+              prev.some(c => c.id === convId) ? prev : [conv, ...prev]
+            )
+          } catch {
+            // fetch failed — conversation will appear on next manual reload
+          }
+        },
+      )
       .subscribe((status) => console.log('[wa-realtime]', status))
 
     return () => { supabase.removeChannel(channel) }
