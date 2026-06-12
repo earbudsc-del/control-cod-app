@@ -232,7 +232,7 @@ async function processJob(
           to: job.phone_normalized,
           type: 'template',
           template: {
-            name: 'order-confirmation-cod',
+            name: 'order_confirmation_cod',
             language: { code: 'es' },
             components: [
               {

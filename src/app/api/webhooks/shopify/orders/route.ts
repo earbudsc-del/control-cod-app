@@ -380,7 +380,7 @@ export async function POST(request: Request) {
         {
           store_id:        storeId,
           order_id:        newOrder.id,
-          template_name:   'order-confirmation-cod',
+          template_name:   'order_confirmation_cod',
           phone_normalized: customerPhone.replace(/\D/g, ''),
           scheduled_at:    scheduledAt,
         },
