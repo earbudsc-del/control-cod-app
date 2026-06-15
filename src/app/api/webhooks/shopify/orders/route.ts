@@ -2,6 +2,7 @@ import { NextResponse }          from 'next/server'
 import crypto                    from 'crypto'
 import { createServiceClient }   from '@/lib/supabase/server'
 import { createTaskIfNotExists } from '@/lib/tasks/auto-tasks'
+import { normalizePhoneRD }      from '@/lib/normalize-phone'
 
 // ── Shopify payload types ─────────────────────────────────────────────────────
 
@@ -236,13 +237,15 @@ export async function POST(request: Request) {
     billing.name ||
     null
 
-  const customerPhone =
+  const customerPhoneRaw =
     note_phone    ||
     shipping.phone ||
     billing.phone  ||
     customer.phone ||
     payload.phone  ||
     null
+
+  const customerPhone = customerPhoneRaw ? normalizePhoneRD(customerPhoneRaw) : null
 
   const customerAddress =
     note_address ||

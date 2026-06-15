@@ -114,17 +114,24 @@ export default function InboxPage() {
         { event: 'INSERT', schema: 'public', table: 'wa_conversations' },
         async (payload) => {
           const convId = (payload.new as { id: string }).id
+          console.warn('[wa-realtime] INSERT wa_conversations', convId)
           try {
             const res = await fetch(`/api/whatsapp/conversations/${convId}`)
-            if (!res.ok) return
+            if (!res.ok) {
+              console.warn('[wa-realtime] fetch conversation !ok', res.status, convId)
+              return
+            }
             const json = await res.json()
             const conv: WaConversation = json.data
-            if (!conv) return
+            if (!conv) {
+              console.warn('[wa-realtime] conversation fetch empty', json, convId)
+              return
+            }
             setConversations(prev =>
               prev.some(c => c.id === convId) ? prev : [conv, ...prev]
             )
-          } catch {
-            // fetch failed — conversation will appear on next manual reload
+          } catch (err) {
+            console.warn('[wa-realtime] fetch conversation threw', err, convId)
           }
         },
       )

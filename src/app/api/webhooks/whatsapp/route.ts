@@ -1,6 +1,7 @@
 import { NextResponse }        from 'next/server'
 import crypto                   from 'crypto'
 import { createServiceClient }  from '@/lib/supabase/server'
+import { normalizePhoneRD }     from '@/lib/normalize-phone'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -55,10 +56,6 @@ function verifyMetaHmac(rawBody: string, signatureHeader: string, appSecret: str
   }
 }
 
-// Mantiene solo dígitos: "+1 (809) 555-1234" → "18095551234"
-function normalizePhone(raw: string): string {
-  return raw.replace(/\D/g, '')
-}
 
 // Trunca el preview a 150 chars. Contrato: el webhook es el único escritor.
 function makePreview(body: string | null | undefined, msgType: string): string {
@@ -279,7 +276,7 @@ async function processInboundMessage(
   msg:         MetaWebhookMessage,
   displayName: string | null,
 ): Promise<void> {
-  const phoneNormalized = normalizePhone(msg.from)
+  const phoneNormalized = normalizePhoneRD(msg.from)
   const sentAt = new Date(parseInt(msg.timestamp, 10) * 1000).toISOString()
   const body   = msg.text?.body ?? null
 
