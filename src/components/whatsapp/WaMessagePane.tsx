@@ -31,48 +31,42 @@ function TemplateCard({ msg }: { msg: WaMessage }) {
   const m = msg.metadata as WaTemplateMetadata
   return (
     <div className="flex mb-2 justify-end">
-      <div className="max-w-[75%] rounded-2xl rounded-tr-sm overflow-hidden shadow-sm border border-indigo-100 bg-white text-sm">
+      <div className="max-w-[75%] rounded-2xl rounded-tr-sm overflow-hidden shadow-sm border border-gray-200 bg-white text-sm">
         {m.header_image_url && (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={m.header_image_url}
             alt="Imagen del template"
-            className="w-full max-h-48 object-cover"
+            className="w-full max-h-56 object-cover"
           />
         )}
-        <div className="bg-indigo-600 px-3 py-1.5 flex items-center gap-1.5">
-          <span className="text-white text-xs font-semibold">Template enviado</span>
-          {m.template_name && (
-            <span className="text-indigo-200 text-[10px]">· {m.template_name}</span>
-          )}
-        </div>
-        <div className="px-3 py-2 space-y-0.5 text-gray-700">
-          {msg.body && (
-            <p className="whitespace-pre-wrap break-words">{msg.body}</p>
-          )}
-          {m.customer_name && (
-            <p><span className="text-gray-400 text-xs">Cliente</span> {m.customer_name}</p>
-          )}
-          {m.product_summary && (
-            <p><span className="text-gray-400 text-xs">Producto</span> {m.product_summary}</p>
-          )}
-          {m.cod_amount && (
-            <p><span className="text-gray-400 text-xs">Monto</span> RD$ {m.cod_amount}</p>
-          )}
-        </div>
+        {msg.body && (
+          <p className="whitespace-pre-wrap break-words text-gray-900 px-3 pt-2.5 pb-2">
+            {msg.body}
+          </p>
+        )}
         {m.buttons && m.buttons.length > 0 && (
-          <div className="px-3 pb-2 flex flex-wrap gap-2">
-            {m.buttons.map((btn) => (
-              <span
-                key={btn}
-                className="text-xs px-2 py-0.5 rounded-full border border-indigo-200 text-indigo-600 select-none"
+          <div className="border-t border-gray-100">
+            {m.buttons.map((btn, i) => (
+              <div
+                key={`${btn}-${i}`}
+                className={cn(
+                  'px-3 py-2 text-center text-sm font-medium text-indigo-600 select-none',
+                  i > 0 && 'border-t border-gray-100',
+                )}
               >
                 {btn}
-              </span>
+              </div>
             ))}
           </div>
         )}
-        <p className="text-[10px] text-right text-gray-400 px-3 pb-1.5">
+        <p
+          className="text-[10px] text-right text-gray-400 px-3 pb-1.5 pt-1"
+          title={m.template_name ? `Template: ${m.template_name}` : undefined}
+        >
+          {m.template_name && (
+            <span className="text-gray-300 mr-1.5">[{m.template_name}]</span>
+          )}
           {formatMsgTime(msg.sent_at)}
         </p>
       </div>
