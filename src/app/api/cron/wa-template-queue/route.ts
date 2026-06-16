@@ -268,7 +268,7 @@ async function processJob(
     if (!wamid) throw new Error('Meta returned OK but no wamid')
 
     const sentAt = new Date().toISOString()
-    const templatePreview = `[Template: ${job.template_name}] ${customerName} — ${productSummary}`
+    const templateBody = `👋 ¡Hola, ${customerName}!\n\nTu pedido de ${productSummary} ya está listo para envío.\n\n💰 RD$ ${codAmount}\n🚚 Entrega: 1–3 días laborables\n\n🎁 Tu oferta está reservada.\nPulsa Confirmar o No, gracias.`
 
     // Insert outbound wa_message
     await supabase.from('wa_messages').insert({
@@ -277,9 +277,18 @@ async function processJob(
       wa_msg_id: wamid,
       direction: 'outbound',
       message_type: 'template',
-      body: makePreview(templatePreview),
+      body: templateBody,
       status: 'sent',
       sent_at: sentAt,
+      metadata: {
+        template_name: job.template_name,
+        customer_name: customerName,
+        product_summary: productSummary,
+        cod_amount: codAmount,
+        header_image_url: WA_ORDER_CONFIRMATION_IMAGE_URL,
+        language: 'es',
+        buttons: ['Confirmar', 'No, gracias'],
+      },
     })
 
     // Update conversation last message info
@@ -287,7 +296,7 @@ async function processJob(
       .from('wa_conversations')
       .update({
         last_message_at: sentAt,
-        last_message_preview: makePreview(templatePreview),
+        last_message_preview: makePreview(templateBody),
       })
       .eq('id', conversationId)
 

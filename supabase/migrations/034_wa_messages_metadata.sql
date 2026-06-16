@@ -1,0 +1,2 @@
+ALTER TABLE wa_messages
+ADD COLUMN IF NOT EXISTS metadata JSONB;

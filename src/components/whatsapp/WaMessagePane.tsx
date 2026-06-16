@@ -27,7 +27,58 @@ function formatMsgTime(iso: string | null): string {
   }).format(new Date(iso))
 }
 
+function TemplateCard({ msg }: { msg: WaMessage }) {
+  const m = msg.metadata as {
+    template_name?: string
+    customer_name?: string
+    product_summary?: string
+    cod_amount?: string
+    buttons?: string[]
+  }
+  return (
+    <div className="flex mb-2 justify-end">
+      <div className="max-w-[75%] rounded-2xl rounded-tr-sm overflow-hidden shadow-sm border border-indigo-100 bg-white text-sm">
+        <div className="bg-indigo-600 px-3 py-1.5 flex items-center gap-1.5">
+          <span className="text-white text-xs font-semibold">Template enviado</span>
+          {m.template_name && (
+            <span className="text-indigo-200 text-[10px]">· {m.template_name}</span>
+          )}
+        </div>
+        <div className="px-3 py-2 space-y-0.5 text-gray-700">
+          {m.customer_name && (
+            <p><span className="text-gray-400 text-xs">Cliente</span> {m.customer_name}</p>
+          )}
+          {m.product_summary && (
+            <p><span className="text-gray-400 text-xs">Producto</span> {m.product_summary}</p>
+          )}
+          {m.cod_amount && (
+            <p><span className="text-gray-400 text-xs">Monto</span> RD$ {m.cod_amount}</p>
+          )}
+        </div>
+        {m.buttons && m.buttons.length > 0 && (
+          <div className="px-3 pb-2 flex gap-2">
+            {m.buttons.map((btn) => (
+              <span
+                key={btn}
+                className="text-xs px-2 py-0.5 rounded-full border border-indigo-200 text-indigo-600"
+              >
+                {btn}
+              </span>
+            ))}
+          </div>
+        )}
+        <p className="text-[10px] text-right text-gray-400 px-3 pb-1.5">
+          {formatMsgTime(msg.sent_at)}
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function MessageBubble({ msg }: { msg: WaMessage }) {
+  if (msg.message_type === 'template' && msg.metadata) {
+    return <TemplateCard msg={msg} />
+  }
   const inbound = msg.direction === 'inbound'
   return (
     <div className={cn('flex mb-2', inbound ? 'justify-start' : 'justify-end')}>

@@ -31,4 +31,5 @@ export interface WaMessage {
   read_at: string | null
   sent_by: string | null
   wa_msg_id: string
+  metadata?: Record<string, unknown> | null
 }
