@@ -33,3 +33,12 @@ export interface WaMessage {
   wa_msg_id: string
   metadata?: Record<string, unknown> | null
 }
+
+export interface WaTemplateMetadata {
+  template_name?: string
+  header_image_url?: string
+  customer_name?: string
+  product_summary?: string
+  cod_amount?: string
+  buttons?: string[]
+}

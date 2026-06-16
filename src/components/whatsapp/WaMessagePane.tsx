@@ -4,7 +4,7 @@ import React, { useState, useRef, useCallback } from 'react'
 import type { RefObject } from 'react'
 import { ArrowLeft, MessageSquare, Send } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { WaConversation, WaMessage } from './types'
+import type { WaConversation, WaMessage, WaTemplateMetadata } from './types'
 
 const RD_TZ = 'America/Santo_Domingo'
 
@@ -28,16 +28,18 @@ function formatMsgTime(iso: string | null): string {
 }
 
 function TemplateCard({ msg }: { msg: WaMessage }) {
-  const m = msg.metadata as {
-    template_name?: string
-    customer_name?: string
-    product_summary?: string
-    cod_amount?: string
-    buttons?: string[]
-  }
+  const m = msg.metadata as WaTemplateMetadata
   return (
     <div className="flex mb-2 justify-end">
       <div className="max-w-[75%] rounded-2xl rounded-tr-sm overflow-hidden shadow-sm border border-indigo-100 bg-white text-sm">
+        {m.header_image_url && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={m.header_image_url}
+            alt="Imagen del template"
+            className="w-full max-h-48 object-cover"
+          />
+        )}
         <div className="bg-indigo-600 px-3 py-1.5 flex items-center gap-1.5">
           <span className="text-white text-xs font-semibold">Template enviado</span>
           {m.template_name && (
@@ -45,6 +47,9 @@ function TemplateCard({ msg }: { msg: WaMessage }) {
           )}
         </div>
         <div className="px-3 py-2 space-y-0.5 text-gray-700">
+          {msg.body && (
+            <p className="whitespace-pre-wrap break-words">{msg.body}</p>
+          )}
           {m.customer_name && (
             <p><span className="text-gray-400 text-xs">Cliente</span> {m.customer_name}</p>
           )}
@@ -56,11 +61,11 @@ function TemplateCard({ msg }: { msg: WaMessage }) {
           )}
         </div>
         {m.buttons && m.buttons.length > 0 && (
-          <div className="px-3 pb-2 flex gap-2">
+          <div className="px-3 pb-2 flex flex-wrap gap-2">
             {m.buttons.map((btn) => (
               <span
                 key={btn}
-                className="text-xs px-2 py-0.5 rounded-full border border-indigo-200 text-indigo-600"
+                className="text-xs px-2 py-0.5 rounded-full border border-indigo-200 text-indigo-600 select-none"
               >
                 {btn}
               </span>
