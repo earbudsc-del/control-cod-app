@@ -27,6 +27,22 @@ export async function GET(
     if (!conv) return NextResponse.json({ error: 'No encontrado' }, { status: 404 })
 
     const { searchParams } = new URL(request.url)
+
+    // Polling fallback (FASE 6A.6): trae solo mensajes posteriores a `after`,
+    // sin paginar — el volumen esperado por tick es 0-2 mensajes.
+    const after = searchParams.get('after')
+    if (after) {
+      const { data: afterData, error: afterError } = await supabase
+        .from('wa_messages')
+        .select('id, direction, message_type, body, status, sent_at, delivered_at, read_at, sent_by, wa_msg_id')
+        .eq('conversation_id', id)
+        .gt('sent_at', after)
+        .order('sent_at', { ascending: true, nullsFirst: false })
+
+      if (afterError) throw afterError
+      return NextResponse.json({ data: afterData, pagination: null })
+    }
+
     const page  = Math.max(1, parseInt(searchParams.get('page')  ?? '1'))
     const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(searchParams.get('limit') ?? String(DEFAULT_LIMIT))))
     const from  = (page - 1) * limit

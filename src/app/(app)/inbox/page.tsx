@@ -18,6 +18,7 @@ export default function InboxPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const selectedIdRef  = useRef<string | null>(null)
+  const messagesRef    = useRef<WaMessage[]>([])
 
   const loadConversations = useCallback(async () => {
     setLoadingConvs(true)
@@ -37,12 +38,75 @@ export default function InboxPage() {
   }, [loadConversations])
 
   useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/whatsapp/conversations?limit=100')
+        if (!res.ok) return
+        const json = await res.json()
+        if (Array.isArray(json.data)) {
+          setConversations(json.data)
+        }
+      } catch (err) {
+        console.warn('[wa-conv-poll] error', err)
+      }
+    }
+
+    const intervalId = setInterval(poll, 7000)
+    return () => clearInterval(intervalId)
+  }, [])
+
+  useEffect(() => {
     if (messages.length > 0) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
   }, [messages])
 
   useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+  useEffect(() => { messagesRef.current = messages }, [messages])
+
+  useEffect(() => {
+    if (!selectedId) return
+    const convId = selectedId
+
+    const poll = async () => {
+      if (selectedIdRef.current !== convId) return
+      const current  = messagesRef.current
+      const lastSent = current.length > 0 ? current[current.length - 1].sent_at : null
+      const url = lastSent
+        ? `/api/whatsapp/conversations/${convId}/messages?after=${encodeURIComponent(lastSent)}`
+        : `/api/whatsapp/conversations/${convId}/messages?limit=50`
+
+      try {
+        const res = await fetch(url)
+        if (!res.ok) return
+        const json = await res.json()
+        const incoming = Array.isArray(json.data) ? (json.data as WaMessage[]) : []
+        if (selectedIdRef.current !== convId || incoming.length === 0) return
+
+        setMessages(prev => {
+          const existingIds = new Set(prev.map(m => m.id))
+          const newOnes = incoming.filter(m => !existingIds.has(m.id))
+          return newOnes.length === 0 ? prev : [...prev, ...newOnes]
+        })
+
+        const lastIncoming = incoming[incoming.length - 1]
+        setConversations(prev => prev.map(c => {
+          if (c.id !== convId) return c
+          return {
+            ...c,
+            last_message_preview: lastIncoming.body ?? c.last_message_preview,
+            last_message_at:      lastIncoming.sent_at ?? c.last_message_at,
+            unread_count:         0,
+          }
+        }))
+      } catch (err) {
+        console.warn('[wa-poll] error', { convId, err })
+      }
+    }
+
+    const intervalId = setInterval(poll, 3000)
+    return () => clearInterval(intervalId)
+  }, [selectedId])
 
   useEffect(() => {
     const supabase = createClient()
@@ -50,33 +114,37 @@ export default function InboxPage() {
   }, [])
 
   useEffect(() => {
+    // Nombre único por ejecución del efecto — evita que RealtimeClient.channel()
+    // reutilice un canal viejo todavía en "leaving" (no "closed") tras un cleanup
+    // async sin terminar (StrictMode dev double-invoke / Fast Refresh / remount rápido).
+    // Reutilizar el canal hace que .subscribe() sea un no-op silencioso en ese estado.
+    const channelName = `inbox-realtime-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    let cancelled = false
     const supabase = createClient()
     const channel = supabase
-      .channel('inbox-realtime')
+      .channel(channelName)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'wa_messages' },
         (payload) => {
+          if (cancelled) return
           const msg = payload.new as WaMessage & { conversation_id: string }
-          if (msg.conversation_id === selectedIdRef.current) {
-            setMessages(prev =>
-              prev.some(m => m.id === msg.id) ? prev : [...prev, msg]
-            )
+          const isForOpenConv = msg.conversation_id === selectedIdRef.current
+          if (isForOpenConv) {
+            setMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, msg])
           }
-          setConversations(prev =>
-            prev.map(c => {
-              if (c.id !== msg.conversation_id) return c
-              const isOpen = c.id === selectedIdRef.current
-              return {
-                ...c,
-                last_message_preview: msg.body ?? c.last_message_preview,
-                last_message_at:      msg.sent_at ?? c.last_message_at,
-                unread_count: isOpen
-                  ? 0
-                  : c.unread_count + (msg.direction === 'inbound' ? 1 : 0),
-              }
-            })
-          )
+          setConversations(prev => prev.map(c => {
+            if (c.id !== msg.conversation_id) return c
+            const isOpen = c.id === selectedIdRef.current
+            return {
+              ...c,
+              last_message_preview: msg.body ?? c.last_message_preview,
+              last_message_at:      msg.sent_at ?? c.last_message_at,
+              unread_count: isOpen
+                ? 0
+                : c.unread_count + (msg.direction === 'inbound' ? 1 : 0),
+            }
+          }))
         },
       )
       .on(
@@ -135,9 +203,17 @@ export default function InboxPage() {
           }
         },
       )
-      .subscribe((status) => console.log('[wa-realtime]', status))
+      .subscribe((status, err) => {
+        if (cancelled) return
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || err) {
+          console.warn('[wa-realtime] subscribe error', { status, err: err?.message ?? null })
+        }
+      })
 
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      cancelled = true
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   async function selectConversation(conv: WaConversation) {
