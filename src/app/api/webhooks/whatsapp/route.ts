@@ -7,13 +7,61 @@ import { normalizePhoneRD }     from '@/lib/normalize-phone'
 
 type ServiceClient = Awaited<ReturnType<typeof createServiceClient>>
 
+interface MetaWebhookButtonReply {
+  type:          string                          // 'button_reply'
+  button_reply?: { id: string; title: string }
+}
+
+interface MetaWebhookButton {
+  text:    string
+  payload: string
+}
+
 interface MetaWebhookMessage {
-  from:       string
-  id:         string              // wamid.xxx — clave de deduplicación
-  timestamp:  string              // Unix epoch segundos, como string
-  type:       string              // 'text' | 'image' | 'audio' | etc.
-  text?:      { body: string }
+  from:        string
+  id:          string              // wamid.xxx — clave de deduplicación
+  timestamp:   string              // Unix epoch segundos, como string
+  type:        string              // 'text' | 'image' | 'audio' | 'interactive' | 'button' | etc.
+  text?:       { body: string }
+  interactive?: MetaWebhookButtonReply   // respuesta a botones interactive (Reply Buttons)
+  button?:      MetaWebhookButton        // respuesta a quick-reply de un template
   [key: string]: unknown          // otros campos según el tipo de mensaje
+}
+
+// Contenido normalizado de un mensaje inbound, sin importar su tipo de origen.
+interface InboundContent {
+  body:        string | null
+  messageType: string
+  metadata:    Record<string, unknown> | null
+}
+
+// Soporta: texto plano, botón de respuesta interactive (Reply Buttons) y
+// quick-reply de un mensaje template (botones nativos del template, como
+// "Confirmar" / "No, gracias" en order_confirmation_cod).
+function parseInboundContent(msg: MetaWebhookMessage): InboundContent | null {
+  if (msg.type === 'text') {
+    return { body: msg.text?.body ?? null, messageType: 'text', metadata: null }
+  }
+
+  if (msg.type === 'interactive' && msg.interactive?.type === 'button_reply' && msg.interactive.button_reply) {
+    const { id, title } = msg.interactive.button_reply
+    return {
+      body:        title,
+      messageType: 'interactive',
+      metadata:    { interactive: msg.interactive, button_reply_id: id, button_reply_title: title },
+    }
+  }
+
+  if (msg.type === 'button' && msg.button) {
+    const { text, payload } = msg.button
+    return {
+      body:        text,
+      messageType: 'button_reply',
+      metadata:    { button: msg.button, button_reply_id: payload, button_reply_title: text },
+    }
+  }
+
+  return null
 }
 
 interface MetaWebhookContact {
@@ -171,15 +219,17 @@ export async function POST(request: Request) {
           }
 
           for (const msg of value.messages) {
-            // Fase 1B: solo mensajes text inbound.
+            // Fase 1B: text. Fase 6B: interactive/button (respuestas de botón).
             // Otros tipos (image, audio, document) se procesan en Fase 1C.
-            if (msg.type !== 'text') {
-              console.log('[wa-webhook] tipo', msg.type, 'omitido — Fase 1B solo text')
+            const content = parseInboundContent(msg)
+            if (!content) {
+              console.log('[wa-webhook] tipo', msg.type, 'omitido — sin manejador')
+              console.log('[wa-diag] FASE6B payload completo mensaje no soportado:', JSON.stringify(msg))
               continue
             }
 
             const displayName = contactsMap.get(msg.from)?.profile?.name ?? null
-            await processInboundMessage(supabase, storeId, msg, displayName)
+            await processInboundMessage(supabase, storeId, msg, displayName, content)
           }
         }
 
@@ -275,10 +325,11 @@ async function processInboundMessage(
   storeId:     string,
   msg:         MetaWebhookMessage,
   displayName: string | null,
+  content:     InboundContent,
 ): Promise<void> {
   const phoneNormalized = normalizePhoneRD(msg.from)
   const sentAt = new Date(parseInt(msg.timestamp, 10) * 1000).toISOString()
-  const body   = msg.text?.body ?? null
+  const body   = content.body
 
   console.log('[wa-webhook] procesando mensaje de', phoneNormalized, '— wa_msg_id:', msg.id)
 
@@ -411,9 +462,10 @@ async function processInboundMessage(
       conversation_id: conversation.id,
       wa_msg_id:       msg.id,
       direction:       'inbound',
-      message_type:    'text',
+      message_type:    content.messageType,
       body,
       raw_payload:     msg as Record<string, unknown>,
+      metadata:        content.metadata,
       status:          'received',
       sent_at:         sentAt,
     })
@@ -439,7 +491,7 @@ async function processInboundMessage(
     .from('wa_conversations')
     .update({
       last_message_at:      sentAt,
-      last_message_preview: makePreview(body, 'text'),
+      last_message_preview: makePreview(body, content.messageType),
       unread_count:         (conversation.unread_count ?? 0) + 1,
     })
     .eq('id', conversation.id)

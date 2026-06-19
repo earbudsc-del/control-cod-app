@@ -34,7 +34,7 @@ export async function GET(
     if (after) {
       const { data: afterData, error: afterError } = await supabase
         .from('wa_messages')
-        .select('id, direction, message_type, body, status, sent_at, delivered_at, read_at, sent_by, wa_msg_id')
+        .select('id, direction, message_type, body, status, sent_at, delivered_at, read_at, sent_by, wa_msg_id, metadata')
         .eq('conversation_id', id)
         .gt('sent_at', after)
         .order('sent_at', { ascending: true, nullsFirst: false })
@@ -51,7 +51,7 @@ export async function GET(
     const { data, error, count } = await supabase
       .from('wa_messages')
       .select(
-        'id, direction, message_type, body, status, sent_at, delivered_at, read_at, sent_by, wa_msg_id',
+        'id, direction, message_type, body, status, sent_at, delivered_at, read_at, sent_by, wa_msg_id, metadata',
         { count: 'exact' },
       )
       .eq('conversation_id', id)
