@@ -2,6 +2,7 @@ import { NextResponse }        from 'next/server'
 import crypto                   from 'crypto'
 import { createServiceClient }  from '@/lib/supabase/server'
 import { normalizePhoneRD }     from '@/lib/normalize-phone'
+import { applyConfirmationAction, type ConfirmAction } from '@/lib/orders/confirmation'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -497,6 +498,40 @@ async function processInboundMessage(
     .eq('id', conversation.id)
 
   console.log('[wa-diag] UPDATE wa_conversations → error:', updateConvErr?.message ?? null)
+
+  // ── 5. Acción automática sobre el pedido (Fase 6C) ────────────────────────
+  // Botón "Confirmar" / "No, gracias" del template order_confirmation_cod.
+  // Reutiliza exactamente la misma lógica que el endpoint manual de confirmación.
+  if (content.messageType === 'button_reply' || content.messageType === 'interactive') {
+    const buttonTitle = content.metadata?.button_reply_title as string | undefined
+
+    const action: ConfirmAction | null =
+      buttonTitle === 'Confirmar'   ? 'confirmed' :
+      buttonTitle === 'No, gracias' ? 'cancelled' :
+      null
+
+    if (action) {
+      const orderId = contact.order_id
+
+      if (!orderId) {
+        console.warn('[wa-webhook] ⚠ botón', JSON.stringify(buttonTitle), 'recibido sin order_id vinculado — phone:', phoneNormalized, '— contact.id:', contact.id)
+      } else {
+        const result = await applyConfirmationAction({
+          supabase,
+          orderId,
+          action,
+          method: 'whatsapp',
+          guardAutomated: true,
+        })
+
+        if (!result.ok) {
+          console.warn('[wa-webhook] ⚠ acción automática omitida — order:', orderId, '| action:', action, '| reason:', result.reason)
+        } else {
+          console.log('[wa-webhook] ✓ acción automática aplicada — order:', orderId, '| action:', action, '| confirmation_status:', result.confirmation_status)
+        }
+      }
+    }
+  }
 
   console.log(
     '[wa-webhook] ✓ mensaje guardado — phone:', phoneNormalized,
