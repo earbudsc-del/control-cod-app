@@ -281,6 +281,7 @@ async function processJob(
       status: 'sent',
       sent_at: sentAt,
       metadata: {
+        order_id: job.order_id,
         template_name: job.template_name,
         customer_name: customerName,
         product_summary: productSummary,

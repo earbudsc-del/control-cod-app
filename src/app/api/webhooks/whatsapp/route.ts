@@ -502,6 +502,14 @@ async function processInboundMessage(
   // ── 5. Acción automática sobre el pedido (Fase 6C) ────────────────────────
   // Botón "Confirmar" / "No, gracias" del template order_confirmation_cod.
   // Reutiliza exactamente la misma lógica que el endpoint manual de confirmación.
+  //
+  // IMPORTANTE (fix Fase 6C): un mismo teléfono puede tener múltiples pedidos
+  // en COD, así que wa_contacts.order_id (que solo se vincula una vez y nunca
+  // se reescribe) NO es fuente confiable para saber a qué pedido aplica este
+  // botón. La fuente correcta es el order_id que viajó en el metadata del
+  // template outbound que disparó el botón — se resuelve buscando el último
+  // template 'order_confirmation_cod' enviado en esta misma conversación
+  // antes (o al momento) de este reply.
   if (content.messageType === 'button_reply' || content.messageType === 'interactive') {
     const buttonTitle = content.metadata?.button_reply_title as string | undefined
 
@@ -511,10 +519,10 @@ async function processInboundMessage(
       null
 
     if (action) {
-      const orderId = contact.order_id
+      const orderId = await resolveOrderIdFromLastTemplate(supabase, conversation.id, sentAt)
 
       if (!orderId) {
-        console.warn('[wa-webhook] ⚠ botón', JSON.stringify(buttonTitle), 'recibido sin order_id vinculado — phone:', phoneNormalized, '— contact.id:', contact.id)
+        console.warn('[wa-webhook] ⚠ botón', JSON.stringify(buttonTitle), 'recibido sin order_id resoluble desde el template outbound — conv:', conversation.id, '— phone:', phoneNormalized)
       } else {
         const result = await applyConfirmationAction({
           supabase,
@@ -540,6 +548,41 @@ async function processInboundMessage(
     '— msg.id (DB):', newMsg?.id,
     '— wa_msg_id:', msg.id,
   )
+}
+
+// ── Helper: resolver order_id desde el último template outbound (Fase 6C) ─────
+// No usa wa_contacts.order_id — un mismo contacto puede recibir templates de
+// pedidos distintos a lo largo del tiempo. Busca el wa_message outbound más
+// reciente de tipo 'template' con metadata.template_name='order_confirmation_cod'
+// en esta conversación, con sent_at <= el momento del button reply, y lee
+// metadata.order_id (fallback metadata.test_order_id para envíos de prueba
+// vía /api/admin/wa-test-send).
+async function resolveOrderIdFromLastTemplate(
+  supabase:       ServiceClient,
+  conversationId: string,
+  buttonSentAt:   string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('wa_messages')
+    .select('metadata')
+    .eq('conversation_id', conversationId)
+    .eq('direction', 'outbound')
+    .eq('message_type', 'template')
+    .eq('metadata->>template_name', 'order_confirmation_cod')
+    .lte('sent_at', buttonSentAt)
+    .order('sent_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    console.error('[wa-webhook] ✖ Error buscando template outbound para resolver order_id:', error.message)
+    return null
+  }
+
+  const metadata = data?.metadata as Record<string, unknown> | null
+  const orderId = (metadata?.order_id as string | undefined) ?? (metadata?.test_order_id as string | undefined) ?? null
+
+  return orderId
 }
 
 // ── Helper: buscar pedido activo por teléfono ─────────────────────────────────

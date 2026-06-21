@@ -141,6 +141,7 @@ export async function POST(request: Request) {
       sent_at:         sentAt,
       sent_by:         user.id,
       metadata: {
+        order_id:         orderId,
         template_name:    'order_confirmation_cod',
         customer_name:    customerName,
         product_summary:  productSummary,
