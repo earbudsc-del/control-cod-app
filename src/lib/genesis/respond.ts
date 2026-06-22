@@ -116,15 +116,26 @@ export async function maybeGenesisRespond(
   conversationId: string,
 ): Promise<void> {
   try {
+    console.log('[genesis] inicio — conversationId:', conversationId, '| storeId:', storeId)
+
     const { data: conv } = await supabase
       .from('wa_conversations')
       .select('id, assigned_to, ai_enabled, contact:wa_contacts(wa_id, phone_normalized)')
       .eq('id', conversationId)
       .maybeSingle()
 
-    if (!conv) return
-    if (conv.assigned_to) return   // un humano ya tiene el chat
-    if (!conv.ai_enabled) return
+    if (!conv) {
+      console.log('[genesis] abortado — conversación no encontrada:', conversationId)
+      return
+    }
+    if (conv.assigned_to) {
+      console.log('[genesis] abortado — assigned_to presente:', conv.assigned_to, '| conv:', conversationId)
+      return
+    }
+    if (!conv.ai_enabled) {
+      console.log('[genesis] abortado — ai_enabled=false | conv:', conversationId)
+      return
+    }
 
     const { data: config } = await supabase
       .from('ai_agent_config')
@@ -132,24 +143,35 @@ export async function maybeGenesisRespond(
       .eq('store_id', storeId)
       .maybeSingle()
 
-    if (!config) return
-    if (!config.is_active) return
-    if (config.mode !== 'auto') return
+    if (!config) {
+      console.log('[genesis] abortado — ai_agent_config no encontrada para store:', storeId)
+      return
+    }
+    if (!config.is_active) {
+      console.log('[genesis] abortado — is_active=false | store:', storeId)
+      return
+    }
+    if (config.mode !== 'auto') {
+      console.log('[genesis] abortado — mode!=auto (mode actual:', config.mode, ') | store:', storeId)
+      return
+    }
 
     if (config.provider !== 'openai') {
       if (config.provider === 'gemini') {
         console.warn('[genesis] provider=gemini configurado pero no implementado todavía — sin respuesta')
+      } else {
+        console.log('[genesis] abortado — provider no soportado:', config.provider)
       }
       return
     }
 
     if (!config.api_key_ref) {
-      console.error('[genesis] api_key_ref no configurado — sin respuesta')
+      console.error('[genesis] abortado — api_key_ref no configurado | store:', storeId)
       return
     }
     const apiKey = process.env[config.api_key_ref]
     if (!apiKey) {
-      console.error('[genesis] env var', config.api_key_ref, 'no definida — sin respuesta')
+      console.error('[genesis] abortado — env var', config.api_key_ref, 'no definida en este entorno | store:', storeId)
       return
     }
 
@@ -196,12 +218,17 @@ export async function maybeGenesisRespond(
     ]
 
     const model = config.model?.trim() || 'gpt-4o-mini'
+    console.log('[genesis] llamando a OpenAI — model:', model, '| historial:', history.length, 'mensajes | conv:', conversationId)
     const replyText = await callOpenAI(apiKey, model, chatMessages)
-    if (!replyText) return
+    if (!replyText) {
+      console.log('[genesis] abortado — OpenAI no devolvió texto utilizable | conv:', conversationId)
+      return
+    }
 
+    console.log('[genesis] enviando respuesta vía Meta — conv:', conversationId, '| waId:', waId)
     const sendResult = await sendWhatsAppText(waId, replyText)
     if (!sendResult.ok) {
-      console.error('[genesis] error enviando respuesta vía Meta:', sendResult.error)
+      console.error('[genesis] error enviando respuesta vía Meta:', sendResult.error, '| conv:', conversationId)
       return
     }
 

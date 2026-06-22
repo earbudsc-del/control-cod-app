@@ -194,7 +194,10 @@ export default function WaMessagePane({
 
   const isAdmin    = currentUserRole === 'admin'
   const chatState  = getChatState(conversation, currentUserId)
-  const canType    = chatState === 'mine' || isAdmin
+  // Mientras Génesis asiste el chat (assigned_to=null, ai_enabled=true), el
+  // input queda bloqueado para TODOS — incluido admin. Solo "Tomar chat"
+  // (assigned_to=current_user, ai_enabled=false) habilita el composer.
+  const canType    = chatState !== 'genesis' && (chatState === 'mine' || isAdmin)
   const agentName  = conversation.assigned_agent?.full_name?.trim() || 'otro agente'
   const assignValue = chatState === 'genesis' || chatState === 'unassigned'
     ? chatState

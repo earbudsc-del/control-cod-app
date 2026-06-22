@@ -22,7 +22,7 @@ const SUB_TABS: { id: SubTab; label: string; icon: React.ElementType }[] = [
 const MODE_OPTIONS: { value: AiAgentMode; label: string; description: string }[] = [
   { value: 'off',          label: 'Apagado',       description: 'Génesis no interviene en ninguna conversación.' },
   { value: 'suggest',      label: 'Sugerir',        description: 'Génesis prepara una respuesta sugerida para que el agente la apruebe. (No implementado todavía)' },
-  { value: 'auto',         label: 'Automático',     description: 'Génesis responde directamente al cliente. (No implementado todavía)' },
+  { value: 'auto',         label: 'Automático',     description: 'Génesis responde directamente al cliente cuando el chat está asignado a IA.' },
   { value: 'after_hours',  label: 'Fuera de horario', description: 'Génesis solo interviene fuera del horario operativo. (No implementado todavía)' },
 ]
 
