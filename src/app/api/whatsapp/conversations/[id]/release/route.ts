@@ -29,7 +29,8 @@ export async function PATCH(
       .select(
         `id, status, unread_count, last_message_at, last_message_preview,
          assigned_to, ai_enabled, created_at, updated_at,
-         contact:wa_contacts(id, phone_normalized, display_name, wa_id, order_id, last_seen_at)`,
+         contact:wa_contacts(id, phone_normalized, display_name, wa_id, order_id, last_seen_at),
+         assigned_agent:profiles(id, full_name)`,
       )
       .maybeSingle()
 

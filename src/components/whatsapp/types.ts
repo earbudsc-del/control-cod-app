@@ -18,6 +18,14 @@ export interface WaConversation {
   created_at: string
   updated_at: string
   contact: WaContact
+  assigned_agent?: { id: string; full_name: string } | null
+}
+
+// Agente seleccionable en el dropdown "Asignar a:" del header del Inbox.
+export interface WaAgentOption {
+  id: string
+  full_name: string
+  role: string
 }
 
 export interface WaMessage {

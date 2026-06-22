@@ -3,8 +3,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import WaConversationList from '@/components/whatsapp/WaConversationList'
 import WaMessagePane    from '@/components/whatsapp/WaMessagePane'
-import type { WaConversation, WaMessage } from '@/components/whatsapp/types'
+import type { WaConversation, WaMessage, WaAgentOption } from '@/components/whatsapp/types'
 import { createClient } from '@/lib/supabase/client'
+
+// Roles con acceso al Inbox WhatsApp — mismo set que is_wa_inbox_role() (migración 030).
+const INBOX_ROLES = ['admin', 'ia_supervisor', 'confirmation_agent', 'dispatch_agent', 'novelty_agent', 'agent']
 
 export default function InboxPage() {
   const [conversations,    setConversations]    = useState<WaConversation[]>([])
@@ -15,10 +18,13 @@ export default function InboxPage() {
   const [loadingMessages,  setLoadingMessages]  = useState(false)
   const [showPane,         setShowPane]         = useState(false)
   const [currentUserId,    setCurrentUserId]    = useState<string | null>(null)
+  const [currentUserRole,  setCurrentUserRole]  = useState<string | null>(null)
+  const [agents,           setAgents]           = useState<WaAgentOption[]>([])
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const selectedIdRef  = useRef<string | null>(null)
   const messagesRef    = useRef<WaMessage[]>([])
+  const agentsRef      = useRef<WaAgentOption[]>([])
 
   const loadConversations = useCallback(async () => {
     setLoadingConvs(true)
@@ -63,6 +69,7 @@ export default function InboxPage() {
 
   useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
   useEffect(() => { messagesRef.current = messages }, [messages])
+  useEffect(() => { agentsRef.current = agents }, [agents])
 
   useEffect(() => {
     if (!selectedId) return
@@ -110,7 +117,29 @@ export default function InboxPage() {
 
   useEffect(() => {
     const supabase = createClient()
-    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data.user?.id ?? null))
+    supabase.auth.getUser().then(async ({ data }) => {
+      const uid = data.user?.id ?? null
+      setCurrentUserId(uid)
+      if (!uid) return
+      const { data: profile } = await supabase
+        .from('profiles').select('role').eq('id', uid).maybeSingle()
+      setCurrentUserRole(profile?.role ?? null)
+    })
+  }, [])
+
+  // Agentes elegibles para el dropdown "Asignar a:" del header del Inbox.
+  useEffect(() => {
+    fetch('/api/profiles')
+      .then(r => r.json())
+      .then((json: unknown) => {
+        const list = Array.isArray(json) ? json as Array<{ id: string; full_name: string; role: string }> : []
+        setAgents(
+          list
+            .filter(p => INBOX_ROLES.includes(p.role))
+            .map(p => ({ id: p.id, full_name: p.full_name, role: p.role })),
+        )
+      })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -160,6 +189,12 @@ export default function InboxPage() {
             assigned_to: string | null
             ai_enabled: boolean
           }
+          // El payload de realtime solo trae columnas crudas — el nombre del
+          // agente asignado se resuelve localmente desde la lista ya cargada.
+          const assignedAgent = updated.assigned_to
+            ? agentsRef.current.find(a => a.id === updated.assigned_to) ?? null
+            : null
+
           setConversations(prev =>
             prev.map(c => {
               if (c.id !== updated.id) return c
@@ -172,9 +207,22 @@ export default function InboxPage() {
                 unread_count:         isOpen ? 0 : updated.unread_count,
                 assigned_to:          updated.assigned_to,
                 ai_enabled:           updated.ai_enabled,
+                assigned_agent:       assignedAgent,
               }
             })
           )
+
+          // Mantiene el panel abierto sincronizado si otro agente toma/libera/
+          // reasigna la conversación que el usuario actual tiene abierta.
+          if (updated.id === selectedIdRef.current) {
+            setSelectedConv(prev => prev ? {
+              ...prev,
+              status:         updated.status,
+              assigned_to:    updated.assigned_to,
+              ai_enabled:     updated.ai_enabled,
+              assigned_agent: assignedAgent,
+            } : prev)
+          }
         },
       )
       .on(
@@ -313,6 +361,21 @@ export default function InboxPage() {
     }
   }
 
+  async function handleAssignConversation(conv: WaConversation, assignedTo: string | null, aiEnabled: boolean) {
+    const res = await fetch(`/api/whatsapp/conversations/${conv.id}/assign`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assigned_to: assignedTo, ai_enabled: aiEnabled }),
+    })
+    if (res.ok) {
+      const { data } = await res.json()
+      setSelectedConv(data)
+      setConversations(prev =>
+        prev.map(c => c.id === conv.id ? { ...c, ...data } : c)
+      )
+    }
+  }
+
   return (
     <div className="-mx-4 -mb-4 md:-mx-6 md:-mb-6 h-[calc(100vh-56px)] md:h-screen flex overflow-hidden">
       <div className={`
@@ -339,8 +402,11 @@ export default function InboxPage() {
           onBack={handleBack}
           onSend={handleSend}
           currentUserId={currentUserId}
+          currentUserRole={currentUserRole}
+          agents={agents}
           onTake={handleTakeConversation}
           onRelease={handleReleaseConversation}
+          onAssign={handleAssignConversation}
         />
 
       </div>

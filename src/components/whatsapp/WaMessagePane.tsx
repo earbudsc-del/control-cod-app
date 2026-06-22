@@ -4,7 +4,7 @@ import React, { useState, useRef, useCallback } from 'react'
 import type { RefObject } from 'react'
 import { ArrowLeft, MessageSquare, Send } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { WaConversation, WaMessage, WaTemplateMetadata } from './types'
+import type { WaConversation, WaMessage, WaTemplateMetadata, WaAgentOption } from './types'
 
 const RD_TZ = 'America/Santo_Domingo'
 
@@ -18,6 +18,18 @@ const STATUS_COLOR: Record<string, string> = {
   open:    'bg-green-100 text-green-700',
   pending: 'bg-yellow-100 text-yellow-700',
   closed:  'bg-gray-100 text-gray-600',
+}
+
+// ── Estado de asistencia (FASE 7B.1) ──────────────────────────────────────────
+// Determina quién "tiene" la conversación en este momento: Génesis, un agente
+// específico, o nadie todavía. El input de texto solo se habilita cuando el
+// agente actual es dueño del chat (o es admin, que siempre puede escribir).
+type ChatState = 'genesis' | 'mine' | 'other' | 'unassigned'
+
+function getChatState(conv: WaConversation, currentUserId: string | null | undefined): ChatState {
+  if (conv.assigned_to) return conv.assigned_to === currentUserId ? 'mine' : 'other'
+  if (conv.ai_enabled)  return 'genesis'
+  return 'unassigned'
 }
 
 function formatMsgTime(iso: string | null): string {
@@ -114,18 +126,24 @@ function Spinner() {
 }
 
 interface Props {
-  conversation:   WaConversation | null
-  messages:       WaMessage[]
-  loading:        boolean
-  messagesEndRef: RefObject<HTMLDivElement | null>
-  onBack?:        () => void
-  onSend?:        (text: string) => Promise<void>
-  currentUserId?: string | null
-  onTake?:        (conv: WaConversation) => void
-  onRelease?:     (conv: WaConversation) => void
+  conversation:     WaConversation | null
+  messages:         WaMessage[]
+  loading:          boolean
+  messagesEndRef:   RefObject<HTMLDivElement | null>
+  onBack?:          () => void
+  onSend?:          (text: string) => Promise<void>
+  currentUserId?:   string | null
+  currentUserRole?: string | null
+  agents?:          WaAgentOption[]
+  onTake?:          (conv: WaConversation) => void
+  onRelease?:       (conv: WaConversation) => void
+  onAssign?:        (conv: WaConversation, assignedTo: string | null, aiEnabled: boolean) => void
 }
 
-export default function WaMessagePane({ conversation, messages, loading, messagesEndRef, onBack, onSend, currentUserId, onTake, onRelease }: Props) {
+export default function WaMessagePane({
+  conversation, messages, loading, messagesEndRef, onBack, onSend,
+  currentUserId, currentUserRole, agents = [], onTake, onRelease, onAssign,
+}: Props) {
   const [text, setText]       = useState('')
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -174,6 +192,14 @@ export default function WaMessagePane({ conversation, messages, loading, message
   const label     = contact.display_name?.trim() || contact.phone_normalized
   const statusKey = conversation.status
 
+  const isAdmin    = currentUserRole === 'admin'
+  const chatState  = getChatState(conversation, currentUserId)
+  const canType    = chatState === 'mine' || isAdmin
+  const agentName  = conversation.assigned_agent?.full_name?.trim() || 'otro agente'
+  const assignValue = chatState === 'genesis' || chatState === 'unassigned'
+    ? chatState
+    : (conversation.assigned_to ?? 'unassigned')
+
   return (
     <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
       <div className="h-14 flex-shrink-0 border-b border-gray-200 bg-white flex items-center px-4 gap-3">
@@ -199,17 +225,29 @@ export default function WaMessagePane({ conversation, messages, loading, message
         )}>
           {STATUS_LABEL[statusKey] ?? statusKey}
         </span>
-        {currentUserId && conversation.assigned_to === currentUserId && (
+
+        {chatState === 'genesis' && (
+          <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 bg-violet-100 text-violet-700">
+            🤖 Génesis asistiendo
+          </span>
+        )}
+        {chatState === 'mine' && (
           <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 bg-indigo-100 text-indigo-700">
-            Tomada por mí
+            👤 Asignado a ti
           </span>
         )}
-        {currentUserId && conversation.assigned_to && conversation.assigned_to !== currentUserId && (
+        {chatState === 'other' && (
           <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 bg-amber-100 text-amber-700">
-            En atención
+            👤 Asignado a {agentName}
           </span>
         )}
-        {currentUserId && conversation.assigned_to === currentUserId && onRelease && (
+        {chatState === 'unassigned' && (
+          <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 bg-gray-100 text-gray-600">
+            Sin asignar
+          </span>
+        )}
+
+        {chatState === 'mine' && onRelease && (
           <button
             onClick={() => onRelease(conversation)}
             className="text-xs px-3 py-1 rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300 transition-colors flex-shrink-0"
@@ -217,13 +255,25 @@ export default function WaMessagePane({ conversation, messages, loading, message
             Liberar
           </button>
         )}
-        {currentUserId && !conversation.assigned_to && onTake && (
-          <button
-            onClick={() => onTake(conversation)}
-            className="text-xs px-3 py-1 rounded-full bg-indigo-600 text-white hover:bg-indigo-700 transition-colors flex-shrink-0"
+
+        {onAssign && (
+          <select
+            value={assignValue}
+            onChange={e => {
+              const v = e.target.value
+              if (v === 'genesis')         onAssign(conversation, null, true)
+              else if (v === 'unassigned') onAssign(conversation, null, false)
+              else                          onAssign(conversation, v, false)
+            }}
+            className="text-xs border border-gray-200 rounded-full px-2 py-1 bg-white text-gray-600
+                       focus:outline-none focus:ring-1 focus:ring-indigo-500 flex-shrink-0 max-w-[140px]"
           >
-            Tomar
-          </button>
+            <option value="genesis">🤖 Génesis</option>
+            <option value="unassigned">Sin asignar / manual</option>
+            {agents.map(a => (
+              <option key={a.id} value={a.id}>{a.full_name}</option>
+            ))}
+          </select>
         )}
       </div>
 
@@ -241,39 +291,86 @@ export default function WaMessagePane({ conversation, messages, loading, message
       </div>
 
       <div className="flex-shrink-0 border-t border-gray-200 bg-white px-3 py-2">
-        {sendError && (
-          <p className="text-xs text-red-600 mb-1.5 px-1">{sendError}</p>
-        )}
-        <div className="flex items-end gap-2">
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            placeholder="Escribe un mensaje..."
-            disabled={sending}
-            rows={1}
-            className={cn(
-              'flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm',
-              'min-h-[36px] max-h-[96px] overflow-y-auto',
-              'focus:outline-none focus:ring-1 focus:ring-indigo-500',
-              'placeholder:text-gray-400 disabled:opacity-50',
+        {canType ? (
+          <>
+            {sendError && (
+              <p className="text-xs text-red-600 mb-1.5 px-1">{sendError}</p>
             )}
+            <div className="flex items-end gap-2">
+              <textarea
+                ref={textareaRef}
+                value={text}
+                onChange={handleChange}
+                onKeyDown={handleKeyDown}
+                placeholder="Escribe un mensaje..."
+                disabled={sending}
+                rows={1}
+                className={cn(
+                  'flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm',
+                  'min-h-[36px] max-h-[96px] overflow-y-auto',
+                  'focus:outline-none focus:ring-1 focus:ring-indigo-500',
+                  'placeholder:text-gray-400 disabled:opacity-50',
+                )}
+              />
+              <button
+                onClick={handleSend}
+                disabled={!text.trim() || sending}
+                aria-label="Enviar"
+                className={cn(
+                  'flex-shrink-0 rounded-lg bg-indigo-600 p-2 text-white',
+                  'hover:bg-indigo-700 transition-colors',
+                  'disabled:opacity-40 disabled:cursor-not-allowed',
+                )}
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </div>
+          </>
+        ) : (
+          <BlockedComposeBanner
+            chatState={chatState}
+            agentName={agentName}
+            onTake={onTake ? () => onTake(conversation) : undefined}
           />
-          <button
-            onClick={handleSend}
-            disabled={!text.trim() || sending}
-            aria-label="Enviar"
-            className={cn(
-              'flex-shrink-0 rounded-lg bg-indigo-600 p-2 text-white',
-              'hover:bg-indigo-700 transition-colors',
-              'disabled:opacity-40 disabled:cursor-not-allowed',
-            )}
-          >
-            <Send className="w-4 h-4" />
-          </button>
-        </div>
+        )}
       </div>
+    </div>
+  )
+}
+
+// ── Banner que reemplaza la caja de texto cuando el agente actual no puede
+// escribir todavía (chat asistido por Génesis, asignado a otro, o sin tomar).
+function BlockedComposeBanner({
+  chatState, agentName, onTake,
+}: {
+  chatState: ChatState
+  agentName: string
+  onTake?: () => void
+}) {
+  if (chatState === 'other') {
+    return (
+      <div className="flex items-center justify-center gap-2 py-2 text-sm text-gray-500">
+        <span>Asignado a {agentName}.</span>
+      </div>
+    )
+  }
+
+  const text = chatState === 'genesis'
+    ? 'Génesis está asistiendo este chat. Toma la conversación para responder manualmente.'
+    : 'Nadie está atendiendo este chat todavía.'
+
+  return (
+    <div className="flex items-center justify-between gap-3 py-1.5 px-1">
+      <p className="text-sm text-gray-500">{text}</p>
+      {onTake && (
+        <button
+          onClick={onTake}
+          className="flex-shrink-0 text-xs px-3 py-1.5 rounded-full bg-indigo-600 text-white
+                     hover:bg-indigo-700 transition-colors"
+        >
+          Tomar chat
+        </button>
+      )}
     </div>
   )
 }

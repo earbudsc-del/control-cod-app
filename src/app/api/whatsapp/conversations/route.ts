@@ -21,8 +21,9 @@ export async function GET(request: Request) {
       .from('wa_conversations')
       .select(
         `id, status, unread_count, last_message_at, last_message_preview,
-         assigned_to, created_at, updated_at,
-         contact:wa_contacts(id, phone_normalized, display_name, wa_id, order_id)`,
+         assigned_to, ai_enabled, created_at, updated_at,
+         contact:wa_contacts(id, phone_normalized, display_name, wa_id, order_id),
+         assigned_agent:profiles(id, full_name)`,
         { count: 'exact' },
       )
       .order('last_message_at', { ascending: false, nullsFirst: false })
