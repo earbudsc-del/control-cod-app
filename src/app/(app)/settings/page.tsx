@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from 'react'
 import { Spinner } from '@/components/ui/spinner'
+import GenesisTab from '@/components/settings/GenesisTab'
 import type { Profile, SlaRule, StatusPattern } from '@/types'
-import { Settings, Users, Clock, List, CheckCircle2, AlertCircle, Mail } from 'lucide-react'
+import { Settings, Users, Clock, List, CheckCircle2, AlertCircle, Mail, Bot } from 'lucide-react'
 
 function fmtRelative(iso: string | null | undefined): string {
   if (!iso) return '—'
@@ -29,7 +30,7 @@ const ROLE_OPTIONS: { value: string; label: string }[] = [
   { value: 'viewer',                         label: 'Solo lectura'              },
 ]
 
-type Tab = 'users' | 'sla' | 'patterns'
+type Tab = 'users' | 'sla' | 'patterns' | 'genesis'
 
 export default function SettingsPage() {
   const [tab, setTab]             = useState<Tab>('users')
@@ -79,6 +80,7 @@ export default function SettingsPage() {
     { id: 'users',    label: 'Usuarios',       icon: Users },
     { id: 'sla',      label: 'Reglas de SLA',   icon: Clock },
     { id: 'patterns', label: 'Patrones EFI',    icon: List },
+    { id: 'genesis',  label: 'Génesis IA',      icon: Bot },
   ] as const
 
   if (loading) return (
@@ -329,6 +331,9 @@ export default function SettingsPage() {
           )}
         </div>
       )}
+
+      {/* Tab: Génesis IA */}
+      {tab === 'genesis' && <GenesisTab />}
     </div>
   )
 }

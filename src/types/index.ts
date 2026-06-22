@@ -91,6 +91,37 @@ export interface StatusPattern {
   priority: number
 }
 
+// ── Génesis IA — Fase 7A (solo configuración, sin lógica IA todavía) ──────────
+
+export type AiProvider  = 'openai' | 'gemini'
+export type AiAgentMode = 'off' | 'suggest' | 'auto' | 'after_hours'
+
+export interface AiAgentConfig {
+  id: string
+  store_id: string
+  agent_name: string
+  provider: AiProvider | null
+  model: string | null
+  api_key_ref: string | null
+  system_prompt: string | null
+  mode: AiAgentMode
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface AiKnowledgeSection {
+  id: string
+  store_id: string
+  section_key: string
+  label: string
+  content: string | null
+  priority: number
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface Import {
   id: string
   store_id: string
