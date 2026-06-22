@@ -92,7 +92,7 @@ export async function POST(
 
     const { data: conv, error: convErr } = await supabase
       .from('wa_conversations')
-      .select('id, store_id, contact:wa_contacts(wa_id)')
+      .select('id, store_id, contact:wa_contacts(wa_id, phone_normalized)')
       .eq('id', id)
       .maybeSingle()
 
@@ -101,13 +101,12 @@ export async function POST(
     type ConversationWithContact = {
       id: string
       store_id: string
-      contact: { wa_id: string | null } | { wa_id: string | null }[] | null
+      contact: { wa_id: string | null, phone_normalized: string | null } | { wa_id: string | null, phone_normalized: string | null }[] | null
     }
     const typedConv = conv as ConversationWithContact
-    const waId = Array.isArray(typedConv.contact)
-      ? typedConv.contact[0]?.wa_id
-      : typedConv.contact?.wa_id
-    if (!waId) return NextResponse.json({ error: 'El contacto no tiene wa_id' }, { status: 422 })
+    const contact = Array.isArray(typedConv.contact) ? typedConv.contact[0] : typedConv.contact
+    const waId = contact?.wa_id ?? contact?.phone_normalized
+    if (!waId) return NextResponse.json({ error: 'El contacto no tiene wa_id ni teléfono' }, { status: 422 })
 
     const WA_API_VERSION    = process.env.WA_API_VERSION!
     const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID!
