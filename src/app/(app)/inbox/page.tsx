@@ -282,7 +282,8 @@ export default function InboxPage() {
         )
       )
     } else {
-      throw new Error('No se pudo enviar el mensaje. Inténtalo de nuevo.')
+      const body = await res.json().catch(() => null) as { error?: string } | null
+      throw new Error(body?.error ?? 'No se pudo enviar el mensaje. Inténtalo de nuevo.')
     }
   }
 

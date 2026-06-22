@@ -128,16 +128,20 @@ interface Props {
 export default function WaMessagePane({ conversation, messages, loading, messagesEndRef, onBack, onSend, currentUserId, onTake, onRelease }: Props) {
   const [text, setText]       = useState('')
   const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
   const textareaRef           = useRef<HTMLTextAreaElement>(null)
 
   const handleSend = useCallback(async () => {
     const trimmed = text.trim()
     if (!trimmed || sending || !onSend) return
     setSending(true)
+    setSendError(null)
     try {
       await onSend(trimmed)
       setText('')
       if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'No se pudo enviar el mensaje.')
     } finally {
       setSending(false)
     }
@@ -237,6 +241,9 @@ export default function WaMessagePane({ conversation, messages, loading, message
       </div>
 
       <div className="flex-shrink-0 border-t border-gray-200 bg-white px-3 py-2">
+        {sendError && (
+          <p className="text-xs text-red-600 mb-1.5 px-1">{sendError}</p>
+        )}
         <div className="flex items-end gap-2">
           <textarea
             ref={textareaRef}
