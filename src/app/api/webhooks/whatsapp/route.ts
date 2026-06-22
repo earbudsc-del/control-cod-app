@@ -3,6 +3,7 @@ import crypto                   from 'crypto'
 import { createServiceClient }  from '@/lib/supabase/server'
 import { normalizePhoneRD }     from '@/lib/normalize-phone'
 import { applyConfirmationAction, type ConfirmAction } from '@/lib/orders/confirmation'
+import { maybeGenesisRespond }  from '@/lib/genesis/respond'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -548,6 +549,14 @@ async function processInboundMessage(
     '— msg.id (DB):', newMsg?.id,
     '— wa_msg_id:', msg.id,
   )
+
+  // ── 6. Respuesta automática de Génesis (Fase 7B.2) ────────────────────────
+  // Solo dispara si la conversación cumple todas las condiciones (ai_enabled,
+  // sin assigned_to, config activa en modo 'auto'). Nunca lanza — cualquier
+  // error queda contenido y logueado dentro de maybeGenesisRespond.
+  // No se ejecuta para wa_msg_id duplicados (Meta retry) porque ese caso
+  // retorna antes, en el bloque insertMsgErr?.code === '23505' de arriba.
+  await maybeGenesisRespond(supabase, storeId, conversation.id)
 }
 
 // ── Helper: resolver order_id desde el último template outbound (Fase 6C) ─────
