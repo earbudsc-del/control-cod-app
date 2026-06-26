@@ -145,6 +145,10 @@ export function GET(request: Request) {
 // La deduplicación de mensajes la garantiza UNIQUE(wa_msg_id) en DB.
 
 export async function POST(request: Request) {
+  // TEMPORAL — diagnóstico FASE 7B.2: confirmar que este webhook (el que
+  // contiene maybeGenesisRespond) es el que Meta realmente está invocando.
+  console.log('[wa-webhook] inbound recibido')
+
   // 1. Leer raw body antes de parsear — necesario para verificar HMAC
   const rawBody = await request.text()
 
@@ -556,6 +560,8 @@ async function processInboundMessage(
   // error queda contenido y logueado dentro de maybeGenesisRespond.
   // No se ejecuta para wa_msg_id duplicados (Meta retry) porque ese caso
   // retorna antes, en el bloque insertMsgErr?.code === '23505' de arriba.
+  // TEMPORAL — diagnóstico FASE 7B.2.
+  console.log('[wa-webhook] llamando maybeGenesisRespond')
   await maybeGenesisRespond(supabase, storeId, conversation.id)
 }
 
