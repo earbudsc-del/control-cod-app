@@ -4,6 +4,241 @@
 
 ---
 
+## FEATURE: SD Delivery V3 — Fase A, auditoría final de fricción (2026-07-08)
+
+### Qué se hizo
+
+Quinta y última ronda de pulido sobre `src/app/(app)/sd-delivery/page.tsx` antes de cerrar Fase A, pedida explícitamente como auditoría de producto ("piensa como Product Designer Senior + mensajero de 8 horas", no como desarrollador). Se buscó fricción, no bugs. 3 hallazgos, los 3 implementados:
+
+**1. Número del banner no coincidía con las tarjetas visibles.** El titular del banner usaba `totalActive` (`allPooled.length`, sin filtro de fecha), mientras que la lista de abajo (`zoneGroups`) sí respeta el filtro de fecha (default "Hoy"). Resultado: con pedidos `nuevo`/`espera_despacho` de días anteriores, el banner podía decir "12" mientras solo se veían 8 tarjetas — el tipo exacto de discrepancia que hace que el mensajero piense "¿está roto esto?". Fix: el titular ahora usa `activeList.length` (mismo dataset que alimenta la vista, antes de aplicar búsqueda — así buscar no hace bajar el número "total"). Se eliminó la variable `totalActive` (quedó sin otro uso).
+
+**2. "Meta del día" no era visible hasta la primera entrega.** La barra de progreso (`X/8`) solo se renderizaba `if (perf.entregadosHoy > 0)` — es decir, al empezar el día (0 entregas) el mensajero no veía la meta en absoluto. Un driver app real (Uber/InDrive) siempre muestra el progreso hacia la meta, incluso en 0, precisamente para motivar el arranque del día. Fix: se quitó la condición; la barra ahora siempre se muestra desde "0/8".
+
+**3. Footer "Flujo operativo" permanente eliminado.** Al final de la pantalla había un párrafo fijo explicando el flujo completo ("Pedido nuevo → Cliente confirma → Confirmar ruta → Cliente pagó → Historial...") — texto de onboarding que se renderizaba en cada una de las 40-50 aperturas diarias, para siempre. Es exactamente el tipo de "información que distrae" de una herramienta operativa (vs. un CRM que sí tolera texto explicativo permanente). Eliminado sin reemplazo.
+
+**Hallazgo NO implementado (fuera del alcance "fricción, no bugs" de esta ronda, pero documentado para que quede sobre la mesa):** tocar el botón WhatsApp o Llamar en una tarjeta con estado `no_responde`/`reprogramado` llama a `postAction(id, 'contacted', 'contacted')`, que sobreescribe `actionMap[id]` con un valor (`'contacted'`) que `computeDisplayState` no reconoce — la tarjeta vuelve visualmente a `nuevo`/`confirmado_listo` en el cliente hasta el próximo `fetchData()` (polling cada 3 min o refresh manual, que sí re-siembra el valor correcto desde `sd-actions`). Es decir: re-contactar a alguien que ya no respondió "resetea" temporalmente su badge. **Este comportamiento es anterior a Fase A** (ya existía en el código pre-rediseño, mismo patrón `onWA`/`onLlamar` → `postAction('contacted','contacted')`). No se tocó esta sesión porque el usuario pidió explícitamente auditar fricción, no bugs, y porque este archivo tiene historial extenso de bugs sutiles de `actionMap` (ver secciones "FIX" de sesiones 2-9 más abajo en este documento) — amerita su propio ciclo de diagnóstico, no un fix apurado dentro de una auditoría de UX.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | Titular del banner: `totalActive` → `activeList.length` (variable `totalActive` eliminada). Barra "Meta del día": quitada la condición `perf.entregadosHoy > 0`, siempre visible. Eliminado el bloque `<div>` del footer "Flujo operativo" (texto de onboarding permanente). |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅ (verificado 2026-07-08)
+
+### NO se rompió / NO se implementó
+
+- Ningún endpoint, migración, motor de estados, GPS, mapas, IA, ni Delivery Copilot.
+- El bug de `actionMap` con WA/Llamar (arriba) queda documentado pero sin tocar — decisión deliberada, no descuido.
+- Fase B sigue sin implementar.
+
+---
+
+## FEATURE: SD Delivery V3 — Fase A, orden por prioridad + "Próxima parada" + prep. Copilot (2026-07-08)
+
+### Qué se hizo
+
+Cuarta ronda de pulido sobre `src/app/(app)/sd-delivery/page.tsx`, con el objetivo explícito de que la pantalla "se sienta más tipo Driver App" (Uber/InDrive) y de dejar la base técnica lista para Delivery Copilot **sin implementar nada de eso todavía** (sin GPS, sin mapas internos, sin IA, sin Inbox interno).
+
+**1. Orden de pedidos dentro de cada zona por prioridad de acción.** Nueva función `actionPriorityTier(ds)`: `en_ruta` (tier 0, ya saliste, solo falta cobrar) → `confirmado_listo` (tier 1, listo para salir) → todo lo demás (`nuevo`/`no_responde`/`reprogramado`/`espera_despacho`, tier 2, requiere llamada). Nuevo memo `prioritizedActiveList` ordena por tier y, dentro del mismo tier, por tiempo esperando (más antiguo primero, usando `orderDateMs` ya existente). Reemplaza a `searchedActiveList` como input de `groupPooledByZone`.
+
+**2. "Próxima parada".** Nuevo memo `proximaParadaId` = el primer pedido de `prioritizedActiveList`, solo si su estado es `en_ruta` o `confirmado_listo` (no tiene sentido destacar una llamada pendiente como "parada"). `SdCard` recibe `isProximaParada: boolean` — cuando es `true`, el borde de la card cambia a `border-2 border-teal-500 shadow-md shadow-teal-100` y aparece un eyebrow "🎯 Próxima parada" arriba del contenido. Heurística 100% determinística (estado + tiempo esperando), sin GPS ni IA — el mismo lugar donde entrará el ranking real de Delivery Copilot más adelante.
+
+**3. Zonas ordenadas por prioridad operativa.** `zoneGroups` ahora reordena el resultado de `groupPooledByZone` según el tier del primer item de cada zona (`group.items[0]`, que ya es el de mayor prioridad porque `prioritizedActiveList` llega pre-ordenado y el orden se preserva al agrupar). Zonas con trabajo actuable ahora (en_ruta/confirmado_listo) aparecen primero; zonas donde solo quedan llamadas pendientes, al final. Desempate por cantidad de pedidos.
+
+**4. Centralización del handler de WhatsApp.** Nueva función `getConversationLink(order, pool): string | null` — hoy construye el mismo link `wa.me` que antes (vía `buildWaMsg`/`buildWaMsgNuevo`/`whatsAppUrl`), pero es el **único punto** que habrá que cambiar cuando exista el Inbox interno de Delivery Copilot V1. El prop `onWA` de `SdCard` se renombró a `onAbrirConversacion` (mismo comportamiento — dispara `postAction(id, 'contacted', 'contacted')`). El `<a href>` se mantiene intencionalmente (no `window.open`) porque es lo que abre confiablemente la app de WhatsApp en móvil vía el esquema `wa.me`.
+
+**5. Objetivos táctiles de 44px** en los 9 botones de acción de la card (WhatsApp, Llamar, Más, y los 6 CTA primarios) — de la ronda anterior, documentado aquí para referencia.
+
+**Limpieza incidental:** se eliminó `tiempoLabel()`, función muerta detectada por el linter del editor (definida pero nunca usada — quedó de una iteración anterior del rediseño). Cero cambio de comportamiento.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | `actionPriorityTier()` (nueva), `getConversationLink()` (nueva), `prioritizedActiveList` (nuevo memo), `zoneGroups` reordenado por prioridad de zona, `proximaParadaId` (nuevo memo), `SdCard` recibe `isProximaParada` y `onAbrirConversacion` (renombrado de `onWA`). Eliminado `tiempoLabel()` (dead code). |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅ (verificado 2026-07-08)
+
+### NO se rompió / NO se implementó
+
+- Ningún endpoint, migración, ni el motor de estados (`computeDisplayState`) — sin cambios.
+- Sin GPS, sin mapas internos, sin IA, sin Inbox interno — todo lo de este commit es heurística determinística sobre datos que ya existían (estado + `status_since`/`created_at`).
+- Génesis — no tocado.
+- Fase B (comisión persistida, bono cada 8, cierre diario, tarifario A/B/C) — sigue sin implementar, documentado como pendiente.
+
+---
+
+## VISIÓN FUTURA (NO IMPLEMENTAR): SD Delivery — entrega guiada por ubicación real vía WhatsApp (2026-07-08)
+
+**Estado: solo documentado. No forma parte de la Fase A ni tiene fase asignada todavía.** El usuario pidió dejarlo por escrito para que ninguna decisión de las fases actuales (A/B en curso) le cierre el camino, sin construir nada de esto ahora.
+
+### La idea
+
+La dirección escrita en el pedido (`customer_address`) **no debe tratarse como el destino final** de la entrega — es solo una señal operativa para: detectar zona, agrupar rutas, estimar cercanía y decidir a quién conviene contactar primero. En RD, el destino real casi siempre termina siendo la ubicación que el cliente envía por WhatsApp (pin de ubicación), no el texto de la dirección.
+
+Flujo objetivo a futuro:
+```
+Pedido confirmado
+  → IA agrupa por zona usando la dirección del pedido (señal, no destino)
+  → Sistema recomienda a qué cliente contactar primero
+  → Mensajero abre el chat DESDE la propia app (Inbox interno — ya anticipado en
+    la sección "Fase 3 — rediseño UX del mensajero" de sesiones previas)
+  → Solicita ubicación al cliente
+  → Al recibir el pin de WhatsApp, la app lo reconoce como el destino real
+  → Cambia automáticamente a "modo entrega" con ESE cliente
+  → Al completar la entrega, la IA recalcula el siguiente cliente más conveniente
+    según: ubicación actual del mensajero (GPS), ubicaciones confirmadas recibidas,
+    pendientes, distancia estimada, tiempo de espera, valor COD
+```
+
+Objetivo final: el mensajero trabaja con **un solo cliente a la vez** (como Uber/InDrive/Amazon Flex), nunca con una lista mental de diez.
+
+### Por qué la arquitectura actual (Fase A) ya es compatible — auditado 2026-07-08
+
+Se revisó `src/app/(app)/sd-delivery/page.tsx` explícitamente para esto. Nada bloquea la evolución futura:
+
+- `customer_address` hoy **solo** alimenta: `detectSdZone()` (señal de zona), un link de conveniencia a Google Maps (`mapsUrl()`, búsqueda por texto, no navegación precisa), texto visible en la card, y el buscador. **Nunca** se trata como coordenada exacta ni destino autoritativo — ya está alineado con "la dirección es solo referencia".
+- El agrupador por zona (`groupPooledByZone`) sigue siendo válido como filtro de alto nivel incluso en el modo futuro "un cliente a la vez": la zona decide qué bloque de trabajo se prioriza; el ranking futuro (GPS + ubicación real + tiempo + COD) decidiría el orden *dentro* de ese bloque. No es un callejón sin salida.
+- `en_ruta` (DisplayState) hoy solo significa "salió, aún no marcó pagado" — es agnóstico de si existe o no una ubicación GPS precisa. El futuro "modo entrega" de un solo cliente puede modelarse como una capa encima de `en_ruta` (ej. un sub-estado "cliente activo actual"), sin tener que rediseñar el motor de estados existente.
+- `criticalityLabel()`/`tiempoLabel()` (tiempo esperando, ya calculado desde `status_since`) y `order.cod_amount` (valor COD) son 2 de las variables que el ranking futuro necesitaría — ya existen y ya se usan hoy para badges de urgencia. Reutilizables sin cambios.
+
+### Qué faltaría (a futuro, NO ahora)
+
+- Inbox de WhatsApp nativo dentro de la app (mencionado ya en sesiones previas como pendiente de "Fase 3" del rediseño del mensajero) — hoy el botón WhatsApp abre `wa.me/` externo.
+- Captura de "ubicación confirmada real" — probablemente campos nuevos separados de `customer_address` (ej. `confirmed_location_lat`/`lng`/`confirmed_location_at`/`confirmed_location_source`), **sin reemplazar** `customer_address` (que seguiría siendo la señal de zona/fallback).
+- GPS del dispositivo del mensajero (no existe ningún tracking de ubicación en tiempo real hoy).
+- Motor de ranking "siguiente cliente más conveniente" (distancia + tiempo + COD) — hoy no existe ningún ordenamiento dentro de una zona, los pedidos aparecen en el orden en que llegan del fetch.
+- UI de "modo entrega" enfocada en un solo cliente a la vez, distinta de la lista agrupada por zona de hoy.
+
+**How to apply:** antes de tocar esto, releer esta sección completa. No es una fase con fecha — retomar solo cuando el usuario lo pida explícitamente, probablemente después de cerrar Fase B (motor de dinero real).
+
+---
+
+## REDISEÑO: SD Delivery V3 — Fase A, "Mi Ruta" agrupada por zona (2026-07-08)
+
+### Problema resuelto
+
+El mensajero navegaba por 4 tabs (Por gestionar/En reparto/Entregados/Incidencias) con sub-filtros internos (Nuevos/No responden/Reprogramados, Esperando despacho/Por zona/En camino) que exponían jerga interna del sistema de estados. La agrupación por zona solo existía dentro de un sub-tab ("Por zona"), únicamente para pedidos `confirmado_listo` — el resto de la experiencia era lista plana. Los 4 botones secundarios (No responde/Reprogramar/No desea/Nota) estaban duplicados en JSX entre `SdCard` (móvil) y la tabla desktop.
+
+Objetivo explícito del usuario: "eliminar toda la fricción posible", sin mockups — iterar directo sobre la UI real. Alcance de Fase A fijado por el usuario: **sin migraciones, sin cambios de DB, sin tocar Génesis, sin modificar el motor de estados, sin romper el flujo actual.**
+
+### Qué se implementó
+
+**Reescritura completa de `src/app/(app)/sd-delivery/page.tsx`** (capa de presentación). El motor de datos (fetch, memos, invariantes de F5-persistencia documentadas en sesiones anteriores) **no se tocó** — se reutiliza tal cual.
+
+- **2 vistas en vez de 4 tabs + subfiltros:** "Mi Ruta" (todo pedido activo) y "Historial" (entregados + "ya no desea", combinados y ordenados por fecha, buscable, con paginación).
+- **Agrupación por zona aplicada a TODOS los pedidos activos** (antes solo a `confirmado_listo`). Nuevo helper `groupPooledByZone()` en el propio page.tsx, usando `detectSdZone()` de `sd-zones.ts` — reutiliza el motor de detección geográfica sin tocarlo. Cada zona es una sección colapsable (expandida por defecto) con botón "Iniciar ruta de zona" cuando la zona tiene pedidos `confirmado_listo`.
+- **Componente de card único** (`SdCard`) para móvil y desktop — se eliminó la tabla desktop duplicada (~500 líneas de JSX repetido). Muestra: cliente, teléfono, dirección, COD, badge de estado amigable (sin jerga interna, ver `friendlyBadge()`), y 4 acciones: WhatsApp, Llamar, botón principal dinámico según estado (Cliente confirma / Confirmar ruta / Despachar / Cliente pagó / Volver a ruta), y "Más".
+- **Hoja "Más"** (`MasSheet`) consolida las acciones secundarias que antes eran botones sueltos: No respondió, Reprogramar, Ya no desea, **Dirección incorrecta (nueva)**, Otro motivo/nota. Disponibilidad de cada opción condicionada al `DisplayState` exactamente igual que antes (ver tabla abajo) — es un reempaquetado visual, no un cambio de reglas.
+- **"Dirección incorrecta"** es una capacidad nueva pedida por el usuario. Como Fase A prohíbe migraciones, se implementó reutilizando `action_type='note_added'` con prefijo `"Dirección incorrecta: "` en la nota — queda auditable en `agent_actions` igual que cualquier nota, pero sin un `action_type` dedicado todavía. **Pendiente Fase B:** darle su propio `action_type` si el volumen lo justifica.
+- **Comisión estimada por zona real** (no promedio plano): `gananciasHoyReal` sustituye a `SD_TARIFA_PROMEDIO × entregas` — suma `detectSdZone(order).tarifa` por cada entrega de hoy. Cambio de presentación puro (no persiste nada nuevo), coherente con lo ya identificado en el análisis previo a esta fase.
+- **Resumen del día ampliado:** además de los conteos existentes (Entregados/Confirmados/En ruta/No responden/Reprogramados), se agregó "Pendientes" (total activo), "COD por cobrar" (suma de `cod_amount` de pedidos activos) y "Cobrado hoy" (suma de `cod_amount` de entregas de hoy). Todo calculado en memoria desde datos ya fetcheados — **no se agregó ningún endpoint nuevo ni tabla de "bonos acumulados"**, porque ese cálculo real requiere datos semanales/racha que hoy vive en `/api/sd-delivery/score` (no fetcheado en esta página) y su persistencia fue explícitamente diferida a Fase B (snapshot de cierre de día).
+
+### Disponibilidad de opciones en "Más" (idéntica a la UI anterior, solo reempaquetada)
+
+| Opción | Disponible cuando `ds` es | Coincide con UI anterior |
+|---|---|---|
+| No respondió | `nuevo`, `confirmado_listo`, `en_ruta` | Sí — mismos 3 estados que antes |
+| Reprogramar | `en_ruta` | Sí |
+| Ya no desea | `en_ruta` | Sí |
+| Dirección incorrecta | cualquier estado activo excepto `espera_despacho`/`entregado`/`cancelado` | **Nuevo** |
+| Otro motivo / nota | siempre (excepto entregado/cancelado) | Antes "Nota" no estaba disponible en `nuevo`; ahora sí (capacidad aditiva, no rompe nada) |
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/app/(app)/sd-delivery/page.tsx` | Reescritura completa de la capa de presentación. Motor de datos (`fetchData`, `allPooled`/`filteredPooled`, `nuevosList`/`confirmadosList`/`enRutaList`/`noRespondenList`/`reprogramadosList`/`rutasList`, `computeDisplayState`, funciones de acción `postAction`/`confirmRoute`/`confirmClient`/`markDelivered`/`confirmZoneRoute`/`saveNote`/`saveReprogramar`/`saveCustomerDeclined`/`dispatchLocal`) **sin cambios**. Se eliminaron: `Tab`/`GestionSub`/`RepartoSub` types, `computeTab()`, `TAB_META`, tabla desktop duplicada, `zoneGroups` limitado a rutas. Se agregaron: `View` type, `groupPooledByZone()`, `friendlyBadge()`, `matchesQuery()`, componente `MasSheet`, componente `HistorialRow`, `activeList`/`searchedActiveList`/`zoneGroups` (nuevos), `historialAll`/`historialFiltrado`/`historialPaged`, `gananciasHoyReal`/`codPendiente`/`codCobradoHoy`. |
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅ (verificado 2026-07-08)
+
+### NO se rompió
+
+- Ningún endpoint API tocado — `confirm-client`, `mark-delivered`, `dispatch-local`, `route-confirmed-ids`, `sd-actions`, `performance`, `/api/orders/[id]/actions` sin cambios.
+- Migración 026/027/028 y `action_type` CHECK constraint — sin cambios, no se agregó ningún `action_type` nuevo.
+- `applyConfirmationAction()` / confirmación unificada V2 — no tocada.
+- Génesis AI Runtime — no tocado.
+- F5-persistencia de `en_ruta`/`no_responde`/`reprogramado`/`confirmado_listo` (inmunes al filtro de fecha) — invariante preservada exactamente: las mismas 6 listas memoizadas (`nuevosList`, `confirmadosList`, `rutasList`, `enRutaList`, `noRespondenList`, `reprogramadosList`) alimentan la vista nueva sin cambiar su fuente de datos (`filteredPooled` vs `allPooled`).
+- Score/rendimiento (`/mi-rendimiento`, `/api/sd-delivery/score`) — no tocado; el sistema de 6 bonos (`SD_BONUS_CONFIG`) sigue intacto en `sd-zones.ts`, pendiente de reorganización en categorías (Fase B, ver memoria del proyecto).
+
+### Pendiente (Fase B — fuera de alcance de esta sesión)
+
+- Persistir comisión real por entrega (hoy solo se muestra en memoria, no se guarda en DB).
+- `action_type` dedicado para "Dirección incorrecta" en vez de `note_added` con prefijo.
+- Reorganizar `SD_BONUS_CONFIG` en 3 categorías (Operativos/Desempeño/Especiales) y agregar Bono Express cada 8 entregas.
+- Snapshot de "Resumen del día" persistido para compartir por WhatsApp sin que cambie retroactivamente.
+- Mapeo de las 6 zonas geográficas a 3 tiers de tarifa A/B/C.
+
+---
+
+## FEATURE: SD Delivery V2 — confirmación unificada, Fase 1 + Fase 2 (2026-07-07)
+
+### Problema resuelto
+
+Antes, solo el mensajero SD (`confirm-client`) auto-despachaba un pedido SD (`normalized_status='en_reparto'`) al confirmarlo. Si el **agente de Confirmación** confirmaba el mismo tipo de pedido desde `/confirmacion`, el pedido quedaba en limbo: desaparecía de `/confirmacion` pero no aparecía en `/sd-delivery` hasta que admin/dispatch_agent lo despachara manualmente desde `/confirmados` con el botón "Despachar local". Dos canales de confirmación, dos comportamientos distintos.
+
+### Qué se implementó
+
+**`applyConfirmationAction()`** (`src/lib/orders/confirmation.ts`) es ahora el **punto único** de confirmación para todos los canales (agente manual, webhook de WhatsApp, y a futuro Génesis). Al confirmar (`action='confirmed'`):
+
+- Si el pedido **no tiene `tracking_number`** y **`isSantoDomingoOrder(city, province, customer_address)`** es `true` → en el mismo `UPDATE` se agrega:
+  - `normalized_status = 'en_reparto'`
+  - `status_since = now()`
+- Se registra auditoría adicional en `agent_actions` (`action_type='local_dispatched'`, nota `"Auto-despachado al confirmar — pedido SD sin guía EFI"`) — solo si hay `userId` (mismo patrón que `no_coverage`/`rescheduled`).
+- Pedidos **EFI no cambian**: `isSantoDomingoOrder` nunca matchea sus ciudades, así que el flujo original (`/confirmados` → asignar guía → tracking) queda intacto.
+
+**Efecto cascada (sin tocar código adicional):**
+- `/confirmados` ya excluye `normalized_status='en_reparto'` → el pedido SD desaparece automáticamente de Despacho EFI.
+- `/confirmacion` ya excluye no-`pending` → desaparece automáticamente de la bandeja compartida.
+- `/sd-delivery` ya hace fetch de `status=en_reparto` filtrado por zona SD → el mensajero lo ve de inmediato en su tab "Rutas", sin paso manual de despacho.
+
+**Fase 2 — feedback de UI:**
+- `ApplyConfirmationActionResult` (ok) agrega campo `auto_dispatched: boolean`.
+- `POST /api/orders/[id]/confirmation` propaga `auto_dispatched` en la respuesta JSON.
+- `/confirmacion/page.tsx`: toast diferenciado — `'✓ Confirmado y despachado a mensajero SD'` cuando `auto_dispatched=true`, en vez del genérico `'✓ Pedido confirmado'`.
+
+### Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `src/lib/orders/confirmation.ts` | Import `isSantoDomingoOrder`. Select amplía a `city, province, customer_address, tracking_number`. Nueva constante `isSdAutoDispatch`. Auto-set `normalized_status`/`status_since` en el case `'confirmed'`. Insert `agent_actions(local_dispatched)` condicional. Campo `auto_dispatched` en el resultado. |
+| `src/app/api/orders/[id]/confirmation/route.ts` | Response JSON agrega `auto_dispatched: result.auto_dispatched`. |
+| `src/app/(app)/confirmacion/page.tsx` | `ConfirmResult` agrega `auto_dispatched?: boolean`. Toast condicional en `postConfirmation()`. |
+
+### Roadmap de fases (acordado con el usuario 2026-07-07)
+
+1. ✅ Fase 1 — unificación del núcleo en `applyConfirmationAction()`.
+2. ✅ Fase 2 — feedback de UI (toast diferenciado).
+3. ⏳ Fase 3 (pendiente) — limpieza de backlog legacy: pedidos SD confirmados-pero-no-despachados antes de este fix. Se resuelven con el botón "Despachar local" ya existente en `/confirmados`, sin código nuevo.
+4. ⏳ Fase 4 (pendiente) — refactor de `confirm-client` (endpoint propio del mensajero) para que reutilice `applyConfirmationAction()` en vez de duplicar la lógica de auto-despacho.
+5. ⏸️ Fase 5 (diferida por decisión del usuario) — `dispatch_agent` sigue viendo pedidos SD nuevos en `/confirmacion`; no se restringe por ahora.
+6. ⏳ Fase 6 (futura) — Génesis (hoy congelado, ver sección "Genesis AI Runtime" más abajo) debe llamar a `applyConfirmationAction()` cuando confirme pedidos automáticamente — hereda el comportamiento SD sin duplicar lógica.
+
+### Dirección arquitectónica futura (NO implementada — nota del usuario)
+
+El criterio actual (`tracking_number IS NULL` + `isSantoDomingoOrder()`) es un atajo válido hoy, **no la solución definitiva**. La idea a futuro es desacoplar "hacia dónde va un pedido" de la detección geográfica/tracking y basarlo en un concepto explícito de la operación — probablemente un campo `workflow_owner` o `delivery_type` en la orden que determine automáticamente quién continúa el flujo (EFI vs SD local vs otros couriers futuros). Retomar esto antes de agregar un tercer tipo de flujo de entrega, o si `isSantoDomingoOrder()` empieza a dar falsos positivos/negativos frecuentes.
+
+### TypeScript
+
+`npx tsc --noEmit` → sin errores ✅
+
+### NO se rompió
+
+- Flujo EFI (Confirmación → Despacho EFI → Tracking) — sin cambios, `isSantoDomingoOrder` nunca matchea sus direcciones.
+- `confirm-client` (mensajero SD) — sin cambios, sigue funcionando igual (aún no refactorizado a reutilizar `applyConfirmationAction`, ver Fase 4).
+- `dispatch-local` / botón "Despachar local" en `/confirmados` — sin cambios, sigue disponible como mecanismo manual para backlog legacy y edge cases.
+- Génesis — no tocado (sigue congelado).
+- Sin migraciones ni cambios de schema — `local_dispatched` y `confirmed` ya existían como `action_type` válidos.
+
+---
+
 ## FEATURE: dispatch_agent accede a /confirmacion (2026-06-05)
 
 ### Qué se implementó

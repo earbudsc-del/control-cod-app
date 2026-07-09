@@ -40,7 +40,13 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
 
     const now = new Date().toISOString()
 
-    const [{ error: updateError }, { data: action, error: actionError }] = await Promise.all([
+    const [
+      { error: updateError },
+      { data: action, error: actionError },
+      { error: dispatchError },
+    ] = await Promise.all([
+      // Phase 1 SD V2: también salta a en_reparto en la misma llamada,
+      // eliminando el paso intermedio de espera_despacho del admin.
       supabase
         .from('orders')
         .update({
@@ -49,6 +55,8 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
           customer_confirmed_at:     now,
           last_confirmation_attempt: now,
           confirmation_method:       'call',
+          normalized_status:         'en_reparto',
+          status_since:              now,
         })
         .eq('id', order_id),
 
@@ -62,6 +70,15 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
         })
         .select('id, created_at')
         .single(),
+
+      supabase
+        .from('agent_actions')
+        .insert({
+          order_id,
+          agent_id:    profile.id,
+          action_type: 'local_dispatched',
+          notes:       'Despachado automáticamente al confirmar — transporte local SD sin guía EFI',
+        }),
     ])
 
     if (updateError) {
@@ -72,8 +89,12 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
       console.error('[confirm-client] agent_actions insert error:', actionError)
       throw actionError
     }
+    if (dispatchError) {
+      // Solo auditoría — el pedido ya fue confirmado y despachado correctamente.
+      console.error('[confirm-client] local_dispatched insert error (non-fatal):', dispatchError)
+    }
 
-    console.log(`[sd-delivery/confirm-client] order=${order_id} by=${profile.id}`)
+    console.log(`[sd-delivery/confirm-client] order=${order_id} by=${profile.id} → en_reparto`)
 
     return NextResponse.json({
       action_id:    action!.id,

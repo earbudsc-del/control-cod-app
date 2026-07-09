@@ -41,6 +41,7 @@ export async function POST(
       confirmation_attempts:   result.confirmation_attempts,
       confirmation_status:     result.confirmation_status,
       confirmation_confidence: result.confirmation_confidence,
+      auto_dispatched:         result.auto_dispatched,
     })
   } catch (err) {
     console.error('[POST /api/orders/[id]/confirmation]', err)

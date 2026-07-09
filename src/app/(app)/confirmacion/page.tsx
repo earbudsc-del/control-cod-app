@@ -53,6 +53,7 @@ interface ConfirmResult {
   confirmation_attempts:   number
   confirmation_status:     string
   confirmation_confidence: string
+  auto_dispatched?:        boolean
 }
 
 interface AgentPerf {
@@ -883,7 +884,10 @@ export default function ConfirmacionPage() {
           cancelled:   'Pedido cancelado',
           no_coverage: 'Pedido marcado como Sin cobertura',
         }
-        showToast(TOAST_MSG[action] ?? 'Acción registrada', 'success')
+        const msg = action === 'confirmed' && data.auto_dispatched
+          ? '✓ Confirmado y despachado a mensajero SD'
+          : TOAST_MSG[action] ?? 'Acción registrada'
+        showToast(msg, 'success')
         if (action !== 'confirmed') {
           setTimeout(() => setOrders(prev => prev.filter(o => o.id !== orderId)), 1500)
         }
@@ -976,6 +980,62 @@ export default function ConfirmacionPage() {
                      text-gray-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
           <XCircle className="w-3 h-3 shrink-0" />Canceló
         </button>
+      </div>
+    )
+  }
+
+  function renderActionButtonsSD(order: Order) {
+    const terminal  = terminalMap[order.id]
+    const busy      = !!loadingRow[order.id]
+    const isPending = !terminal && (order.confirmation_status as string) === 'pending' && !order.tracking_number
+    if (busy)     return <Spinner className="w-4 h-4 text-indigo-500" />
+    if (terminal) return (
+      <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full
+                        ${TERMINAL[terminal]?.color ?? 'bg-gray-100 text-gray-600'}`}>
+        <CheckCircle2 className="w-3 h-3" />{TERMINAL[terminal]?.label ?? terminal}
+      </span>
+    )
+    if (!isPending) return null
+    const waUrl  = whatsAppUrl(order.customer_phone)
+    const telUrl = callUrl(order.customer_phone)
+    return (
+      <div className="grid grid-cols-2 gap-1">
+        <button onClick={() => postConfirmation(order.id, 'confirmed')}
+          className="flex items-center gap-1 bg-green-100 hover:bg-green-200
+                     text-green-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
+          <CheckCircle2 className="w-3 h-3 shrink-0" />Confirmó
+        </button>
+        <button onClick={() => postConfirmation(order.id, 'no_answer')}
+          className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
+                     text-amber-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
+          <PhoneMissed className="w-3 h-3 shrink-0" />No responde
+        </button>
+        <button onClick={() => postConfirmation(order.id, 'rescheduled')}
+          className="flex items-center gap-1 bg-blue-100 hover:bg-blue-200
+                     text-blue-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
+          <RotateCcw className="w-3 h-3 shrink-0" />Reprogramar
+        </button>
+        <button onClick={() => postConfirmation(order.id, 'cancelled')}
+          className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
+                     text-gray-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
+          <XCircle className="w-3 h-3 shrink-0" />Ya no desea
+        </button>
+        {waUrl && (
+          <a href={waUrl} target="_blank" rel="noopener noreferrer"
+             onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'whatsapp' }))}
+             className="flex items-center gap-1 bg-green-500 hover:bg-green-600
+                        text-white text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
+            <MessageCircle className="w-3 h-3 shrink-0" />WhatsApp
+          </a>
+        )}
+        {telUrl && (
+          <a href={telUrl}
+             onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'call' }))}
+             className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
+                        text-white text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
+            <Phone className="w-3 h-3 shrink-0" />Llamar
+          </a>
+        )}
       </div>
     )
   }
@@ -1532,10 +1592,10 @@ export default function ConfirmacionPage() {
                                       )}
                                     </div>
                                   )}
-                                  {renderActionButtons(order)}
+                                  {viewMode === 'santo_domingo' ? renderActionButtonsSD(order) : renderActionButtons(order)}
                                 </div>
                               ) : (
-                                renderActionButtons(order)
+                                viewMode === 'santo_domingo' ? renderActionButtonsSD(order) : renderActionButtons(order)
                               )}
                             </td>
 

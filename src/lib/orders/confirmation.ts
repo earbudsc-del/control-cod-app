@@ -1,11 +1,17 @@
 import type { createClient } from '@/lib/supabase/server'
+import { isSantoDomingoOrder } from '@/lib/alert-helpers'
 
 // Lógica compartida del flujo de confirmación de pedidos.
 // Usada por:
 //   - POST /api/orders/[id]/confirmation (acción manual del agente)
 //   - webhook de WhatsApp (Fase 6C — botones "Confirmar" / "No, gracias")
+//
+// SD V2: al confirmar un pedido de Santo Domingo sin guía EFI, se despacha
+// automáticamente (normalized_status='en_reparto') en la misma transacción,
+// sin importar qué canal confirmó (agente, mensajero, webhook o, a futuro,
+// Génesis) — todos pasan por esta función.
 
-export type ConfirmAction = 'confirmed' | 'no_answer' | 'wrong_number' | 'cancelled' | 'no_coverage'
+export type ConfirmAction = 'confirmed' | 'no_answer' | 'wrong_number' | 'cancelled' | 'no_coverage' | 'rescheduled'
 export type ConfirmMethod = 'call' | 'whatsapp' | 'other'
 
 type SupabaseClient = Awaited<ReturnType<typeof createClient>>
@@ -23,7 +29,7 @@ function computeConfidence(
     // whatsapp o other: duplicado baja a low
     return duplicateAlert ? 'low' : 'medium'
   }
-  if (action === 'no_answer') return newAttempts >= MAX_ATTEMPTS ? 'risky' : 'low'
+  if (action === 'no_answer' || action === 'rescheduled') return newAttempts >= MAX_ATTEMPTS ? 'risky' : 'low'
   // wrong_number, cancelled
   return 'risky'
 }
@@ -47,6 +53,7 @@ export type ApplyConfirmationActionResult =
       confirmation_attempts:   number
       confirmation_status:     string
       confirmation_confidence: string
+      auto_dispatched:         boolean
     }
   | { ok: false; reason: 'not_found' | 'not_pending' | 'terminal_status' | 'db_error' }
 
@@ -60,7 +67,7 @@ export async function applyConfirmationAction({
 }: ApplyConfirmationActionParams): Promise<ApplyConfirmationActionResult> {
   const { data: order } = await supabase
     .from('orders')
-    .select('confirmation_attempts, duplicate_alert, confirmation_status, normalized_status')
+    .select('confirmation_attempts, duplicate_alert, confirmation_status, normalized_status, city, province, customer_address, tracking_number')
     .eq('id', orderId)
     .single()
 
@@ -83,11 +90,21 @@ export async function applyConfirmationAction({
     confirmation_confidence:   confidence,
   }
 
+  // SD V2: pedido de Santo Domingo sin guía EFI → se despacha en el mismo update.
+  const isSdAutoDispatch =
+    action === 'confirmed' &&
+    !order.tracking_number &&
+    isSantoDomingoOrder(order.city, order.province, order.customer_address)
+
   switch (action) {
     case 'confirmed':
       updates.confirmation_status   = 'confirmed'
       updates.customer_confirmed    = true
       updates.customer_confirmed_at = new Date().toISOString()
+      if (isSdAutoDispatch) {
+        updates.normalized_status = 'en_reparto'
+        updates.status_since      = new Date().toISOString()
+      }
       break
     case 'no_answer':
       if (attempts >= MAX_ATTEMPTS) updates.confirmation_status = 'unreachable'
@@ -100,6 +117,9 @@ export async function applyConfirmationAction({
       break
     case 'no_coverage':
       updates.confirmation_status = 'no_coverage'
+      break
+    case 'rescheduled':
+      // confirmation_status permanece 'pending' para seguimiento
       break
   }
 
@@ -117,10 +137,28 @@ export async function applyConfirmationAction({
     })
   }
 
+  if (action === 'rescheduled' && userId) {
+    await supabase.from('agent_actions').insert({
+      order_id:    orderId,
+      agent_id:    userId,
+      action_type: 'rescheduled',
+    })
+  }
+
+  if (isSdAutoDispatch && userId) {
+    await supabase.from('agent_actions').insert({
+      order_id:    orderId,
+      agent_id:    userId,
+      action_type: 'local_dispatched',
+      notes:       'Auto-despachado al confirmar — pedido SD sin guía EFI',
+    })
+  }
+
   return {
     ok: true,
     confirmation_attempts:   attempts,
     confirmation_status:     (updates.confirmation_status as string | undefined) ?? 'pending',
     confirmation_confidence: confidence,
+    auto_dispatched:         isSdAutoDispatch,
   }
 }

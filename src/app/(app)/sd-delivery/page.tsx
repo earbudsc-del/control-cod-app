@@ -1,30 +1,37 @@
-'use client'
+﻿'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { Spinner } from '@/components/ui/spinner'
 import { whatsAppUrl, callUrl } from '@/lib/utils'
 import { isSantoDomingoOrder } from '@/lib/alert-helpers'
-import { groupOrdersByZone, SD_META_DIARIA, SD_TARIFA_PROMEDIO, ZONE_COLORS } from '@/lib/sd-zones'
+import { detectSdZone, getZoneById, SD_ZONES, SD_META_DIARIA, ZONE_COLORS } from '@/lib/sd-zones'
 import type { ZoneId } from '@/lib/sd-zones'
 import type { Order } from '@/types'
 import {
   MapPin, RefreshCw, MessageCircle, Phone,
   CheckCircle2, PhoneMissed, ExternalLink,
-  Search, TrendingUp, Package2,
-  CalendarDays, RotateCcw, FileText, X,
+  Search, Package2,
+  RotateCcw, FileText, X,
   ChevronLeft, ChevronRight, Truck, Navigation,
   UserCheck, Clock, Route, DollarSign, ChevronDown, ChevronUp,
+  MoreHorizontal, MapPinOff, Wallet, Target,
 } from 'lucide-react'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
+// Fase A (rediseño "Mi Ruta"): se elimina la navegación por tabs de micro-estado.
+// El mensajero trabaja sobre una sola pantalla agrupada por zona ("Mi Ruta") y un
+// historial unificado de cierres ("Historial"). El motor de estados internos
+// (DisplayState/computeDisplayState) NO cambia — solo deja de determinar a qué
+// pestaña pertenece un pedido y pasa a determinar únicamente el badge/label
+// amigable y qué botones se muestran en la tarjeta.
 
-type Tab        = 'nuevos' | 'confirmados' | 'en_ruta' | 'no_responden' | 'reprogramados' | 'entregados' | 'rutas'
+type View       = 'ruta' | 'historial'
 type DateFilter = 'hoy' | 'ayer' | 'todos'
 type OrderPool  = 'nuevo' | 'confirmado'
 type LocalAccion = string | undefined
 
-// Estados de visualización del card
+// Estados internos de un pedido (no se muestran tal cual al mensajero)
 type DisplayState =
   | 'nuevo'            // pool=nuevo, sin acción (necesita confirmación)
   | 'espera_despacho'  // pool=nuevo, client_confirmed (admin debe despachar)
@@ -33,7 +40,7 @@ type DisplayState =
   | 'no_responde'      // no_answer (cualquier pool)
   | 'reprogramado'     // rescheduled (cualquier pool)
   | 'entregado'
-  | 'cancelado'        // customer_declined — excluido de todos los tabs activos
+  | 'cancelado'        // customer_declined
 
 interface PooledOrder {
   order: Order
@@ -63,7 +70,7 @@ interface SdActionsResponse {
   rescheduledMeta: Record<string, { at: string; count: number }>
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Helpers de fecha/tiempo ───────────────────────────────────────────────────
 
 function rdMidnightUTC(offsetDays = 0): number {
   const rd    = new Date(Date.now() + offsetDays * 86_400_000)
@@ -88,16 +95,6 @@ function statusSinceMs(order: Order): number {
 
 function horasEnReparto(order: Order): number {
   return (Date.now() - statusSinceMs(order)) / (1000 * 60 * 60)
-}
-
-function tiempoLabel(order: Order): string {
-  const h    = horasEnReparto(order)
-  const dias = Math.floor(h / 24)
-  const hrs  = Math.floor(h % 24)
-  if (h < 1)      return 'Hace menos de 1h'
-  if (h < 24)     return `Hace ${Math.floor(h)}h`
-  if (dias === 1)  return hrs > 0 ? `Hace 1d ${hrs}h` : 'Hace 1 día'
-  return hrs > 0 ? `Hace ${dias}d ${hrs}h` : `Hace ${dias} días`
 }
 
 function criticalityLabel(order: Order): 'critico' | 'riesgo' | 'normal' {
@@ -186,6 +183,18 @@ function buildWaMsgNuevo(nombre: string, product: string | null | undefined): st
   ].join('\n')
 }
 
+function matchesQuery(o: Order, q: string): boolean {
+  return (
+    (o.tracking_number  ?? '').toLowerCase().includes(q) ||
+    (o.customer_name    ?? '').toLowerCase().includes(q) ||
+    (o.customer_phone   ?? '').toLowerCase().includes(q) ||
+    (o.customer_address ?? '').toLowerCase().includes(q) ||
+    (o.city             ?? '').toLowerCase().includes(q) ||
+    (o.order_number     ?? '').toLowerCase().includes(q)
+  )
+}
+
+// Motor de estados — SIN CAMBIOS respecto a la versión anterior.
 function computeDisplayState(pool: OrderPool, accion: LocalAccion, isDelivered: boolean): DisplayState {
   if (isDelivered) return 'entregado'
   if (accion === 'customer_declined') return 'cancelado'
@@ -202,35 +211,96 @@ function computeDisplayState(pool: OrderPool, accion: LocalAccion, isDelivered: 
   return 'confirmado_listo'
 }
 
-function computeTab(state: DisplayState): Tab {
-  if (state === 'nuevo')            return 'nuevos'
-  if (state === 'espera_despacho')  return 'confirmados'
-  if (state === 'confirmado_listo') return 'confirmados'
-  if (state === 'en_ruta')          return 'en_ruta'
-  if (state === 'no_responde')      return 'no_responden'
-  if (state === 'reprogramado')     return 'reprogramados'
-  return 'entregados'
+// Prioridad de acción — heurística simple (sin GPS, sin IA) para ordenar pedidos
+// dentro de una zona y decidir qué zona/pedido mostrar primero. 0 = actuable ahora
+// mismo (ya saliste, solo falta cobrar), 1 = listo para salir, 2 = requiere llamada
+// antes de poder avanzar (nuevo/no_responde/reprogramado/espera_despacho).
+// Es el mismo tipo de heurística que más adelante reemplazará un ranking real
+// (distancia + ubicación real por WhatsApp + tiempo de espera + COD) en Delivery
+// Copilot — hoy solo usa datos que ya existen.
+function actionPriorityTier(ds: DisplayState): number {
+  if (ds === 'en_ruta')          return 0
+  if (ds === 'confirmado_listo') return 1
+  return 2
+}
+
+// Etiqueta amigable + estilo por DisplayState — lo único que el mensajero ve.
+function friendlyBadge(ds: DisplayState, crit: 'critico' | 'riesgo' | 'normal', reprogCount?: number) {
+  switch (ds) {
+    case 'nuevo':
+      return { text: 'Por confirmar', cls: 'bg-blue-100 text-blue-700', Icon: Clock }
+    case 'espera_despacho':
+      return { text: 'Confirmado · en espera', cls: 'bg-purple-100 text-purple-700', Icon: UserCheck }
+    case 'confirmado_listo':
+      return crit === 'critico'
+        ? { text: 'Listo hace tiempo', cls: 'bg-red-100 text-red-700 animate-pulse', Icon: Route }
+        : { text: 'Listo para salir', cls: crit === 'riesgo' ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-600', Icon: Route }
+    case 'en_ruta':
+      return { text: 'En camino', cls: 'bg-teal-100 text-teal-700', Icon: Navigation }
+    case 'no_responde':
+      return { text: 'No respondió', cls: 'bg-amber-100 text-amber-700', Icon: PhoneMissed }
+    case 'reprogramado':
+      return { text: reprogCount && reprogCount > 1 ? `Reprogramado ×${reprogCount}` : 'Reprogramado', cls: 'bg-orange-100 text-orange-700', Icon: RotateCcw }
+    case 'entregado':
+      return { text: 'Entregado', cls: 'bg-green-100 text-green-700', Icon: CheckCircle2 }
+    case 'cancelado':
+      return { text: 'Ya no desea', cls: 'bg-red-100 text-red-700', Icon: X }
+  }
 }
 
 const PAGE_SIZE = 40
 
+// ── Agrupación por zona (Fase A: aplica a TODOS los pedidos activos) ──────────
+
+interface PooledZoneGroup {
+  zone:      ReturnType<typeof getZoneById>
+  items:     PooledOrder[]
+  codTotal:  number
+}
+
+function groupPooledByZone(pooled: PooledOrder[]): PooledZoneGroup[] {
+  const map = new Map<string, PooledOrder[]>()
+  for (const p of pooled) {
+    const zone = detectSdZone(p.order.city, p.order.province, p.order.customer_address)
+    const arr  = map.get(zone.id) ?? []
+    arr.push(p)
+    map.set(zone.id, arr)
+  }
+  const orderedIds: string[] = [...SD_ZONES.map(z => z.id), 'otro']
+  const groups: PooledZoneGroup[] = []
+  for (const id of orderedIds) {
+    const items = map.get(id)
+    if (!items || items.length === 0) continue
+    const zone = getZoneById(id)
+    groups.push({
+      zone,
+      items,
+      codTotal: items.reduce((s, { order }) => s + (order.cod_amount ?? 0), 0),
+    })
+  }
+  return groups
+}
+
 // ── Modales ───────────────────────────────────────────────────────────────────
 
 interface NoteModalProps {
-  orderId: string
-  name:    string
-  onSave:  (orderId: string, note: string) => Promise<void>
-  onClose: () => void
+  orderId:     string
+  name:        string
+  title?:      string
+  placeholder?: string
+  notePrefix?: string
+  onSave:      (orderId: string, note: string) => Promise<void>
+  onClose:     () => void
 }
 
-function NoteModal({ orderId, name, onSave, onClose }: NoteModalProps) {
+function NoteModal({ orderId, name, title, placeholder, notePrefix, onSave, onClose }: NoteModalProps) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
 
   async function handleSave() {
     if (!text.trim()) return
     setBusy(true)
-    await onSave(orderId, text.trim())
+    await onSave(orderId, `${notePrefix ?? ''}${text.trim()}`)
     setBusy(false)
     onClose()
   }
@@ -240,7 +310,7 @@ function NoteModal({ orderId, name, onSave, onClose }: NoteModalProps) {
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
       <div className="relative bg-white w-full md:max-w-md rounded-t-2xl md:rounded-xl shadow-xl p-5 space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="font-bold text-gray-900">Agregar nota</h3>
+          <h3 className="font-bold text-gray-900">{title ?? 'Agregar nota'}</h3>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500">
             <X className="w-4 h-4" />
           </button>
@@ -250,7 +320,7 @@ function NoteModal({ orderId, name, onSave, onClose }: NoteModalProps) {
           autoFocus
           value={text}
           onChange={e => setText(e.target.value)}
-          placeholder="Ej: Cliente fuera, reprogramar para mañana tarde…"
+          placeholder={placeholder ?? 'Ej: Cliente fuera, reprogramar para mañana tarde…'}
           rows={4}
           className="w-full border border-gray-200 rounded-xl p-3 text-sm resize-none
                      focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400"
@@ -332,57 +402,151 @@ function ReprogramarModal({ orderId, name, onSave, onClose }: ReprogramarModalPr
   )
 }
 
-// ── Card móvil ────────────────────────────────────────────────────────────────
+interface MasSheetCtx {
+  orderId: string
+  name:    string
+  ds:      DisplayState
+  pool:    OrderPool
+}
+
+interface MasSheetProps {
+  ctx: MasSheetCtx
+  onClose: () => void
+  onNoAnswer: (orderId: string) => void
+  onReprogramar: (orderId: string, name: string) => void
+  onDeclinado: (orderId: string) => void
+  onDireccionIncorrecta: (orderId: string, name: string) => void
+  onOtroMotivo: (orderId: string, name: string) => void
+}
+
+function MasSheet({ ctx, onClose, onNoAnswer, onReprogramar, onDeclinado, onDireccionIncorrecta, onOtroMotivo }: MasSheetProps) {
+  const { orderId, name, ds } = ctx
+  const canNoAnswer    = ds === 'nuevo' || ds === 'confirmado_listo' || ds === 'en_ruta'
+  const canReprogramar = ds === 'en_ruta'
+  const canDeclinar    = ds === 'en_ruta'
+  const canDireccion   = ds !== 'entregado' && ds !== 'espera_despacho' && ds !== 'cancelado'
+
+  function pick(fn: () => void) {
+    fn()
+    onClose()
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative bg-white w-full max-w-lg rounded-t-2xl shadow-xl p-3
+                      pb-[calc(env(safe-area-inset-bottom,_0px)_+_12px)]">
+        <div className="flex items-center justify-between px-2 pt-1 pb-2">
+          <div className="min-w-0">
+            <h3 className="font-bold text-gray-900 text-sm">Más opciones</h3>
+            <p className="text-xs text-gray-500 truncate">{name || 'Pedido'}</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 shrink-0">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="space-y-0.5">
+          {canNoAnswer && (
+            <button onClick={() => pick(() => onNoAnswer(orderId))}
+              className="w-full flex items-center gap-3 px-3 py-3.5 rounded-xl active:bg-amber-50 text-left">
+              <PhoneMissed className="w-4 h-4 text-amber-600 shrink-0" />
+              <span className="text-sm font-medium text-gray-800">No respondió</span>
+            </button>
+          )}
+          {canReprogramar && (
+            <button onClick={() => pick(() => onReprogramar(orderId, name))}
+              className="w-full flex items-center gap-3 px-3 py-3.5 rounded-xl active:bg-indigo-50 text-left">
+              <RotateCcw className="w-4 h-4 text-indigo-600 shrink-0" />
+              <span className="text-sm font-medium text-gray-800">Reprogramar</span>
+            </button>
+          )}
+          {canDeclinar && (
+            <button onClick={() => pick(() => onDeclinado(orderId))}
+              className="w-full flex items-center gap-3 px-3 py-3.5 rounded-xl active:bg-red-50 text-left">
+              <X className="w-4 h-4 text-red-600 shrink-0" />
+              <span className="text-sm font-medium text-gray-800">Ya no desea</span>
+            </button>
+          )}
+          {canDireccion && (
+            <button onClick={() => pick(() => onDireccionIncorrecta(orderId, name))}
+              className="w-full flex items-center gap-3 px-3 py-3.5 rounded-xl active:bg-orange-50 text-left">
+              <MapPinOff className="w-4 h-4 text-orange-600 shrink-0" />
+              <span className="text-sm font-medium text-gray-800">Dirección incorrecta</span>
+            </button>
+          )}
+          <button onClick={() => pick(() => onOtroMotivo(orderId, name))}
+            className="w-full flex items-center gap-3 px-3 py-3.5 rounded-xl active:bg-gray-50 text-left">
+            <FileText className="w-4 h-4 text-gray-500 shrink-0" />
+            <span className="text-sm font-medium text-gray-800">Otro motivo / nota</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Card única (móvil y desktop) ──────────────────────────────────────────────
+
+// Fase A: la "conversación" con el cliente es un link a WhatsApp externo (wa.me).
+// Cuando exista el Inbox interno (Delivery Copilot V1), esta es la ÚNICA función
+// que debe cambiar — el resto de la UI ya llama a esto sin saber el canal real.
+function getConversationLink(order: Order, pool: OrderPool): string | null {
+  const nombre = order.customer_name ?? ''
+  const msg = pool === 'nuevo'
+    ? buildWaMsgNuevo(nombre, order.product_summary)
+    : buildWaMsg(nombre, order.product_summary)
+  return whatsAppUrl(order.customer_phone, msg)
+}
 
 interface SdCardProps {
-  order:             Order
-  pool:              OrderPool
-  accion:            LocalAccion
-  busy:              boolean
-  isDelivered:       boolean
-  onWA:              () => void
-  onLlamar:          () => void
-  onConfirmarRuta:   () => void
-  onClienteConfirma: () => void
-  onNoAnswer:        () => void
-  onEntregado:       () => void
-  onReprogramar:     () => void
-  onNota:            () => void
-  onDeclinado:       () => void
-  onDispatchLocal:   () => void
+  order:              Order
+  pool:               OrderPool
+  accion:             LocalAccion
+  busy:               boolean
+  isProximaParada:    boolean
+  onAbrirConversacion: () => void
+  onLlamar:           () => void
+  onClienteConfirma:  () => void
+  onConfirmarRuta:    () => void
+  onDespacharLocal:   () => void
+  onMarcarEntregado:  () => void
+  onVolverARuta:      () => void
+  onAbrirMas:         () => void
   reprogramadoMeta?: { at: string; count: number }
 }
 
 function SdCard({
-  order, pool, accion, busy, isDelivered,
-  onWA, onLlamar, onConfirmarRuta, onClienteConfirma, onNoAnswer, onEntregado, onReprogramar, onNota, onDeclinado, onDispatchLocal, reprogramadoMeta,
+  order, pool, accion, busy, isProximaParada,
+  onAbrirConversacion, onLlamar, onClienteConfirma, onConfirmarRuta, onDespacharLocal, onMarcarEntregado, onVolverARuta, onAbrirMas,
+  reprogramadoMeta,
 }: SdCardProps) {
-  const nombre  = order.customer_name ?? ''
-  const waMsg   = pool === 'nuevo'
-    ? buildWaMsgNuevo(nombre, order.product_summary)
-    : buildWaMsg(nombre, order.product_summary)
-  const waUrl    = whatsAppUrl(order.customer_phone, waMsg)
+  const nombre   = order.customer_name ?? ''
+  const conversationUrl = getConversationLink(order, pool)
   const telUrl   = callUrl(order.customer_phone)
   const hasPhone = !!order.customer_phone
+  const ds       = computeDisplayState(pool, accion, false)
   const crit     = criticalityLabel(order)
-  const ds       = computeDisplayState(pool, accion, isDelivered)
+  const badge    = friendlyBadge(ds, crit, reprogramadoMeta?.count)
 
   const ubicacion = order.city
     || order.province
     || (order.customer_address ? order.customer_address.slice(0, 24) : null)
 
-  const cardBg =
-    ds === 'entregado'        ? 'bg-green-50/40'
-    : ds === 'en_ruta'        ? 'bg-teal-50/30'
-    : ds === 'nuevo'          ? 'bg-blue-50/30'
-    : ds === 'espera_despacho'? 'bg-purple-50/20'
-    : ds === 'reprogramado'   ? 'bg-orange-50/30'
-    : crit === 'critico'      ? 'bg-red-50/20'
-    : crit === 'riesgo'       ? 'bg-orange-50/20'
-    : 'bg-white'
-
   return (
-    <div className={`p-4 border-b border-teal-100 ${cardBg}`}>
+    <div className={`p-4 rounded-2xl bg-white transition-shadow ${
+      isProximaParada
+        ? 'border-2 border-teal-500 shadow-md shadow-teal-100'
+        : 'border border-gray-100 shadow-sm'
+    }`}>
+
+      {/* "Próxima parada": heurística simple (estado + tiempo esperando), sin GPS/IA —
+          acostumbra la UI al concepto de "un cliente recomendado" para Delivery Copilot. */}
+      {isProximaParada && (
+        <div className="flex items-center gap-1 text-[10px] font-black text-teal-600 uppercase tracking-wide mb-2">
+          <Target className="w-3 h-3" />Próxima parada
+        </div>
+      )}
 
       {/* Cabecera: identificador + badge de estado */}
       <div className="flex items-start justify-between gap-2 mb-2">
@@ -390,55 +554,15 @@ function SdCard({
           <p className="font-mono text-sm font-bold text-gray-900 truncate">
             {order.tracking_number ?? order.order_number ?? '—'}
           </p>
-          {order.tracking_number && order.order_number && (
-            <p className="font-mono text-[10px] text-gray-400 mt-0.5">{order.order_number}</p>
-          )}
           {(() => { const { relative, absolute } = formatOrderDate(order, pool); return (
             <p className="text-[10px] text-gray-400 mt-0.5" title={absolute}>
               <span className="font-medium">{relative}</span>
-              <span className="ml-1 opacity-70">· {absolute}</span>
             </p>
           ); })()}
         </div>
-        {ds === 'entregado' && (
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700 shrink-0">
-            <CheckCircle2 className="inline w-3 h-3 mr-0.5" />Entregado
-          </span>
-        )}
-        {ds === 'en_ruta' && (
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 shrink-0">
-            <Navigation className="inline w-3 h-3 mr-0.5" />En ruta
-          </span>
-        )}
-        {ds === 'no_responde' && (
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 shrink-0">
-            <PhoneMissed className="inline w-3 h-3 mr-0.5" />No responde
-            {pool === 'nuevo' && <span className="ml-1 opacity-70">· pendiente conf.</span>}
-          </span>
-        )}
-        {ds === 'reprogramado' && (
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 shrink-0">
-            <RotateCcw className="inline w-3 h-3 mr-0.5" />Reprogramado
-          </span>
-        )}
-        {ds === 'nuevo' && (
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 shrink-0">
-            <Clock className="inline w-3 h-3 mr-0.5" />Por confirmar
-          </span>
-        )}
-        {ds === 'espera_despacho' && (
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 shrink-0">
-            <UserCheck className="inline w-3 h-3 mr-0.5" />Listo · esperando despacho
-          </span>
-        )}
-        {ds === 'confirmado_listo' && (
-          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0
-            ${crit === 'critico' ? 'bg-red-100 text-red-700 animate-pulse'
-              : crit === 'riesgo'  ? 'bg-orange-100 text-orange-700'
-              : 'bg-gray-100 text-gray-500'}`}>
-            {tiempoLabel(order)}
-          </span>
-        )}
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1 whitespace-nowrap ${badge.cls}`}>
+          <badge.Icon className="w-3 h-3" />{badge.text}
+        </span>
       </div>
 
       {/* Cliente */}
@@ -453,14 +577,12 @@ function SdCard({
         )}
       </div>
 
-      {/* Producto — visible para nuevos */}
       {ds === 'nuevo' && order.product_summary && (
         <p className="text-xs text-blue-700 font-medium mt-1 truncate" title={order.product_summary}>
           📦 {order.product_summary.slice(0, 55)}
         </p>
       )}
 
-      {/* Ubicación */}
       {ubicacion && (
         <div className="flex items-center gap-1 mt-1.5 text-xs text-gray-500">
           <MapPin className="w-3 h-3 shrink-0 text-teal-500" />
@@ -481,211 +603,145 @@ function SdCard({
         </p>
       )}
 
-      {order.delivery_attempts > 0 && ds !== 'entregado' && (
-        <p className="text-[11px] text-amber-600 font-medium mt-1">
-          {order.delivery_attempts} intento{order.delivery_attempts > 1 ? 's' : ''} previos
-        </p>
-      )}
+      {reprogramadoMeta?.at && ds === 'reprogramado' && (() => {
+        const { relative, absolute } = formatRescheduleDate(reprogramadoMeta.at)
+        return (
+          <p className="text-[10px] text-orange-500/80 mt-1">
+            <span className="font-medium">{relative}</span>
+            <span className="ml-1 opacity-70">· {absolute}</span>
+          </p>
+        )
+      })()}
 
-      {/* WA + Llamar — visibles excepto entregado y espera_despacho */}
-      {hasPhone && ds !== 'entregado' && ds !== 'espera_despacho' && !busy && (
-        <div className="flex gap-2 mt-3">
-          {waUrl && (
-            <a href={waUrl} target="_blank" rel="noopener noreferrer" onClick={onWA}
-               className="flex-1 flex items-center justify-center gap-1.5
-                          bg-green-500 text-white py-2.5 rounded-xl text-sm font-semibold
-                          active:bg-green-700 transition-colors">
-              <MessageCircle className="w-4 h-4" />WhatsApp
+      {/* Acciones principales */}
+      {busy ? (
+        <div className="mt-3"><Spinner className="w-5 h-5 text-teal-500" /></div>
+      ) : (
+        <div className="mt-3 flex items-stretch gap-2">
+          {/* WhatsApp y Llamar: las 2 herramientas principales del mensajero — nunca se ocultan.
+              El <a href> se mantiene (no window.open) porque es lo que abre confiablemente la
+              app de WhatsApp en móvil vía el esquema wa.me. */}
+          {hasPhone && conversationUrl && (
+            <a href={conversationUrl} target="_blank" rel="noopener noreferrer" onClick={onAbrirConversacion}
+               className="flex items-center justify-center bg-green-500 active:bg-green-700
+                          text-white min-h-[44px] min-w-[44px] rounded-xl transition-colors shrink-0">
+              <MessageCircle className="w-4 h-4" />
             </a>
           )}
-          {telUrl && (
+          {hasPhone && telUrl && (
             <a href={telUrl} onClick={onLlamar}
-               className="flex-1 flex items-center justify-center gap-1.5
-                          bg-blue-500 text-white py-2.5 rounded-xl text-sm font-semibold
-                          active:bg-blue-700 transition-colors">
-              <Phone className="w-4 h-4" />Llamar
+               className="flex items-center justify-center bg-blue-500 active:bg-blue-700
+                          text-white min-h-[44px] min-w-[44px] rounded-xl transition-colors shrink-0">
+              <Phone className="w-4 h-4" />
             </a>
+          )}
+
+          {ds === 'nuevo' && (
+            <button onClick={onClienteConfirma}
+              className="flex-1 flex items-center justify-center gap-2 bg-blue-600 active:bg-blue-700
+                         text-white text-sm font-bold py-2.5 min-h-[44px] rounded-xl transition-colors min-w-0">
+              <UserCheck className="w-4 h-4 shrink-0" /><span className="truncate">Cliente confirma</span>
+            </button>
+          )}
+          {ds === 'espera_despacho' && (
+            <button onClick={onDespacharLocal}
+              className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 active:bg-indigo-700
+                         text-white text-sm font-bold py-2.5 min-h-[44px] rounded-xl transition-colors min-w-0">
+              <Truck className="w-4 h-4 shrink-0" /><span className="truncate">Despachar</span>
+            </button>
+          )}
+          {ds === 'confirmado_listo' && (
+            <button onClick={onConfirmarRuta}
+              className="flex-1 flex items-center justify-center gap-2 bg-teal-500 active:bg-teal-600
+                         text-white text-sm font-bold py-2.5 min-h-[44px] rounded-xl transition-colors min-w-0">
+              <Truck className="w-4 h-4 shrink-0" /><span className="truncate">Confirmar ruta</span>
+            </button>
+          )}
+          {ds === 'en_ruta' && (
+            <button onClick={onMarcarEntregado}
+              className="flex-1 flex items-center justify-center gap-2 bg-emerald-500 active:bg-emerald-600
+                         text-white text-sm font-bold py-2.5 min-h-[44px] rounded-xl transition-colors min-w-0">
+              <CheckCircle2 className="w-4 h-4 shrink-0" /><span className="truncate">Cliente pagó</span>
+            </button>
+          )}
+          {ds === 'reprogramado' && pool === 'confirmado' && (
+            <>
+              <button onClick={onVolverARuta}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-teal-500 active:bg-teal-600
+                           text-white text-xs font-bold py-2.5 min-h-[44px] rounded-xl transition-colors min-w-0">
+                <Truck className="w-3.5 h-3.5 shrink-0" /><span className="truncate">Volver a ruta</span>
+              </button>
+              <button onClick={onMarcarEntregado}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-500 active:bg-emerald-600
+                           text-white text-xs font-bold py-2.5 min-h-[44px] rounded-xl transition-colors min-w-0">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /><span className="truncate">Pagó</span>
+              </button>
+            </>
+          )}
+          {(ds === 'reprogramado' || ds === 'no_responde') && pool === 'nuevo' && (
+            <button onClick={onClienteConfirma}
+              className="flex-1 flex items-center justify-center gap-1.5 bg-blue-100 active:bg-blue-200
+                         text-blue-700 text-xs font-semibold py-2.5 min-h-[44px] rounded-xl transition-colors min-w-0">
+              <UserCheck className="w-3.5 h-3.5 shrink-0" /><span className="truncate">Confirma ahora</span>
+            </button>
+          )}
+
+          {ds !== 'espera_despacho' && (
+            <button onClick={onAbrirMas}
+              className="flex items-center justify-center bg-gray-100 active:bg-gray-200
+                         text-gray-600 min-h-[44px] min-w-[44px] rounded-xl transition-colors shrink-0">
+              <MoreHorizontal className="w-4 h-4" />
+            </button>
           )}
         </div>
       )}
 
-      {/* Acciones según displayState */}
-      <div className="mt-3">
-        {ds === 'entregado' ? (
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold
-                           px-3 py-1.5 rounded-full bg-green-100 text-green-700">
-            <CheckCircle2 className="w-3.5 h-3.5" />Entregado — registrado
-          </span>
-
-        ) : busy ? (
-          <Spinner className="w-5 h-5 text-teal-500" />
-
-        ) : ds === 'nuevo' ? (
-          <div className="space-y-2">
-            <button
-              onClick={onClienteConfirma}
-              className="w-full flex items-center justify-center gap-2
-                         bg-blue-600 active:bg-blue-700 text-white
-                         text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
-              <UserCheck className="w-5 h-5" />Cliente confirma
-            </button>
-            <button onClick={onNoAnswer}
-              className="w-full flex items-center justify-center gap-1.5
-                         bg-amber-100 active:bg-amber-200 text-amber-700
-                         text-sm font-medium py-3 min-h-[44px] rounded-xl transition-colors">
-              <PhoneMissed className="w-4 h-4" />No responde
-            </button>
-          </div>
-
-        ) : ds === 'espera_despacho' ? (
-          <button
-            onClick={onDispatchLocal}
-            className="w-full flex items-center justify-center gap-2
-                       bg-indigo-600 active:bg-indigo-700 text-white
-                       text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
-            <Truck className="w-5 h-5" />Despachar local
-          </button>
-
-        ) : ds === 'confirmado_listo' ? (
-          <div className="space-y-2">
-            <button
-              onClick={onConfirmarRuta}
-              className="w-full flex items-center justify-center gap-2
-                         bg-teal-500 active:bg-teal-600 text-white
-                         text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
-              <Truck className="w-5 h-5" />Confirmar ruta
-            </button>
-            <div className="grid grid-cols-2 gap-2">
-              <button onClick={onNoAnswer}
-                className="flex items-center justify-center gap-1.5
-                           bg-amber-100 active:bg-amber-200 text-amber-700
-                           text-sm font-medium py-3 min-h-[44px] rounded-xl transition-colors">
-                <PhoneMissed className="w-4 h-4" />No responde
-              </button>
-              <button onClick={onNota}
-                className="flex items-center justify-center gap-1.5
-                           bg-gray-100 active:bg-gray-200 text-gray-600
-                           text-sm font-medium py-3 min-h-[44px] rounded-xl transition-colors">
-                <FileText className="w-4 h-4" />Nota
-              </button>
-            </div>
-          </div>
-
-        ) : ds === 'en_ruta' ? (
-          <div className="space-y-2">
-            <button
-              onClick={onEntregado}
-              className="w-full flex items-center justify-center gap-2
-                         bg-emerald-500 active:bg-emerald-600 text-white
-                         text-sm font-bold py-3.5 min-h-[52px] rounded-xl transition-colors">
-              <CheckCircle2 className="w-5 h-5" />Marcar entregado
-            </button>
-            <div className="grid grid-cols-2 gap-2">
-              <button onClick={onNoAnswer}
-                className="flex items-center justify-center gap-1
-                           bg-amber-100 active:bg-amber-200 text-amber-700
-                           text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
-                <PhoneMissed className="w-3.5 h-3.5" /><span>No resp.</span>
-              </button>
-              <button onClick={onReprogramar}
-                className="flex items-center justify-center gap-1
-                           bg-indigo-100 active:bg-indigo-200 text-indigo-700
-                           text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
-                <RotateCcw className="w-3.5 h-3.5" /><span>Reprog.</span>
-              </button>
-              <button onClick={onDeclinado}
-                className="flex items-center justify-center gap-1
-                           bg-red-100 active:bg-red-200 text-red-700
-                           text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
-                <X className="w-3.5 h-3.5" /><span>No desea</span>
-              </button>
-              <button onClick={onNota}
-                className="flex items-center justify-center gap-1
-                           bg-gray-100 active:bg-gray-200 text-gray-600
-                           text-xs font-medium py-3 min-h-[44px] rounded-xl transition-colors">
-                <FileText className="w-3.5 h-3.5" /><span>Nota</span>
-              </button>
-            </div>
-          </div>
-
-        ) : ds === 'no_responde' ? (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="inline-flex items-center gap-1.5 text-xs font-semibold
-                               px-3 py-1.5 rounded-full bg-amber-100 text-amber-700">
-                <PhoneMissed className="w-3.5 h-3.5" />No responde
-                {pool === 'nuevo' && <span className="text-[10px] opacity-70 ml-1">· pendiente conf.</span>}
-              </span>
-              <button onClick={onNota}
-                className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-teal-600 ml-2">
-                <FileText className="w-3 h-3" />Nota
-              </button>
-            </div>
-            {pool === 'nuevo' && (
-              <button
-                onClick={onClienteConfirma}
-                className="w-full flex items-center justify-center gap-2
-                           bg-blue-100 active:bg-blue-200 text-blue-700
-                           text-xs font-semibold py-2.5 rounded-xl transition-colors">
-                <UserCheck className="w-3.5 h-3.5" />El cliente llamó y confirma
-              </button>
-            )}
-          </div>
-        ) : ds === 'reprogramado' ? (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold
-                                 px-3 py-1.5 rounded-full bg-orange-100 text-orange-700">
-                  <RotateCcw className="w-3.5 h-3.5" />Reprogramado
-                  {reprogramadoMeta && reprogramadoMeta.count > 1 && (
-                    <span className="ml-1 opacity-70">×{reprogramadoMeta.count}</span>
-                  )}
-                </span>
-                {reprogramadoMeta?.at && (() => {
-                  const { relative, absolute } = formatRescheduleDate(reprogramadoMeta.at)
-                  return (
-                    <p className="text-[10px] text-orange-500/80 mt-0.5">
-                      <span className="font-medium">{relative}</span>
-                      <span className="ml-1 opacity-70">· {absolute}</span>
-                    </p>
-                  )
-                })()}
-              </div>
-              <button onClick={onNota}
-                className="flex items-center gap-1 text-[11px] text-gray-500 hover:text-teal-600 ml-2">
-                <FileText className="w-3 h-3" />Nota
-              </button>
-            </div>
-            {pool === 'confirmado' ? (
-              <div className="grid grid-cols-2 gap-2">
-                <button onClick={onConfirmarRuta}
-                  className="flex items-center justify-center gap-1.5
-                             bg-teal-500 active:bg-teal-600 text-white
-                             text-xs font-semibold py-2.5 min-h-[40px] rounded-xl transition-colors">
-                  <Truck className="w-3.5 h-3.5" />Volver a ruta
-                </button>
-                <button onClick={onEntregado}
-                  className="flex items-center justify-center gap-1.5
-                             bg-emerald-500 active:bg-emerald-600 text-white
-                             text-xs font-semibold py-2.5 min-h-[40px] rounded-xl transition-colors">
-                  <CheckCircle2 className="w-3.5 h-3.5" />Entregado
-                </button>
-              </div>
-            ) : (
-              <button onClick={onClienteConfirma}
-                className="w-full flex items-center justify-center gap-2
-                           bg-blue-100 active:bg-blue-200 text-blue-700
-                           text-xs font-semibold py-2.5 rounded-xl transition-colors">
-                <UserCheck className="w-3.5 h-3.5" />El cliente llamó y confirma
-              </button>
-            )}
-          </div>
-        ) : null}
+      <div className="mt-2.5 flex items-center justify-end">
+        <Link href={`/orders/${order.id}`}
+          className="inline-flex items-center gap-1 text-xs font-medium text-teal-600 hover:text-teal-800">
+          <ExternalLink className="w-3 h-3" />Ver detalle
+        </Link>
       </div>
+    </div>
+  )
+}
 
-      {/* Ver detalle */}
-      <div className="mt-3 flex items-center justify-end">
+// ── Fila de historial (solo lectura) ──────────────────────────────────────────
+
+function HistorialRow({ order, kind, at }: { order: Order; kind: 'entregado' | 'no_desea'; at: string }) {
+  const isEntregado = kind === 'entregado'
+  const ubicacion = order.city || order.province
+  return (
+    <div className={`p-4 border-b border-gray-50 ${isEntregado ? 'bg-green-50/20' : 'bg-red-50/10'}`}>
+      <div className="flex items-start justify-between gap-2 mb-1">
+        <p className="font-mono text-sm font-bold text-gray-900 truncate">
+          {order.tracking_number ?? order.order_number ?? '—'}
+        </p>
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1
+          ${isEntregado ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+          {isEntregado ? <CheckCircle2 className="w-3 h-3" /> : <X className="w-3 h-3" />}
+          {isEntregado ? 'Entregado' : 'Ya no desea'}
+        </span>
+      </div>
+      <p className="font-semibold text-gray-900 text-base leading-tight">{order.customer_name ?? '—'}</p>
+      <p className="font-mono text-sm text-gray-500">{order.customer_phone || '—'}</p>
+      <div className="flex items-center gap-2 mt-1 flex-wrap">
+        {ubicacion && (
+          <span className="flex items-center gap-1 text-xs text-gray-500">
+            <MapPin className="w-3 h-3 shrink-0 text-gray-400" />{ubicacion}
+          </span>
+        )}
+        {order.cod_amount != null && order.cod_amount > 0 && (
+          <span className="text-xs font-black text-emerald-700 bg-emerald-50 border border-emerald-200
+                           px-2 py-0.5 rounded-lg tabular-nums">
+            RD${order.cod_amount.toLocaleString('es-DO')}
+          </span>
+        )}
+        <span className="text-[11px] text-gray-400">
+          {new Date(at).toLocaleString('es-DO', { timeZone: 'America/Santo_Domingo', day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true })}
+        </span>
+      </div>
+      <div className="mt-2.5 flex items-center justify-end">
         <Link href={`/orders/${order.id}`}
           className="inline-flex items-center gap-1 text-xs font-medium text-teal-600 hover:text-teal-800">
           <ExternalLink className="w-3 h-3" />Ver detalle
@@ -706,16 +762,19 @@ export default function SdDeliveryPage() {
   const [loading, setLoading]           = useState(true)
   const [lastRefresh, setLastRefresh]   = useState<Date>(new Date())
 
-  const [activeTab, setActiveTab]       = useState<Tab>('nuevos')
+  const [view, setView]                 = useState<View>('ruta')
   const [dateFilter, setDateFilter]     = useState<DateFilter>('hoy')
   const [searchQuery, setSearchQuery]   = useState('')
+  const [searchOpen, setSearchOpen]     = useState(false)
   const [currentPage, setCurrentPage]   = useState(1)
+  const [collapsedZones, setCollapsedZones] = useState<Set<string>>(new Set())
 
   const [actionMap, setActionMap]       = useState<Record<string, string>>({})
   const [confirmedOrderCache, setConfirmedOrderCache] = useState<Map<string, Order>>(new Map())
   const [loadingRow, setLoadingRow]     = useState<Record<string, boolean>>({})
-  const [noteModal, setNoteModal]       = useState<{ orderId: string; name: string } | null>(null)
+  const [noteModal, setNoteModal]       = useState<{ orderId: string; name: string; mode: 'nota' | 'direccion' } | null>(null)
   const [reModal, setReModal]           = useState<{ orderId: string; name: string } | null>(null)
+  const [masSheet, setMasSheet]         = useState<MasSheetCtx | null>(null)
   const [reprogramadoMeta, setReprogramadoMeta] = useState<Record<string, { at: string; count: number }>>({})
   const [toast, setToast]               = useState<{ msg: string; ok: boolean } | null>(null)
 
@@ -910,7 +969,9 @@ export default function SdDeliveryPage() {
     })
   }, [allPooled, dateFilter, confirmedOrderCache, sdPendingDispatch])
 
-  // ── Listas por tab ─────────────────────────────────────────────────────────
+  // ── Listas por displayState — invariante de fuente de datos preservada ─────
+  // Nuevo/espera_despacho respetan el filtro de fecha; en_ruta/no_responde/
+  // reprogramado/confirmado_listo son inmunes (ver CLAUDE.md, sesiones 4/5/9).
 
   const nuevosList = useMemo(
     () => filteredPooled.filter(({ order, pool }) =>
@@ -919,8 +980,6 @@ export default function SdDeliveryPage() {
     [filteredPooled, actionMap],
   )
 
-  // Confirmados/Listos tab: only pre-dispatch orders (client confirmed, admin hasn't dispatched).
-  // confirmado_listo orders appear exclusively in Rutas so they visibly leave this tab after dispatch.
   const confirmadosList = useMemo(
     () => filteredPooled.filter(({ order, pool }) =>
       computeDisplayState(pool, actionMap[order.id], false) === 'espera_despacho',
@@ -928,9 +987,6 @@ export default function SdDeliveryPage() {
     [filteredPooled, actionMap],
   )
 
-  // Uses allPooled (not filteredPooled) so orders in-route are always visible regardless of
-  // their dispatch date. An order confirmed for route must stay in "En ruta" even if its
-  // status_since is from a previous day or the date filter was changed between sessions.
   const enRutaList = useMemo(
     () => allPooled.filter(({ order, pool }) =>
       computeDisplayState(pool, actionMap[order.id], false) === 'en_ruta',
@@ -938,8 +994,6 @@ export default function SdDeliveryPage() {
     [allPooled, actionMap],
   )
 
-  // Uses allPooled (not filteredPooled) so no-response orders persist regardless of date filter,
-  // matching the same immunity-from-date-filter guarantee as enRutaList and reprogramadosList.
   const noRespondenList = useMemo(
     () => allPooled.filter(({ order, pool }) =>
       computeDisplayState(pool, actionMap[order.id], false) === 'no_responde',
@@ -947,8 +1001,6 @@ export default function SdDeliveryPage() {
     [allPooled, actionMap],
   )
 
-  // Uses allPooled (not filteredPooled) so rescheduled orders persist regardless of date filter,
-  // matching the same immunity-from-date-filter guarantee as enRutaList.
   const reprogramadosList = useMemo(
     () => allPooled.filter(({ order, pool }) =>
       computeDisplayState(pool, actionMap[order.id], false) === 'reprogramado',
@@ -956,12 +1008,93 @@ export default function SdDeliveryPage() {
     [allPooled, actionMap],
   )
 
-  // Rutas: only confirmado_listo orders — no date filter so all pending routes are visible
   const rutasList = useMemo(
     () => allPooled.filter(({ order, pool }) =>
       computeDisplayState(pool, actionMap[order.id], deliveredDbIds.has(order.id)) === 'confirmado_listo',
     ),
     [allPooled, actionMap, deliveredDbIds],
+  )
+
+  // Unión de todas las listas activas — es exactamente lo mismo que se mostraba
+  // antes repartido en 4 tabs + subfiltros, ahora presentado en una sola vista
+  // agrupada por zona ("Mi Ruta").
+  const activeList = useMemo(
+    () => [...nuevosList, ...confirmadosList, ...rutasList, ...enRutaList, ...noRespondenList, ...reprogramadosList],
+    [nuevosList, confirmadosList, rutasList, enRutaList, noRespondenList, reprogramadosList],
+  )
+
+  const searchedActiveList = useMemo(() => {
+    if (!searchQuery.trim()) return activeList
+    const q = searchQuery.toLowerCase()
+    return activeList.filter(({ order }) => matchesQuery(order, q))
+  }, [activeList, searchQuery])
+
+  // Orden de prioridad dentro de cada zona: en_ruta primero, confirmado_listo después,
+  // el resto (nuevo/no_responde/reprogramado/espera_despacho) al final. Dentro de cada
+  // grupo, el que lleva más tiempo esperando va primero. Heurística simple (sin GPS,
+  // sin IA) — el mismo lugar donde más adelante entraría un ranking real de Delivery
+  // Copilot sin tener que tocar el resto de la pantalla.
+  const prioritizedActiveList = useMemo(() => {
+    return [...searchedActiveList].sort((a, b) => {
+      const dsA = computeDisplayState(a.pool, actionMap[a.order.id], false)
+      const dsB = computeDisplayState(b.pool, actionMap[b.order.id], false)
+      const tierDiff = actionPriorityTier(dsA) - actionPriorityTier(dsB)
+      if (tierDiff !== 0) return tierDiff
+      const waitA = Date.now() - orderDateMs(a.order, a.pool)
+      const waitB = Date.now() - orderDateMs(b.order, b.pool)
+      return waitB - waitA
+    })
+  }, [searchedActiveList, actionMap])
+
+  // Zonas ordenadas por prioridad operativa: zonas con trabajo actuable ahora
+  // (en_ruta/confirmado_listo) primero, zonas donde solo quedan llamadas pendientes
+  // al final. group.items[0] ya es el pedido de mayor prioridad de esa zona porque
+  // prioritizedActiveList llega pre-ordenado (el orden se preserva al agrupar).
+  const zoneGroups = useMemo(() => {
+    const groups = groupPooledByZone(prioritizedActiveList)
+    const zoneTier = (g: PooledZoneGroup) => g.items.length
+      ? actionPriorityTier(computeDisplayState(g.items[0].pool, actionMap[g.items[0].order.id], false))
+      : 2
+    return [...groups].sort((a, b) => {
+      const tierDiff = zoneTier(a) - zoneTier(b)
+      if (tierDiff !== 0) return tierDiff
+      return b.items.length - a.items.length
+    })
+  }, [prioritizedActiveList, actionMap])
+
+  // "Próxima parada": el pedido de mayor prioridad de todo el día, pero solo si es
+  // una parada real (en_ruta/confirmado_listo) — no tiene sentido destacar una llamada
+  // pendiente como "parada".
+  const proximaParadaId = useMemo(() => {
+    const top = prioritizedActiveList[0]
+    if (!top) return null
+    const ds = computeDisplayState(top.pool, actionMap[top.order.id], false)
+    return (ds === 'en_ruta' || ds === 'confirmado_listo') ? top.order.id : null
+  }, [prioritizedActiveList, actionMap])
+
+  // ── Incidencias (cancelado / customer_declined) — solo para Historial ─────
+  const canceladoPool = useMemo((): PooledOrder[] => {
+    const fromConfirmado: PooledOrder[] = sdEnReparto
+      .filter(o => actionMap[o.id] === 'customer_declined')
+      .map(o => ({ order: o, pool: 'confirmado' as OrderPool }))
+    const fromNuevo: PooledOrder[] = sdNuevos
+      .filter(o => actionMap[o.id] === 'customer_declined')
+      .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
+    const fromPendingDispatch: PooledOrder[] = sdPendingDispatch
+      .filter(o => actionMap[o.id] === 'customer_declined')
+      .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
+    const seenIds = new Set([...fromConfirmado, ...fromNuevo, ...fromPendingDispatch].map(p => p.order.id))
+    const fromCache: PooledOrder[] = Array.from(confirmedOrderCache.values())
+      .filter(o => actionMap[o.id] === 'customer_declined' && !seenIds.has(o.id))
+      .map(o => ({ order: o, pool: 'nuevo' as OrderPool }))
+    return [...fromConfirmado, ...fromNuevo, ...fromPendingDispatch, ...fromCache]
+  }, [sdEnReparto, sdNuevos, sdPendingDispatch, confirmedOrderCache, actionMap])
+
+  const incidenciasList = useMemo(
+    () => canceladoPool.filter(({ order, pool }) =>
+      computeDisplayState(pool, actionMap[order.id], deliveredDbIds.has(order.id)) === 'cancelado',
+    ),
+    [canceladoPool, actionMap, deliveredDbIds],
   )
 
   // ── Entregados ─────────────────────────────────────────────────────────────
@@ -994,88 +1127,54 @@ export default function SdDeliveryPage() {
     return allDelivered.filter(e => isYesterday(e.reported_at))
   }, [allDelivered, dateFilter])
 
-  // ── Conteos ────────────────────────────────────────────────────────────────
-
-  const tabCounts = useMemo(() => ({
-    nuevos:        nuevosList.length,
-    confirmados:   confirmadosList.length,
-    en_ruta:       enRutaList.length,
-    no_responden:  noRespondenList.length,
-    reprogramados: reprogramadosList.length,
-    entregados:    entregadosFiltrados.length,
-    rutas:         rutasList.length,
-  }), [nuevosList, confirmadosList, enRutaList, noRespondenList, reprogramadosList, entregadosFiltrados, rutasList])
-
-  const totalActive = allPooled.length
-
-  // ── Agrupación por zona ────────────────────────────────────────────────────
-  // Only groups confirmado_listo orders — same source as Rutas tab
-
-  const zoneGroups = useMemo(
-    () => groupOrdersByZone(rutasList.map(p => p.order)),
-    [rutasList],
-  )
-
-  // ── Ganancias estimadas hoy ────────────────────────────────────────────────
-  // Promedio RD$270 × entregas del día (sdDeliveredDb + sessionDelivered)
-
-  const gananciasHoyEst = useMemo(
-    () => allDelivered.filter(e => isToday(e.reported_at)).length * SD_TARIFA_PROMEDIO,
+  // ── Dinero (Fase A: presentación únicamente, sin persistencia nueva) ──────
+  // Comisión "real" por zona (reemplaza el promedio plano SD_TARIFA_PROMEDIO).
+  const gananciasHoyReal = useMemo(
+    () => allDelivered
+      .filter(e => isToday(e.reported_at))
+      .reduce((sum, e) => sum + detectSdZone(e.order.city, e.order.province, e.order.customer_address).tarifa, 0),
     [allDelivered],
   )
 
-  const [expandedZones, setExpandedZones] = useState<Set<string>>(new Set())
-
-  // ── displayedPooled / displayedEntregados ──────────────────────────────────
-
-  const displayedPooled = useMemo((): PooledOrder[] => {
-    let base: PooledOrder[]
-    if (activeTab === 'nuevos')           base = nuevosList
-    else if (activeTab === 'confirmados')  base = confirmadosList
-    else if (activeTab === 'en_ruta')      base = enRutaList
-    else if (activeTab === 'no_responden') base = noRespondenList
-    else if (activeTab === 'reprogramados') base = reprogramadosList
-    else if (activeTab === 'rutas')        return []  // rutas has own render
-    else return []
-
-    if (!searchQuery.trim()) return base
-    const q = searchQuery.toLowerCase()
-    return base.filter(({ order: o }) =>
-      (o.tracking_number  ?? '').toLowerCase().includes(q) ||
-      (o.customer_name    ?? '').toLowerCase().includes(q) ||
-      (o.customer_phone   ?? '').toLowerCase().includes(q) ||
-      (o.customer_address ?? '').toLowerCase().includes(q) ||
-      (o.city             ?? '').toLowerCase().includes(q) ||
-      (o.order_number     ?? '').toLowerCase().includes(q),
-    )
-  }, [activeTab, nuevosList, confirmadosList, enRutaList, noRespondenList, reprogramadosList, searchQuery])
-
-  const displayedEntregados = useMemo(() => {
-    if (activeTab !== 'entregados') return []
-    if (!searchQuery.trim()) return entregadosFiltrados
-    const q = searchQuery.toLowerCase()
-    return entregadosFiltrados.filter(({ order: o }) =>
-      (o.tracking_number ?? '').toLowerCase().includes(q) ||
-      (o.customer_name   ?? '').toLowerCase().includes(q) ||
-      (o.customer_phone  ?? '').toLowerCase().includes(q),
-    )
-  }, [activeTab, entregadosFiltrados, searchQuery])
-
-  const totalDisplay  = activeTab === 'entregados' ? displayedEntregados.length
-    : activeTab === 'rutas' ? 0  // rutas has its own render, no pagination
-    : displayedPooled.length
-  const totalPages    = Math.ceil(totalDisplay / PAGE_SIZE)
-
-  const pagedPooled = useMemo(
-    () => displayedPooled.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
-    [displayedPooled, currentPage],
-  )
-  const pagedEntregados = useMemo(
-    () => displayedEntregados.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
-    [displayedEntregados, currentPage],
+  const codPendiente = useMemo(
+    () => activeList.reduce((sum, { order }) => sum + (order.cod_amount ?? 0), 0),
+    [activeList],
   )
 
-  useEffect(() => { setCurrentPage(1) }, [activeTab, dateFilter, searchQuery])
+  const codCobradoHoy = useMemo(
+    () => allDelivered
+      .filter(e => isToday(e.reported_at))
+      .reduce((sum, e) => sum + (e.order.cod_amount ?? 0), 0),
+    [allDelivered],
+  )
+
+  // ── Historial combinado (entregados + no desea) ────────────────────────────
+
+  const historialAll = useMemo(() => {
+    const entregados = entregadosFiltrados.map(e => ({
+      order: e.order, kind: 'entregado' as const, at: e.reported_at,
+    }))
+    const declinados = incidenciasList.map(({ order }) => ({
+      order, kind: 'no_desea' as const, at: order.status_since ?? order.updated_at,
+    }))
+    return [...entregados, ...declinados].sort(
+      (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime(),
+    )
+  }, [entregadosFiltrados, incidenciasList])
+
+  const historialFiltrado = useMemo(() => {
+    if (!searchQuery.trim()) return historialAll
+    const q = searchQuery.toLowerCase()
+    return historialAll.filter(({ order }) => matchesQuery(order, q))
+  }, [historialAll, searchQuery])
+
+  const historialTotalPages = Math.ceil(historialFiltrado.length / PAGE_SIZE)
+  const historialPaged = useMemo(
+    () => historialFiltrado.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [historialFiltrado, currentPage],
+  )
+
+  useEffect(() => { setCurrentPage(1) }, [view, dateFilter, searchQuery])
 
   // ── Toast ─────────────────────────────────────────────────────────────────
 
@@ -1084,7 +1183,7 @@ export default function SdDeliveryPage() {
     setTimeout(() => setToast(null), 3000)
   }
 
-  // ── Acciones ──────────────────────────────────────────────────────────────
+  // ── Acciones (sin cambios respecto a la versión anterior) ──────────────────
 
   async function postAction(
     orderId: string,
@@ -1239,44 +1338,21 @@ export default function SdDeliveryPage() {
     }
   }
 
+  function openMas(order: Order, pool: OrderPool) {
+    setMasSheet({
+      orderId: order.id,
+      name:    order.customer_name ?? '',
+      ds:      computeDisplayState(pool, actionMap[order.id], false),
+      pool,
+    })
+  }
+
   // ── Render ─────────────────────────────────────────────────────────────────
-
-  const TAB_META: { tab: Tab; label: string; shortLabel: string }[] = [
-    { tab: 'nuevos',        label: 'Nuevos / Por confirmar', shortLabel: 'Nuevos'     },
-    { tab: 'confirmados',   label: 'Confirmados / Listos',   shortLabel: 'Listos'     },
-    { tab: 'rutas',         label: 'Rutas',                  shortLabel: 'Rutas'      },
-    { tab: 'en_ruta',       label: 'En ruta',                shortLabel: 'En ruta'    },
-    { tab: 'no_responden',  label: 'No responden',           shortLabel: 'N/Resp.'    },
-    { tab: 'reprogramados', label: 'Reprogramados',          shortLabel: 'Reprog.'    },
-    { tab: 'entregados',    label: 'Entregados',             shortLabel: 'Entregados' },
-  ]
-
-  // Ayuda visual: color del tab por estado
-  function tabBadgeColors(tab: Tab, active: boolean) {
-    if (!active) return 'bg-gray-100 text-gray-500'
-    if (tab === 'rutas')        return 'bg-indigo-500 text-white'
-    if (tab === 'nuevos')       return 'bg-blue-500 text-white'
-    if (tab === 'confirmados')  return 'bg-teal-500 text-white'
-    if (tab === 'en_ruta')      return 'bg-teal-600 text-white'
-    if (tab === 'no_responden')  return 'bg-amber-500 text-white'
-    if (tab === 'reprogramados') return 'bg-orange-500 text-white'
-    return 'bg-emerald-500 text-white'
-  }
-
-  function tabActiveColors(tab: Tab) {
-    if (tab === 'rutas')        return 'border-indigo-500 text-indigo-700 bg-indigo-50/60'
-    if (tab === 'nuevos')       return 'border-blue-500 text-blue-700 bg-blue-50/60'
-    if (tab === 'confirmados')  return 'border-teal-500 text-teal-700 bg-teal-50/60'
-    if (tab === 'en_ruta')      return 'border-teal-600 text-teal-800 bg-teal-50/80'
-    if (tab === 'no_responden')  return 'border-amber-500 text-amber-700 bg-amber-50/60'
-    if (tab === 'reprogramados') return 'border-orange-500 text-orange-700 bg-orange-50/60'
-    return 'border-emerald-500 text-emerald-700 bg-emerald-50/60'
-  }
 
   return (
     <div className="space-y-4 pb-[env(safe-area-inset-bottom,_0px)]">
 
-      {/* ── Toast flotante — posición sobre safe area iOS ── */}
+      {/* ── Toast flotante ── */}
       {toast && (
         <div className={`fixed left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl shadow-lg
           text-sm font-semibold text-white transition-all
@@ -1291,6 +1367,11 @@ export default function SdDeliveryPage() {
         <NoteModal
           orderId={noteModal.orderId}
           name={noteModal.name}
+          title={noteModal.mode === 'direccion' ? 'Dirección incorrecta' : 'Agregar nota'}
+          placeholder={noteModal.mode === 'direccion'
+            ? 'Describe la dirección correcta o el problema encontrado…'
+            : 'Ej: Cliente fuera, reprogramar para mañana tarde…'}
+          notePrefix={noteModal.mode === 'direccion' ? 'Dirección incorrecta: ' : undefined}
           onSave={saveNote}
           onClose={() => setNoteModal(null)}
         />
@@ -1301,6 +1382,17 @@ export default function SdDeliveryPage() {
           name={reModal.name}
           onSave={saveReprogramar}
           onClose={() => setReModal(null)}
+        />
+      )}
+      {masSheet && (
+        <MasSheet
+          ctx={masSheet}
+          onClose={() => setMasSheet(null)}
+          onNoAnswer={id => postAction(id, 'no_answer', 'contacted', 'no_answer')}
+          onReprogramar={(id, name) => setReModal({ orderId: id, name })}
+          onDeclinado={id => saveCustomerDeclined(id)}
+          onDireccionIncorrecta={(id, name) => setNoteModal({ orderId: id, name, mode: 'direccion' })}
+          onOtroMotivo={(id, name) => setNoteModal({ orderId: id, name, mode: 'nota' })}
         />
       )}
 
@@ -1320,13 +1412,13 @@ export default function SdDeliveryPage() {
             <div>
               <div className="flex items-center gap-2 md:gap-3 flex-wrap">
                 <h1 className="text-xl md:text-2xl font-black text-white tabular-nums">
-                  {loading ? '…' : totalActive.toLocaleString()}
+                  {loading ? '…' : activeList.length.toLocaleString()}
                 </h1>
-                {!loading && tabCounts.nuevos > 0 && (
+                {!loading && nuevosList.length > 0 && (
                   <span className="flex items-center gap-1.5 bg-blue-500/80 text-white
                                    text-xs font-bold px-2.5 py-1 rounded-full">
                     <Clock className="w-3 h-3" />
-                    {tabCounts.nuevos} por confirmar
+                    {nuevosList.length} por confirmar
                   </span>
                 )}
                 {!loading && nuevosList.filter(({ order }) => criticalityLabel(order) === 'critico').length > 0 && (
@@ -1338,7 +1430,7 @@ export default function SdDeliveryPage() {
                   </span>
                 )}
               </div>
-              <p className="text-white font-semibold text-sm md:text-base">Entregas Santo Domingo</p>
+              <p className="text-white font-semibold text-sm md:text-base">Mi Ruta — Santo Domingo</p>
               <p className="hidden md:block text-teal-100 text-xs mt-0.5">
                 Zona Gran Santo Domingo · Transporte local
               </p>
@@ -1346,19 +1438,6 @@ export default function SdDeliveryPage() {
           </div>
 
           <div className="flex items-center gap-2 md:gap-4 shrink-0">
-            {gananciasHoyEst > 0 && (
-              <div className="flex flex-col items-end">
-                <span className="text-xs font-black text-white tabular-nums">
-                  RD${gananciasHoyEst.toLocaleString('es-DO')}
-                </span>
-                <span className="text-[10px] text-teal-200 font-medium">estimado hoy</span>
-              </div>
-            )}
-            {gananciasHoyEst === 0 && (perf?.entregadosHoy ?? 0) === 0 && (
-              <span className="hidden md:flex items-center gap-1 text-xs text-teal-100">
-                <DollarSign className="w-3 h-3" />Meta: {SD_META_DIARIA} entregas
-              </span>
-            )}
             <p className="hidden md:block text-teal-100 text-xs">
               {lastRefresh.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' })}
             </p>
@@ -1375,735 +1454,260 @@ export default function SdDeliveryPage() {
         </div>
       </div>
 
-      {/* ── Strip Mi día ── */}
+      {/* ── Resumen del día — solo lo que ayuda a trabajar hoy, sin conteos de estados internos ── */}
       {perf && (
-        <div className="bg-white rounded-xl border border-gray-200 px-3 py-2.5 md:px-5 md:py-3.5 shadow-sm">
-          <div className="flex items-center gap-2 md:gap-3 flex-wrap">
-            <div className="flex items-center gap-1.5 shrink-0">
-              <TrendingUp className="w-3.5 h-3.5 text-gray-400" />
-              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Mi día</span>
+        <div className="bg-white rounded-xl border border-gray-200 px-3 py-2.5 md:px-5 md:py-3.5 shadow-sm space-y-2">
+          <div className="flex items-center gap-1.5 md:gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-700">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span className="text-sm font-black tabular-nums leading-none">{perf.entregadosHoy}</span>
+              <span className="text-[11px] font-medium">entregados</span>
             </div>
-            <div className="flex items-center gap-1.5 md:gap-2 flex-wrap flex-1">
-              {([
-                { label: 'Entregados',   count: perf.entregadosHoy,    cls: 'bg-emerald-100 text-emerald-700' },
-                { label: 'Confirmados',  count: perf.confirmedHoy,     cls: 'bg-blue-100    text-blue-700'    },
-                { label: 'En ruta',      count: perf.enRutaHoy,        cls: 'bg-teal-100    text-teal-700'    },
-                { label: 'No responden', count: perf.noRespondenHoy,   cls: 'bg-amber-100   text-amber-700'   },
-                { label: 'Reprogramados',count: perf.reprogramadosHoy, cls: 'bg-indigo-100  text-indigo-700'  },
-              ] as const).map(({ label, count, cls }) => (
-                <div key={label} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg ${cls}`}>
-                  <span className="text-sm font-black tabular-nums leading-none">{count}</span>
-                  <span className="text-[11px] font-medium">{label}</span>
-                </div>
-              ))}
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-orange-50 text-orange-700 border border-orange-100">
+              <Wallet className="w-3.5 h-3.5" />
+              <span className="text-sm font-black tabular-nums leading-none">RD${codPendiente.toLocaleString('es-DO')}</span>
+              <span className="text-[11px] font-medium">por cobrar</span>
             </div>
-            {/* Ganancias estimadas */}
-            {gananciasHoyEst > 0 && (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-600 text-white shrink-0">
-                <DollarSign className="w-3 h-3" />
-                <span className="text-sm font-black tabular-nums leading-none">
-                  RD${gananciasHoyEst.toLocaleString('es-DO')}
-                </span>
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-100">
+              <DollarSign className="w-3.5 h-3.5" />
+              <span className="text-sm font-black tabular-nums leading-none">RD${codCobradoHoy.toLocaleString('es-DO')}</span>
+              <span className="text-[11px] font-medium">cobrado hoy</span>
+            </div>
+            {gananciasHoyReal > 0 && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-600 text-white">
+                <DollarSign className="w-3.5 h-3.5" />
+                <span className="text-sm font-black tabular-nums leading-none">RD${gananciasHoyReal.toLocaleString('es-DO')}</span>
+                <span className="text-[11px] font-medium">comisión hoy</span>
               </div>
             )}
           </div>
-          {/* Barra meta diaria */}
-          {perf.entregadosHoy > 0 && (
-            <div className="mt-2.5 space-y-1">
-              <div className="flex items-center justify-between text-[10px]">
-                <span className="text-gray-400 font-medium">Meta del día</span>
-                <span className="text-gray-600 font-bold tabular-nums">
-                  {perf.entregadosHoy}/{SD_META_DIARIA}
-                </span>
-              </div>
-              <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                <div
-                  className="h-1.5 bg-teal-500 rounded-full transition-all duration-700"
-                  style={{ width: `${Math.min((perf.entregadosHoy / SD_META_DIARIA) * 100, 100)}%` }}
-                />
-              </div>
+
+          {/* Barra meta diaria — siempre visible desde 0/8, no solo tras la primera entrega:
+              una meta que aparece a mitad del día no motiva a empezarlo. */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-gray-400 font-medium">Meta del día</span>
+              <span className="text-gray-600 font-bold tabular-nums">
+                {perf.entregadosHoy}/{SD_META_DIARIA}
+              </span>
             </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Filtro de fecha ── */}
-      <div className="flex gap-2">
-        {([
-          { key: 'hoy',   label: 'Hoy'   },
-          { key: 'ayer',  label: 'Ayer'  },
-          { key: 'todos', label: 'Todos' },
-        ] as { key: DateFilter; label: string }[]).map(({ key, label }) => (
-          <button
-            key={key}
-            onClick={() => setDateFilter(key)}
-            className={`flex items-center gap-1.5 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-semibold transition-colors
-              ${dateFilter === key
-                ? 'bg-teal-600 text-white'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-          >
-            <CalendarDays className="w-3.5 h-3.5 shrink-0" />
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* ── Sin pedidos ── */}
-      {!loading && totalActive === 0 && allDelivered.length === 0 && (
-        <div className="bg-teal-50 border border-teal-200 rounded-xl px-5 py-8 text-center">
-          <Package2 className="w-10 h-10 text-teal-400 mx-auto mb-3" />
-          <p className="text-teal-700 font-medium">No hay pedidos SD en este momento</p>
-          <p className="text-teal-600 text-sm mt-1">
-            Los pedidos nuevos y en reparto de Santo Domingo aparecerán aquí
-          </p>
-        </div>
-      )}
-
-      {/* ── Tabla principal ── */}
-      {(loading || totalActive > 0 || allDelivered.length > 0) && (
-        <div className="bg-white rounded-xl border-2 border-teal-200 overflow-hidden shadow-sm">
-
-          {/* Buscador */}
-          <div className="px-4 py-3 border-b border-teal-100">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Buscar por nombre, teléfono, guía, dirección…"
-                className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-lg
-                           focus:outline-none focus:ring-2 focus:ring-teal-300 focus:border-teal-300
-                           placeholder:text-gray-400"
+            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className="h-1.5 bg-teal-500 rounded-full transition-all duration-700"
+                style={{ width: `${Math.min((perf.entregadosHoy / SD_META_DIARIA) * 100, 100)}%` }}
               />
-              {searchQuery && (
-                <button onClick={() => setSearchQuery('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                  <X className="w-4 h-4" />
-                </button>
-              )}
             </div>
           </div>
+        </div>
+      )}
 
-          {/* Tabs — sticky en móvil para no perder orientación al hacer scroll */}
-          {!loading && (
-            <div className="flex border-b border-teal-100 overflow-x-auto
-                            sticky top-14 md:top-0 z-10 bg-white">
-              {TAB_META.map(({ tab, label, shortLabel }) => (
-                <button
-                  key={tab}
-                  onClick={() => setActiveTab(tab)}
-                  className={`flex items-center gap-1.5 px-3 sm:px-4 py-2.5 min-h-[44px] text-xs font-semibold
-                              border-b-2 transition-colors whitespace-nowrap shrink-0
-                    ${activeTab === tab
-                      ? tabActiveColors(tab)
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
-                >
-                  <span className="sm:hidden">{shortLabel}</span>
-                  <span className="hidden sm:inline">{label}</span>
-                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full
-                    ${tabBadgeColors(tab, activeTab === tab)}`}>
-                    {tabCounts[tab]}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
+      {/* ── Barra de control única: buscar · fecha · Historial ── */}
+      {/* "Mi Ruta" es la pantalla por defecto (no compite visualmente con Historial):
+          Historial es un destino secundario al que se entra con un tap, no un tab paralelo. */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setSearchOpen(o => !o)}
+            className={`flex items-center justify-center min-h-[44px] min-w-[44px] rounded-lg transition-colors shrink-0
+              ${searchOpen ? 'bg-teal-600 text-white' : 'bg-white border border-gray-200 text-gray-500 hover:bg-gray-50'}`}
+          >
+            <Search className="w-4 h-4" />
+          </button>
 
-          {/* Spinner */}
-          {loading && (
-            <div className="flex items-center justify-center py-16">
-              <Spinner className="w-6 h-6 text-teal-500" />
-            </div>
-          )}
-
-          {/* Vista vacía */}
-          {!loading && activeTab !== 'rutas' && totalDisplay === 0 && (totalActive > 0 || allDelivered.length > 0) && (
-            <div className="px-5 py-10 text-center">
-              <p className="text-gray-500 font-medium">
-                {searchQuery
-                  ? `Sin resultados para "${searchQuery}"`
-                  : 'No hay pedidos en esta categoría'}
-              </p>
-              <button onClick={() => { setActiveTab('nuevos'); setSearchQuery('') }}
-                className="text-teal-600 text-sm mt-2 hover:underline">
-                Ver nuevos
+          <div className="flex bg-gray-100 rounded-lg p-1 gap-0.5 shrink-0">
+            {([
+              { key: 'hoy',   label: 'Hoy'   },
+              { key: 'ayer',  label: 'Ayer'  },
+              { key: 'todos', label: 'Todos' },
+            ] as { key: DateFilter; label: string }[]).map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setDateFilter(key)}
+                className={`px-3 min-h-[36px] rounded-md text-xs font-semibold transition-colors
+                  ${dateFilter === key ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              >
+                {label}
               </button>
-            </div>
-          )}
+            ))}
+          </div>
 
-          {/* ── Tab Rutas — agrupación por zona ── */}
-          {!loading && activeTab === 'rutas' && (
-            <div className="divide-y divide-indigo-50">
+          <div className="flex-1" />
 
-              {/* Banner explicativo */}
-              <div className="px-4 py-3 bg-indigo-50/60 border-b border-indigo-100 flex items-start gap-2.5">
-                <Route className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-xs font-bold text-indigo-700">Pedidos agrupados listos para salir</p>
-                  <p className="text-[11px] text-indigo-500 mt-0.5">
-                    Generadas automáticamente desde <strong>Confirmados/Listos</strong>.
-                    Expande una zona y pulsa <strong>Iniciar ruta</strong> para confirmar la salida de todos sus pedidos.
-                  </p>
-                </div>
-              </div>
+          <button
+            onClick={() => setView(v => v === 'ruta' ? 'historial' : 'ruta')}
+            className="flex items-center gap-1.5 px-3 min-h-[44px] rounded-lg text-sm font-semibold
+                       text-gray-500 hover:text-teal-700 hover:bg-teal-50 transition-colors shrink-0"
+          >
+            {view === 'ruta' ? (
+              <>
+                Historial
+                {historialAll.length > 0 && (
+                  <span className="text-[11px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">
+                    {historialAll.length}
+                  </span>
+                )}
+              </>
+            ) : (
+              <>← Mi Ruta</>
+            )}
+          </button>
+        </div>
 
-              {zoneGroups.length === 0 ? (
-                <div className="px-5 py-10 text-center">
-                  <Route className="w-8 h-8 text-gray-200 mx-auto mb-3" />
-                  <p className="text-gray-500 font-medium text-sm">No hay pedidos listos para despachar</p>
-                  <p className="text-gray-400 text-xs mt-1">Despacha pedidos desde el tab "Confirmados/Listos"</p>
+        {searchOpen && (
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+            <input
+              autoFocus
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Buscar por nombre, teléfono, guía, dirección…"
+              className="w-full pl-9 pr-9 py-2.5 text-sm border border-gray-200 rounded-lg
+                         focus:outline-none focus:ring-2 focus:ring-teal-300 focus:border-teal-300
+                         placeholder:text-gray-400"
+            />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Spinner ── */}
+      {loading && (
+        <div className="flex items-center justify-center py-16">
+          <Spinner className="w-6 h-6 text-teal-500" />
+        </div>
+      )}
+
+      {/* ══════════════════ VISTA: MI RUTA — agrupada por zona ══════════════════ */}
+      {!loading && view === 'ruta' && (
+        zoneGroups.length === 0 ? (
+          <div className="bg-teal-50 border border-teal-200 rounded-xl px-5 py-10 text-center">
+            <Package2 className="w-10 h-10 text-teal-400 mx-auto mb-3" />
+            <p className="text-teal-700 font-medium">
+              {searchQuery ? `Sin resultados para "${searchQuery}"` : 'No hay pedidos pendientes en este momento'}
+            </p>
+            {!searchQuery && (
+              <p className="text-teal-600 text-sm mt-1">
+                Los pedidos nuevos y en reparto de Santo Domingo aparecerán aquí, agrupados por zona
+              </p>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {zoneGroups.map(group => {
+              const zc            = ZONE_COLORS[group.zone.id as ZoneId] ?? ZONE_COLORS['otro']
+              const isCollapsed   = collapsedZones.has(group.zone.id)
+              const readyIds      = group.items
+                .filter(({ order, pool }) => computeDisplayState(pool, actionMap[order.id], false) === 'confirmado_listo')
+                .map(({ order }) => order.id)
+              const anyBusy       = readyIds.some(id => !!loadingRow[id])
+
+              return (
+                <div key={group.zone.id} className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm">
+                  {/* Cabecera de zona */}
                   <button
-                    onClick={() => setActiveTab('confirmados')}
-                    className="text-teal-600 text-sm mt-2 hover:underline"
+                    onClick={() => setCollapsedZones(prev => {
+                      const next = new Set(prev)
+                      if (next.has(group.zone.id)) next.delete(group.zone.id)
+                      else next.add(group.zone.id)
+                      return next
+                    })}
+                    className={`w-full flex items-center justify-between px-4 py-3 ${zc.bg} hover:brightness-95 transition-all`}
                   >
-                    Ver esperando despacho →
-                  </button>
-                </div>
-              ) : (
-                zoneGroups.map(group => {
-                  const zc         = ZONE_COLORS[group.zone.id as ZoneId] ?? ZONE_COLORS['otro']
-                  const isExpanded = expandedZones.has(group.zone.id)
-                  const zoneOrderIds = group.orders.map(o => o.id)
-                  const anyBusy      = zoneOrderIds.some(id => !!loadingRow[id])
-                  return (
-                    <div key={group.zone.id}>
-
-                      {/* Cabecera de zona — toggle */}
-                      <button
-                        onClick={() => setExpandedZones(prev => {
-                          const next = new Set(prev)
-                          if (next.has(group.zone.id)) next.delete(group.zone.id)
-                          else next.add(group.zone.id)
-                          return next
-                        })}
-                        className={`w-full flex items-center justify-between px-4 py-3
-                                    ${zc.bg} hover:brightness-95 transition-all`}
-                      >
-                        <div className="flex items-center gap-2.5">
-                          <Route className={`w-4 h-4 shrink-0 ${zc.text}`} />
-                          <span className={`font-black text-sm ${zc.text}`}>{group.zone.routeLabel}</span>
-                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${zc.badge}`}>
-                            {group.zone.label}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <div className="text-right">
-                            <p className={`text-sm font-black tabular-nums ${zc.text}`}>
-                              {group.orders.length} pedido{group.orders.length !== 1 ? 's' : ''}
-                            </p>
-                            <p className="text-xs text-gray-500 font-medium">
-                              ≈ RD${group.gananciaEstimada.toLocaleString('es-DO')}
-                            </p>
-                          </div>
-                          {isExpanded
-                            ? <ChevronUp className="w-4 h-4 text-gray-400" />
-                            : <ChevronDown className="w-4 h-4 text-gray-400" />
-                          }
-                        </div>
-                      </button>
-
-                      {/* Barra colapsada: COD + ganancia */}
-                      {!isExpanded && group.codTotal > 0 && (
-                        <div className="px-4 py-1.5 border-t border-gray-50 flex items-center gap-3 text-[11px] text-gray-400">
-                          <span>COD: <strong className="text-gray-600">RD${group.codTotal.toLocaleString('es-DO')}</strong></span>
-                          <span>·</span>
-                          <span>Ganancia: <strong className={zc.text}>RD${group.gananciaEstimada.toLocaleString('es-DO')}</strong></span>
-                        </div>
-                      )}
-
-                      {/* Vista expandida */}
-                      {isExpanded && (
-                        <div className="border-t border-gray-100">
-
-                          {/* Acción de zona: totales + Iniciar ruta */}
-                          <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-100
-                                          flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-3 text-[11px] text-gray-500 flex-wrap">
-                              <span>
-                                COD total:{' '}
-                                <strong className="text-gray-700">
-                                  RD${group.codTotal.toLocaleString('es-DO')}
-                                </strong>
-                              </span>
-                              <span>·</span>
-                              <span>
-                                Ganancia est.:{' '}
-                                <strong className={zc.text}>
-                                  RD${group.gananciaEstimada.toLocaleString('es-DO')}
-                                </strong>
-                              </span>
-                            </div>
-                            <button
-                              onClick={() => confirmZoneRoute(group.zone.routeLabel, zoneOrderIds)}
-                              disabled={anyBusy}
-                              className="flex items-center gap-1.5 px-3 py-2 rounded-lg
-                                         bg-teal-500 hover:bg-teal-600 active:bg-teal-700
-                                         text-white text-xs font-bold transition-colors
-                                         disabled:opacity-50 shrink-0"
-                            >
-                              {anyBusy
-                                ? <Spinner className="w-3.5 h-3.5 text-white" />
-                                : <Truck className="w-3.5 h-3.5" />
-                              }
-                              Iniciar ruta
-                            </button>
-                          </div>
-
-                          {/* Lista de pedidos */}
-                          <div className="divide-y divide-gray-50">
-                            {group.orders.map(order => {
-                              const ubicacion = order.city || order.province || order.customer_address?.slice(0, 24)
-                              const orderMap  = mapsUrl(order)
-                              return (
-                                <div key={order.id} className="px-4 py-3">
-                                  <div className="flex items-start justify-between gap-2">
-                                    <div className="min-w-0 flex-1">
-                                      <p className="font-mono text-xs font-bold text-gray-900 truncate">
-                                        {order.tracking_number ?? order.order_number ?? '—'}
-                                      </p>
-                                      <p className="text-sm font-semibold text-gray-800 truncate">
-                                        {order.customer_name ?? '—'}
-                                      </p>
-                                      <p className="text-xs text-gray-500 font-mono mt-0.5">
-                                        {order.customer_phone || '—'}
-                                      </p>
-                                      {ubicacion && (
-                                        <div className="flex items-center gap-1 mt-0.5 text-xs text-gray-400">
-                                          <MapPin className="w-3 h-3 shrink-0" />
-                                          <span className="truncate">{ubicacion}</span>
-                                          {orderMap && (
-                                            <a href={orderMap} target="_blank" rel="noopener noreferrer"
-                                               className="shrink-0 text-teal-600 ml-0.5">
-                                              <ExternalLink className="w-3 h-3" />
-                                            </a>
-                                          )}
-                                        </div>
-                                      )}
-                                    </div>
-                                    <div className="flex flex-col items-end gap-1.5 shrink-0">
-                                      {order.cod_amount != null && order.cod_amount > 0 && (
-                                        <span className="text-xs font-black text-emerald-700 bg-emerald-50
-                                                         border border-emerald-200 px-2 py-0.5 rounded-lg tabular-nums whitespace-nowrap">
-                                          RD${order.cod_amount.toLocaleString('es-DO')}
-                                        </span>
-                                      )}
-                                      <Link
-                                        href={`/orders/${order.id}`}
-                                        className="text-[10px] text-teal-600 hover:text-teal-800 font-medium whitespace-nowrap"
-                                      >
-                                        Ver →
-                                      </Link>
-                                    </div>
-                                  </div>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      )}
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Route className={`w-4 h-4 shrink-0 ${zc.text}`} />
+                      <div className="min-w-0 text-left">
+                        <p className={`font-black text-sm leading-tight ${zc.text}`}>🛵 {group.zone.routeLabel}</p>
+                        <p className={`text-[10px] font-medium opacity-70 ${zc.text}`}>{group.zone.label}</p>
+                      </div>
                     </div>
-                  )
-                })
-              )}
-            </div>
-          )}
+                    <div className="flex items-center gap-3">
+                      <div className="text-right">
+                        <p className={`text-sm font-black tabular-nums ${zc.text}`}>
+                          {group.items.length} pedido{group.items.length !== 1 ? 's' : ''}
+                        </p>
+                        {group.codTotal > 0 && (
+                          <p className="text-xs text-gray-500 font-medium">
+                            COD RD${group.codTotal.toLocaleString('es-DO')}
+                          </p>
+                        )}
+                      </div>
+                      {isCollapsed ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronUp className="w-4 h-4 text-gray-400" />}
+                    </div>
+                  </button>
 
-          {/* ── Cards móvil — tabs activos (no entregados) ── */}
-          {!loading && activeTab !== 'entregados' && activeTab !== 'rutas' && pagedPooled.length > 0 && (
-            <div className="md:hidden divide-y divide-teal-50">
-              {pagedPooled.map(({ order, pool }) => {
-                const accion      = actionMap[order.id]
-                const busy        = !!loadingRow[order.id]
-                const isDelivered = accion === 'delivered' || deliveredDbIds.has(order.id)
-                return (
-                  <SdCard
-                    key={order.id}
-                    order={order}
-                    pool={pool}
-                    accion={accion}
-                    busy={busy}
-                    isDelivered={isDelivered}
-                    onWA={() => postAction(order.id, 'contacted', 'contacted')}
-                    onLlamar={() => postAction(order.id, 'contacted', 'contacted')}
-                    onConfirmarRuta={() => confirmRoute(order.id)}
-                    onClienteConfirma={() => confirmClient(order.id)}
-                    onNoAnswer={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
-                    onEntregado={() => markDelivered(order.id)}
-                    onReprogramar={() => setReModal({ orderId: order.id, name: order.customer_name ?? '' })}
-                    onNota={() => setNoteModal({ orderId: order.id, name: order.customer_name ?? '' })}
-                    onDeclinado={() => saveCustomerDeclined(order.id)}
-                    onDispatchLocal={() => dispatchLocal(order.id)}
-                    reprogramadoMeta={reprogramadoMeta[order.id]}
-                  />
-                )
-              })}
-            </div>
-          )}
+                  {!isCollapsed && (
+                    <div className="border-t border-gray-100">
+                      {readyIds.length > 0 && (
+                        <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-100 flex items-center justify-between gap-3">
+                          <span className="text-[11px] text-gray-500">
+                            {readyIds.length} listo{readyIds.length !== 1 ? 's' : ''} para salir de esta zona
+                          </span>
+                          <button
+                            onClick={() => confirmZoneRoute(group.zone.routeLabel, readyIds)}
+                            disabled={anyBusy}
+                            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-teal-500 hover:bg-teal-600
+                                       active:bg-teal-700 text-white text-xs font-bold transition-colors disabled:opacity-50 shrink-0"
+                          >
+                            {anyBusy ? <Spinner className="w-3.5 h-3.5 text-white" /> : <Truck className="w-3.5 h-3.5" />}
+                            Iniciar ruta de zona
+                          </button>
+                        </div>
+                      )}
+                      <div className="p-3 space-y-2.5">
+                        {group.items.map(({ order, pool }) => (
+                          <SdCard
+                            key={order.id}
+                            order={order}
+                            pool={pool}
+                            accion={actionMap[order.id]}
+                            busy={!!loadingRow[order.id]}
+                            isProximaParada={order.id === proximaParadaId}
+                            onAbrirConversacion={() => postAction(order.id, 'contacted', 'contacted')}
+                            onLlamar={() => postAction(order.id, 'contacted', 'contacted')}
+                            onClienteConfirma={() => confirmClient(order.id)}
+                            onConfirmarRuta={() => confirmRoute(order.id)}
+                            onDespacharLocal={() => dispatchLocal(order.id)}
+                            onMarcarEntregado={() => markDelivered(order.id)}
+                            onVolverARuta={() => confirmRoute(order.id)}
+                            onAbrirMas={() => openMas(order, pool)}
+                            reprogramadoMeta={reprogramadoMeta[order.id]}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )
+      )}
 
-          {/* ── Cards móvil — tab Entregados ── */}
-          {!loading && activeTab === 'entregados' && pagedEntregados.length > 0 && (
-            <div className="md:hidden divide-y divide-teal-50">
-              {pagedEntregados.map(({ order }) => (
-                <SdCard
-                  key={order.id}
-                  order={order}
-                  pool="confirmado"
-                  accion="delivered"
-                  busy={false}
-                  isDelivered={true}
-                  onWA={() => {}}
-                  onLlamar={() => {}}
-                  onConfirmarRuta={() => {}}
-                  onClienteConfirma={() => {}}
-                  onNoAnswer={() => {}}
-                  onEntregado={() => {}}
-                  onReprogramar={() => {}}
-                  onNota={() => {}}
-                  onDeclinado={() => {}}
-                  onDispatchLocal={() => {}}
-                />
+      {/* ══════════════════ VISTA: HISTORIAL ══════════════════ */}
+      {!loading && view === 'historial' && (
+        <div className="bg-white rounded-xl border-2 border-teal-200 overflow-hidden shadow-sm">
+          {historialPaged.length === 0 ? (
+            <div className="px-5 py-10 text-center">
+              <Package2 className="w-10 h-10 text-gray-200 mx-auto mb-3" />
+              <p className="text-gray-500 font-medium">
+                {searchQuery ? `Sin resultados para "${searchQuery}"` : 'Aún no hay pedidos cerrados'}
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-50">
+              {historialPaged.map(({ order, kind, at }) => (
+                <HistorialRow key={`${order.id}-${kind}`} order={order} kind={kind} at={at} />
               ))}
             </div>
           )}
 
-          {/* ── Tabla desktop — tabs activos ── */}
-          {!loading && activeTab !== 'entregados' && activeTab !== 'rutas' && pagedPooled.length > 0 && (
-            <table className="hidden md:table w-full text-sm">
-              <thead className="bg-teal-50/60 border-b border-teal-100">
-                <tr>
-                  {['Pedido', 'Cliente', 'Ubicación', 'Estado/Tiempo', 'Contactar', 'Acciones', ''].map(h => (
-                    <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-teal-800 whitespace-nowrap">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-teal-50">
-                {pagedPooled.map(({ order, pool }) => {
-                  const nombre      = order.customer_name ?? ''
-                  const waMsg       = pool === 'nuevo'
-                    ? buildWaMsgNuevo(nombre, order.product_summary)
-                    : buildWaMsg(nombre, order.product_summary)
-                  const waUrl       = whatsAppUrl(order.customer_phone, waMsg)
-                  const telUrl      = callUrl(order.customer_phone)
-                  const hasPhone    = !!order.customer_phone
-                  const accion      = actionMap[order.id]
-                  const busy        = !!loadingRow[order.id]
-                  const isDelivered = accion === 'delivered' || deliveredDbIds.has(order.id)
-                  const ds          = computeDisplayState(pool, accion, isDelivered)
-                  const crit        = criticalityLabel(order)
-                  const ubicacion   = order.city || order.province || (order.customer_address?.slice(0, 20))
-
-                  const rowBg =
-                    ds === 'entregado'        ? 'bg-green-50/30'
-                    : ds === 'en_ruta'        ? 'bg-teal-50/20 hover:bg-teal-50/40'
-                    : ds === 'nuevo'          ? 'bg-blue-50/20 hover:bg-blue-50/40'
-                    : ds === 'espera_despacho'? 'bg-purple-50/10 hover:bg-purple-50/30'
-                    : crit === 'critico'      ? 'bg-red-50/20 hover:bg-red-50/40'
-                    : crit === 'riesgo'       ? 'bg-orange-50/15 hover:bg-orange-50/30'
-                    : 'hover:bg-teal-50/30'
-
-                  return (
-                    <tr key={order.id} className={`transition-colors ${rowBg}`}>
-                      {/* Pedido */}
-                      <td className="px-3 py-2.5">
-                        <p className="font-mono text-xs font-semibold text-gray-900 whitespace-nowrap">
-                          {order.tracking_number ?? order.order_number ?? '—'}
-                        </p>
-                        {order.tracking_number && order.order_number && (
-                          <p className="font-mono text-[10px] text-gray-400 mt-0.5">{order.order_number}</p>
-                        )}
-                        {pool === 'nuevo' && (
-                          <span className="inline-flex items-center gap-0.5 text-[9px] font-bold
-                                           px-1 py-0.5 rounded bg-blue-100 text-blue-700 mt-0.5">
-                            <Clock className="w-2.5 h-2.5" />Por confirmar
-                          </span>
-                        )}
-                        {(() => { const { relative, absolute } = formatOrderDate(order, pool); return (
-                          <p className="text-[9px] text-gray-400 mt-0.5 whitespace-nowrap" title={absolute}>
-                            {relative} · {absolute}
-                          </p>
-                        ); })()}
-                      </td>
-
-                      {/* Cliente */}
-                      <td className="px-3 py-2.5">
-                        <p className="font-medium text-gray-900 text-sm leading-tight truncate max-w-[140px]">
-                          {nombre || '—'}
-                        </p>
-                        <p className="font-mono text-xs text-gray-500 mt-0.5">{order.customer_phone ?? '—'}</p>
-                      </td>
-
-                      {/* Ubicación */}
-                      <td className="px-3 py-2.5">
-                        <div className="flex items-start gap-1 text-gray-600">
-                          <MapPin className="w-3 h-3 text-teal-400 shrink-0 mt-0.5" />
-                          <span className="text-xs truncate max-w-[120px]">{ubicacion || '—'}</span>
-                        </div>
-                        {order.customer_address && (
-                          <p className="text-[10px] text-gray-400 mt-0.5 ml-4 truncate max-w-[120px]"
-                             title={order.customer_address}>
-                            {order.customer_address}
-                          </p>
-                        )}
-                      </td>
-
-                      {/* Estado/Tiempo */}
-                      <td className="px-3 py-2.5">
-                        {ds === 'nuevo' ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold
-                                           px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 border border-blue-200">
-                            <Clock className="w-3 h-3" />Por confirmar
-                          </span>
-                        ) : ds === 'espera_despacho' ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold
-                                           px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 border border-purple-200">
-                            <UserCheck className="w-3 h-3" />Confirmado
-                          </span>
-                        ) : ds === 'entregado' ? (
-                          <span className="text-[10px] text-green-600 font-semibold">Entregado</span>
-                        ) : (
-                          <>
-                            <span className={`inline-flex items-center gap-1 text-[10px] font-semibold
-                                              px-1.5 py-0.5 rounded-full border whitespace-nowrap
-                                              ${crit === 'critico' ? 'bg-red-100 text-red-700 border-red-200 animate-pulse'
-                                                : crit === 'riesgo'  ? 'bg-orange-100 text-orange-700 border-orange-200'
-                                                : 'bg-teal-100 text-teal-700 border-teal-200'}`}>
-                              {crit === 'critico' && <span className="w-1.5 h-1.5 rounded-full bg-red-500" />}
-                              {crit === 'critico' ? '+48h' : crit === 'riesgo' ? '24-48h' : '0-24h'}
-                            </span>
-                            <p className="text-[10px] text-gray-500 mt-0.5 whitespace-nowrap">
-                              {tiempoLabel(order)}
-                            </p>
-                          </>
-                        )}
-                      </td>
-
-                      {/* Contactar */}
-                      <td className="px-3 py-2.5">
-                        {hasPhone && ds !== 'entregado' && ds !== 'espera_despacho' ? (
-                          <div className="flex items-center gap-1.5">
-                            {waUrl && (
-                              <a href={waUrl} target="_blank" rel="noopener noreferrer"
-                                 onClick={() => postAction(order.id, 'contacted', 'contacted')}
-                                 className="flex items-center gap-1 bg-green-500 hover:bg-green-600
-                                            text-white text-xs font-semibold px-2 py-1.5 rounded-lg transition-colors">
-                                <MessageCircle className="w-3 h-3" />WA
-                              </a>
-                            )}
-                            {telUrl && (
-                              <a href={telUrl}
-                                 onClick={() => postAction(order.id, 'contacted', 'contacted')}
-                                 className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
-                                            text-white text-xs font-semibold px-2 py-1.5 rounded-lg transition-colors">
-                                <Phone className="w-3 h-3" />Llamar
-                              </a>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-300 italic">—</span>
-                        )}
-                      </td>
-
-                      {/* Acciones */}
-                      <td className="px-3 py-2.5">
-                        {busy ? (
-                          <Spinner className="w-4 h-4 text-teal-500" />
-                        ) : ds === 'nuevo' ? (
-                          <div className="flex flex-wrap gap-1">
-                            <button onClick={() => confirmClient(order.id)}
-                              className="flex items-center gap-1 bg-blue-600 hover:bg-blue-700
-                                         text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <UserCheck className="w-3 h-3" />Cliente confirma
-                            </button>
-                            <button onClick={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
-                              className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
-                                         text-amber-700 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <PhoneMissed className="w-3 h-3" />No resp.
-                            </button>
-                          </div>
-                        ) : ds === 'espera_despacho' ? (
-                          <button onClick={() => dispatchLocal(order.id)}
-                            className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700
-                                       text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                            <Truck className="w-3 h-3" />Despachar local
-                          </button>
-                        ) : ds === 'confirmado_listo' ? (
-                          <div className="flex flex-wrap gap-1">
-                            <button onClick={() => confirmRoute(order.id)}
-                              className="flex items-center gap-1 bg-teal-500 hover:bg-teal-600
-                                         text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <Truck className="w-3 h-3" />Confirmar ruta
-                            </button>
-                            <button onClick={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
-                              className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
-                                         text-amber-700 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <PhoneMissed className="w-3 h-3" />No resp.
-                            </button>
-                            <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
-                              className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
-                                         text-gray-600 text-[11px] font-medium px-2 py-1.5 rounded transition-colors">
-                              <FileText className="w-3 h-3" />
-                            </button>
-                          </div>
-                        ) : ds === 'en_ruta' ? (
-                          <div className="flex flex-wrap gap-1">
-                            <button onClick={() => markDelivered(order.id)}
-                              className="flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600
-                                         text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <CheckCircle2 className="w-3 h-3" />Marcar entregado
-                            </button>
-                            <button onClick={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
-                              className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
-                                         text-amber-700 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <PhoneMissed className="w-3 h-3" />No resp.
-                            </button>
-                            <button onClick={() => setReModal({ orderId: order.id, name: nombre })}
-                              className="flex items-center gap-1 bg-indigo-100 hover:bg-indigo-200
-                                         text-indigo-700 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <RotateCcw className="w-3 h-3" />Reprogram.
-                            </button>
-                            <button onClick={() => saveCustomerDeclined(order.id)}
-                              className="flex items-center gap-1 bg-red-100 hover:bg-red-200
-                                         text-red-700 text-[11px] font-medium px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                              <X className="w-3 h-3" />No desea
-                            </button>
-                            <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
-                              className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
-                                         text-gray-600 text-[11px] font-medium px-2 py-1.5 rounded transition-colors">
-                              <FileText className="w-3 h-3" />
-                            </button>
-                          </div>
-                        ) : ds === 'no_responde' ? (
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="inline-flex items-center gap-1 text-xs font-semibold
-                                             px-2 py-1 rounded-full bg-amber-100 text-amber-700">
-                              <PhoneMissed className="w-3 h-3" />No responde
-                            </span>
-                            {pool === 'nuevo' && (
-                              <button onClick={() => confirmClient(order.id)}
-                                className="flex items-center gap-1 bg-blue-100 hover:bg-blue-200
-                                           text-blue-700 text-[11px] font-medium px-2 py-1 rounded transition-colors whitespace-nowrap">
-                                <UserCheck className="w-3 h-3" />Confirma ahora
-                              </button>
-                            )}
-                            <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
-                              className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
-                                         text-gray-600 text-[11px] font-medium px-1.5 py-1 rounded transition-colors">
-                              <FileText className="w-3 h-3" />
-                            </button>
-                          </div>
-                        ) : ds === 'reprogramado' ? (
-                          <div className="space-y-1.5">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="inline-flex items-center gap-1 text-xs font-semibold
-                                               px-2 py-1 rounded-full bg-orange-100 text-orange-700">
-                                <RotateCcw className="w-3 h-3" />Reprogramado
-                                {reprogramadoMeta[order.id] && reprogramadoMeta[order.id].count > 1 && (
-                                  <span className="ml-1 opacity-70">×{reprogramadoMeta[order.id].count}</span>
-                                )}
-                              </span>
-                              {reprogramadoMeta[order.id]?.at && (() => {
-                                const { relative } = formatRescheduleDate(reprogramadoMeta[order.id].at)
-                                return <span className="text-[10px] text-orange-500/80">{relative}</span>
-                              })()}
-                            </div>
-                            <div className="flex items-center gap-1 flex-wrap">
-                              {pool === 'confirmado' && (
-                                <>
-                                  <button onClick={() => confirmRoute(order.id)}
-                                    className="flex items-center gap-1 bg-teal-500 hover:bg-teal-600
-                                               text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                                    <Truck className="w-3 h-3" />Volver a ruta
-                                  </button>
-                                  <button onClick={() => markDelivered(order.id)}
-                                    className="flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600
-                                               text-white text-[11px] font-bold px-2 py-1.5 rounded transition-colors whitespace-nowrap">
-                                    <CheckCircle2 className="w-3 h-3" />Entregado
-                                  </button>
-                                </>
-                              )}
-                              {pool === 'nuevo' && (
-                                <button onClick={() => confirmClient(order.id)}
-                                  className="flex items-center gap-1 bg-blue-100 hover:bg-blue-200
-                                             text-blue-700 text-[11px] font-medium px-2 py-1 rounded transition-colors whitespace-nowrap">
-                                  <UserCheck className="w-3 h-3" />Confirma ahora
-                                </button>
-                              )}
-                              <button onClick={() => setNoteModal({ orderId: order.id, name: nombre })}
-                                className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200
-                                           text-gray-600 text-[11px] font-medium px-1.5 py-1 rounded transition-colors">
-                                <FileText className="w-3 h-3" />
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-xs font-semibold
-                                           px-2 py-1 rounded-full bg-green-100 text-green-700">
-                            <CheckCircle2 className="w-3 h-3" />Entregado
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Ver detalle */}
-                      <td className="px-3 py-2.5">
-                        <Link href={`/orders/${order.id}`}
-                          className="inline-flex items-center gap-1 text-xs font-medium
-                                     text-teal-600 hover:text-teal-800 whitespace-nowrap hover:underline">
-                          <ExternalLink className="w-3 h-3" />Ver
-                        </Link>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          )}
-
-          {/* ── Tabla desktop — tab Entregados ── */}
-          {!loading && activeTab === 'entregados' && pagedEntregados.length > 0 && (
-            <table className="hidden md:table w-full text-sm">
-              <thead className="bg-emerald-50/60 border-b border-teal-100">
-                <tr>
-                  {['Guía', 'Cliente', 'Teléfono', 'Entregado', ''].map(h => (
-                    <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-emerald-800 whitespace-nowrap">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-teal-50">
-                {pagedEntregados.map(({ order, reported_at }) => (
-                  <tr key={order.id} className="bg-green-50/20 hover:bg-green-50/40 transition-colors">
-                    <td className="px-3 py-2.5 font-mono text-xs font-semibold text-gray-900">
-                      {order.tracking_number ?? order.order_number ?? '—'}
-                    </td>
-                    <td className="px-3 py-2.5 font-medium text-gray-900 truncate max-w-[160px]">
-                      {order.customer_name || '—'}
-                    </td>
-                    <td className="px-3 py-2.5 font-mono text-xs text-gray-500">
-                      {order.customer_phone || '—'}
-                    </td>
-                    <td className="px-3 py-2.5 text-xs text-emerald-700 font-semibold whitespace-nowrap">
-                      <CheckCircle2 className="inline w-3 h-3 mr-1" />
-                      {new Date(reported_at).toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' })}
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <Link href={`/orders/${order.id}`}
-                        className="inline-flex items-center gap-1 text-xs font-medium
-                                   text-teal-600 hover:text-teal-800 whitespace-nowrap hover:underline">
-                        <ExternalLink className="w-3 h-3" />Ver
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {/* Paginación */}
-          {!loading && totalPages > 1 && (
+          {historialTotalPages > 1 && (
             <div className="flex items-center justify-between px-4 py-3 border-t border-teal-100 bg-teal-50/40">
               <button
                 onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
@@ -2117,12 +1721,12 @@ export default function SdDeliveryPage() {
               <span className="text-xs text-gray-500 tabular-nums">
                 <span className="font-bold text-gray-800">{currentPage}</span>
                 {' / '}
-                <span className="font-bold text-gray-800">{totalPages}</span>
-                <span className="hidden md:inline text-gray-400"> · {totalDisplay} resultados</span>
+                <span className="font-bold text-gray-800">{historialTotalPages}</span>
+                <span className="hidden md:inline text-gray-400"> · {historialFiltrado.length} resultados</span>
               </span>
               <button
-                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                disabled={currentPage === totalPages}
+                onClick={() => setCurrentPage(p => Math.min(historialTotalPages, p + 1))}
+                disabled={currentPage === historialTotalPages}
                 className="flex items-center gap-1.5 px-3 py-2 min-h-[40px] text-xs font-semibold rounded-lg
                            border border-teal-200 text-teal-700 bg-white hover:bg-teal-50
                            disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -2133,17 +1737,6 @@ export default function SdDeliveryPage() {
           )}
         </div>
       )}
-
-      {/* ── Flujo operativo ── */}
-      <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-4 md:px-5">
-        <p className="text-xs text-gray-500 leading-relaxed">
-          <strong className="text-gray-700">Flujo nuevo:</strong>{' '}
-          <strong className="text-blue-700">Nuevos</strong> → llamar/WA → <strong className="text-blue-700">Cliente confirma</strong> → el admin asigna a ruta →{' '}
-          aparece en <strong className="text-teal-700">Confirmados</strong> → <strong className="text-teal-700">Confirmar ruta</strong> al salir →{' '}
-          <strong className="text-emerald-700">Marcar entregado</strong>.
-          Si no responde: <strong className="text-amber-700">No responde</strong> (queda en seguimiento).
-        </p>
-      </div>
 
     </div>
   )
