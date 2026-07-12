@@ -4,21 +4,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { Spinner } from '@/components/ui/spinner'
-import { whatsAppUrl, callUrl, daysSince, formatEventDate } from '@/lib/utils'
+import { whatsAppUrl, callUrl, daysSince, formatEventDate, timeAgo } from '@/lib/utils'
 import { parseEFIDate } from '@/lib/tracking/parse-efi-date'
 import { FlujoKpis } from '@/components/shared/flujo-kpis'
-import type { ActionType, ContactResult, Order } from '@/types'
+import { countConsecutiveNoContact, getLatestNovedadEvent } from '@/lib/novelty/novedad-history'
+import type { NoveltyType, Order } from '@/types'
 import {
   AlertCircle, RefreshCw, MessageCircle, Phone,
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, Search, TrendingUp, CalendarClock,
-  RotateCcw, ShieldAlert, Clock, ChevronLeft, ChevronRight,
-  Package, DollarSign, Scale, User,
+  Clock, ChevronLeft, ChevronRight,
+  Package, DollarSign, Scale, User, HelpCircle, History, X,
 } from 'lucide-react'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
-type Tab = 'all' | 'dos' | 'tres-mas' | 'reprogramados' | 'no-salvables' | 'recuperadas' | 'indemnizacion'
+type Tab = 'sin-contacto' | 'contacto-realizado' | 'reprogramados' | 'no-salvables' | 'recuperadas' | 'indemnizacion'
 
 interface NoveltyPerfData {
   novedadesTrabajadasHoy:  number
@@ -66,22 +67,15 @@ function buildNovedadMsg(nombre: string, producto: string | null | undefined): s
 }
 
 const TAB_META: { tab: Tab; label: string }[] = [
-  { tab: 'all',             label: 'Todos'           },
-  { tab: 'dos',             label: '2 intentos'      },
-  { tab: 'tres-mas',        label: 'Alerta 3+'       },
-  { tab: 'reprogramados',   label: 'Reprogramados'   },
-  { tab: 'no-salvables',    label: 'No salvables'    },
-  { tab: 'recuperadas',     label: '✓ Entregadas'   },
-  { tab: 'indemnizacion',   label: '⚖ Indemniz.'    },
+  { tab: 'sin-contacto',       label: 'Sin contacto'       },
+  { tab: 'contacto-realizado', label: 'Contacto realizado' },
+  { tab: 'reprogramados',      label: 'Reprogramados'      },
+  { tab: 'no-salvables',       label: 'No salvables'       },
+  { tab: 'recuperadas',        label: '✓ Entregadas'      },
+  { tab: 'indemnizacion',      label: '⚖ Indemniz.'       },
 ]
 
-const ACTION_BADGE: Record<string, { label: string; color: string }> = {
-  contacted:   { label: 'Contactado',   color: 'bg-blue-100 text-blue-700'    },
-  rescheduled: { label: 'Reprogramado', color: 'bg-indigo-100 text-indigo-700' },
-  no_answer:   { label: 'No responde',  color: 'bg-amber-100 text-amber-700'  },
-}
-
-// Días desde que el pedido entró en novedad (last_novedad_at → status_since → last_tracking_update)
+// Días desde el último evento conocido (last_novedad_at → status_since → last_tracking_update)
 function daysInNovedad(order: Order): number {
   const base = (
     order.last_novedad_at ??
@@ -114,28 +108,267 @@ function rdMidnightUTC(offsetDays = 0): number {
   return Date.UTC(y, m - 1, d + offsetDays, 4, 0, 0, 0)
 }
 
+// Fecha de hoy en RD como 'YYYY-MM-DD' — mismo formato que devuelve Supabase para columnas `date`
+function rdTodayDateStr(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Santo_Domingo' }).format(new Date())
+}
+
+// Motivo real reportado por la transportadora. raw_status es casi siempre "Novedad"
+// (sin información) — last_attempt_reason es el texto que realmente importa.
+function motivoReal(order: Order): string | null {
+  return order.last_attempt_reason ?? order.raw_status ?? null
+}
+
+// Si Gintracom ya reportó una fecha ("...fecha de entrega 2026 07 13") la extrae
+// como sugerencia. Nunca se acepta automáticamente — solo pre-rellena el formulario.
+function extractGintracomDate(reason: string | null | undefined): string | null {
+  if (!reason) return null
+  const m = /(\d{4})\s+(\d{2})\s+(\d{2})/.exec(reason)
+  if (!m) return null
+  return `${m[1]}-${m[2]}-${m[3]}`
+}
+
+// Código de color único por clasificación — se usa idéntico en KPI, badge,
+// playbook y acento de la tarjeta para que todo el sistema "entrene" al
+// agente con el mismo lenguaje visual en todas partes.
+type NoveltyColor = 'amber' | 'blue' | 'purple' | 'orange'
+
+const COLOR_STYLES: Record<NoveltyColor, {
+  badge: string; kpiBase: string; kpiActive: string; kpiHover: string
+  playbookBg: string; playbookBorder: string; playbookTitle: string; playbookCheck: string
+  cardAccent: string
+}> = {
+  amber: {
+    badge: 'bg-amber-100 text-amber-700',
+    kpiBase: 'border-amber-200 bg-amber-50 text-amber-700',
+    kpiActive: 'border-amber-400 bg-amber-100 text-amber-800 ring-2 ring-amber-300/50',
+    kpiHover: 'hover:bg-amber-100',
+    playbookBg: 'bg-amber-50', playbookBorder: 'border-amber-200', playbookTitle: 'text-amber-800', playbookCheck: 'text-amber-600',
+    cardAccent: 'border-l-4 border-l-amber-400',
+  },
+  blue: {
+    badge: 'bg-blue-100 text-blue-700',
+    kpiBase: 'border-blue-200 bg-blue-50 text-blue-700',
+    kpiActive: 'border-blue-400 bg-blue-100 text-blue-800 ring-2 ring-blue-300/50',
+    kpiHover: 'hover:bg-blue-100',
+    playbookBg: 'bg-blue-50', playbookBorder: 'border-blue-200', playbookTitle: 'text-blue-800', playbookCheck: 'text-blue-600',
+    cardAccent: 'border-l-4 border-l-blue-400',
+  },
+  purple: {
+    badge: 'bg-purple-100 text-purple-700',
+    kpiBase: 'border-purple-200 bg-purple-50 text-purple-700',
+    kpiActive: 'border-purple-400 bg-purple-100 text-purple-800 ring-2 ring-purple-300/50',
+    kpiHover: 'hover:bg-purple-100',
+    playbookBg: 'bg-purple-50', playbookBorder: 'border-purple-200', playbookTitle: 'text-purple-800', playbookCheck: 'text-purple-600',
+    cardAccent: 'border-l-4 border-l-purple-400',
+  },
+  orange: {
+    badge: 'bg-orange-100 text-orange-700',
+    kpiBase: 'border-orange-200 bg-orange-50 text-orange-700',
+    kpiActive: 'border-orange-400 bg-orange-100 text-orange-800 ring-2 ring-orange-300/50',
+    kpiHover: 'hover:bg-orange-100',
+    playbookBg: 'bg-orange-50', playbookBorder: 'border-orange-200', playbookTitle: 'text-orange-800', playbookCheck: 'text-orange-600',
+    cardAccent: 'border-l-4 border-l-orange-400',
+  },
+}
+
+interface NoveltyBadge { label: string; color: NoveltyColor; Icon: typeof PhoneMissed; tooltip: string }
+
+function noveltyBadge(order: Order): NoveltyBadge {
+  if (order.delivery_resolution === 'rescheduled') {
+    return { label: 'Reprogramado', color: 'purple', Icon: CalendarClock, tooltip: 'Existe un acuerdo pendiente de seguimiento.' }
+  }
+  if (order.novelty_type === 'contacted') {
+    return { label: 'Contacto realizado', color: 'blue', Icon: MessageCircle, tooltip: 'El cliente ya habló con Gintracom.' }
+  }
+  if (order.novelty_type === 'no_contact') {
+    return { label: 'Sin contacto', color: 'amber', Icon: PhoneMissed, tooltip: 'Gintracom nunca logró comunicarse con el cliente.' }
+  }
+  return { label: 'Comunicación por confirmar', color: 'orange', Icon: HelpCircle, tooltip: 'No sabemos si Gintracom logró hablar con el cliente.' }
+}
+
+interface Playbook { title: string; color: NoveltyColor; items: string[] }
+
+function playbookFor(order: Order): Playbook {
+  if (order.delivery_resolution === 'rescheduled') {
+    return {
+      title: 'Dar seguimiento al acuerdo',
+      color: 'purple',
+      items: [
+        'Confirmar que el cliente sigue disponible en la fecha acordada',
+        'Verificar si el acuerdo sigue vigente',
+        'Si está vencido, contactar de nuevo',
+        'Actualizar el resultado tras el intento',
+      ],
+    }
+  }
+  if (order.novelty_type === 'contacted') {
+    return {
+      title: 'Coordinar siguiente intento',
+      color: 'blue',
+      items: [
+        'Entender el motivo',
+        'Coordinar nueva entrega',
+        'Confirmar disponibilidad',
+        'Reprogramar si aplica',
+      ],
+    }
+  }
+  // no_contact o sin confirmar todavía usan el mismo playbook operativo
+  return {
+    title: 'Restablecer comunicación',
+    color: 'amber',
+    items: [
+      'Contactar al cliente',
+      'Verificar teléfono',
+      'Confirmar dirección',
+      'Pedir responder llamadas o WhatsApp de Gintracom',
+    ],
+  }
+}
+
+// "Último acuerdo incumplido": hubo una reprogramación pero un nuevo intento
+// fallido de la transportadora reabrió el caso — se conserva como contexto,
+// nunca como reprogramación activa (eso solo lo determina delivery_resolution).
+function acuerdoIncumplido(order: Order): boolean {
+  return order.delivery_resolution === 'pending' && !!order.rescheduled_date
+}
+
+// Acuerdo vencido: reprogramación activa cuya fecha ya pasó sin nueva gestión.
+function isVencido(order: Order): boolean {
+  return order.delivery_resolution === 'rescheduled' && !!order.rescheduled_date && order.rescheduled_date < rdTodayDateStr()
+}
+
+function lastActionLabel(order: Order): string {
+  return order.last_action_at ? timeAgo(order.last_action_at) : 'Sin gestión'
+}
+
 const PAGE_SIZE = 50
+
+// ── Modal: confirmar reprogramación con fecha ─────────────────────────────────
+
+function ReprogramarModal({
+  order, onClose, onSave, saving, error,
+}: {
+  order:  Order
+  onClose: () => void
+  onSave: (date: string, note: string | null) => void
+  saving: boolean
+  error:  string | null
+}) {
+  const suggested = extractGintracomDate(order.last_attempt_reason)
+  const [date, setDate] = useState(suggested ?? '')
+  const [note, setNote] = useState('')
+
+  function quickDate(offsetDays: number) {
+    const d = new Date()
+    d.setDate(d.getDate() + offsetDays)
+    setDate(d.toISOString().slice(0, 10))
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md p-5 space-y-4 shadow-xl">
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-bold text-gray-900">Reprogramar entrega</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <p className="text-xs text-gray-500">
+          {order.tracking_number} · {order.customer_name ?? 'Cliente'}
+        </p>
+
+        {suggested && (
+          <div className="flex items-start gap-2 bg-purple-50 border border-purple-200 rounded-lg px-3 py-2">
+            <CalendarClock className="w-4 h-4 text-purple-500 shrink-0 mt-0.5" />
+            <p className="text-xs text-purple-700">
+              Sugerido por la transportadora: <strong>{suggested}</strong> — confirma o corrígela antes de guardar.
+            </p>
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => quickDate(1)}
+            className="flex-1 text-sm font-medium px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50"
+          >
+            Mañana
+          </button>
+          <button
+            onClick={() => quickDate(2)}
+            className="flex-1 text-sm font-medium px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50"
+          >
+            Pasado mañana
+          </button>
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold text-gray-600">Fecha acordada *</label>
+          <input
+            type="date"
+            value={date}
+            onChange={e => setDate(e.target.value)}
+            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm mt-1
+                       focus:outline-none focus:ring-2 focus:ring-purple-300 focus:border-purple-300"
+          />
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold text-gray-600">Nota (opcional)</label>
+          <textarea
+            value={note}
+            onChange={e => setNote(e.target.value)}
+            placeholder="Ej: después de las 5, llamar antes de ir, entregar en el trabajo…"
+            rows={2}
+            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm mt-1 resize-none
+                       focus:outline-none focus:ring-2 focus:ring-purple-300 focus:border-purple-300"
+          />
+        </div>
+
+        {error && <p className="text-xs text-red-600">{error}</p>}
+
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={onClose}
+            className="flex-1 text-sm font-medium px-3 py-2.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={() => date && onSave(date, note.trim() || null)}
+            disabled={!date || saving}
+            className="flex-1 flex items-center justify-center gap-1.5 text-sm font-semibold px-3 py-2.5 rounded-xl
+                       bg-purple-600 hover:bg-purple-700 text-white transition-colors disabled:opacity-40"
+          >
+            {saving ? <Spinner className="w-4 h-4" /> : 'Guardar reprogramación'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 // ── Subcomponente: Card móvil de novedad activa ───────────────────────────────
 
 interface NovedadCardProps {
-  order: Order
-  accion: string | undefined
-  busy: boolean
-  novedadSrc: string | null
-  dias: number
-  sug: NovedadSuggestion | null
-  onContacted: () => void
-  onRescheduled: () => void
-  onNoAnswer: () => void
-  onNoSalvable: () => void
-  onRecuperada: () => void
+  order:         Order
+  busy:          boolean
+  novedadSrc:    string | null
+  sug:           NovedadSuggestion | null
+  onContacted:   () => void
+  onNoAnswer:    () => void
+  onReprogramar: () => void
+  onNoSalvable:  () => void
+  onRecuperada:  () => void
+  onConfirm:     (type: NoveltyType) => void
   isHighlighted: boolean
 }
 
 function NovedadCard({
-  order, accion, busy, novedadSrc, dias, sug,
-  onContacted, onRescheduled, onNoAnswer, onNoSalvable, onRecuperada,
+  order, busy, novedadSrc, sug,
+  onContacted, onNoAnswer, onReprogramar, onNoSalvable, onRecuperada, onConfirm,
   isHighlighted,
 }: NovedadCardProps) {
   const nombre    = order.customer_name ?? ''
@@ -145,69 +378,64 @@ function NovedadCard({
   const hasPhone  = !!order.customer_phone
   const noSalv       = order.follow_up_result === 'no_action'
   const isRecuperada = order.follow_up_result === 'recovered'
+  const needsConfirm = order.novelty_type == null && order.delivery_resolution !== 'rescheduled'
+  const badge     = noveltyBadge(order)
+  const playbook  = playbookFor(order)
+  const incumplido = acuerdoIncumplido(order)
+  const motivo    = motivoReal(order)
 
   const ubicacion = order.city
     || order.province
     || (order.customer_address ? order.customer_address.slice(0, 30) : null)
 
+  const vencido = isVencido(order)
+  const style   = COLOR_STYLES[badge.color]
+  const pbStyle = COLOR_STYLES[playbook.color]
+  const BadgeIcon = badge.Icon
+  const consecutiveNoContact = order.novelty_type === 'no_contact'
+    ? countConsecutiveNoContact(order.tracking_novedades)
+    : 0
+
   const cardBg = noSalv || isRecuperada
     ? 'bg-gray-50 border-gray-200'
-    : intentos >= 3
-      ? 'bg-red-50/40 border-red-200'
-      : intentos === 2
-        ? 'bg-orange-50/40 border-orange-200'
-        : 'bg-white border-gray-200'
+    : 'bg-white border-gray-200'
 
   return (
     <div className={`rounded-xl border-2 p-4 space-y-3 shadow-sm transition-colors
-      ${cardBg} ${isHighlighted ? 'ring-2 ring-blue-400 border-blue-300' : ''}`}>
+      ${cardBg} ${!noSalv && !isRecuperada ? style.cardAccent : ''} ${isHighlighted ? 'ring-2 ring-blue-400 border-blue-300' : ''}`}>
 
-      {/* Fila superior: orden + intentos badge */}
+      {/* 1. Badge de clasificación — lo primero que se lee */}
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          {order.order_number && (
-            <p className="text-xs font-bold text-gray-500 mb-0.5">{order.order_number}</p>
-          )}
-          <p className="font-mono text-sm font-semibold text-gray-900 truncate">
-            {order.tracking_number ?? '—'}
+        <div className="min-w-0 space-y-1">
+          <p className="font-mono text-[10px] text-gray-400 truncate">
+            {order.tracking_number ?? '—'}{order.order_number ? ` · ${order.order_number}` : ''}
           </p>
-          {novedadSrc && (
-            <p className="text-[11px] text-gray-400 mt-0.5">{daysSince(novedadSrc)}</p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span title={badge.tooltip}
+                  className={`inline-flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-full ${style.badge}`}>
+              <BadgeIcon className="w-3.5 h-3.5" />
+              {badge.label.toUpperCase()}
+            </span>
+            {vencido && (
+              <span title="El acuerdo pasó su fecha sin nueva gestión"
+                    className="inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-full bg-red-100 text-red-700">
+                <AlertCircle className="w-3 h-3" />Acuerdo vencido
+              </span>
+            )}
+            {consecutiveNoContact >= 2 && (
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-800">
+                {consecutiveNoContact} intentos consecutivos sin contacto
+              </span>
+            )}
+          </div>
+          {needsConfirm && (
+            <p className="text-[10px] text-orange-600">No sabemos si Gintracom logró hablar con el cliente.</p>
           )}
         </div>
-
-        {/* Badge de intentos */}
-        <div className="shrink-0 flex flex-col items-end gap-1">
-          <span className={`text-xs font-black px-2.5 py-1 rounded-full tabular-nums
-            ${intentos >= 3
-              ? 'bg-red-100 text-red-700'
-              : intentos === 2
-                ? 'bg-orange-100 text-orange-700'
-                : 'bg-yellow-100 text-yellow-700'
-            }`}>
-            {intentos} {intentos === 1 ? 'intento' : 'intentos'}
-          </span>
-          {intentos >= 3 && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-semibold
-                             bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full">
-              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-              Riesgo alto · {dias}d
-            </span>
-          )}
-          {intentos === 2 && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-semibold
-                             bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded-full">
-              <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-              Último intento · {dias}d
-            </span>
-          )}
-          {intentos < 2 && (
-            <span className="text-[10px] text-gray-400">{dias}d en novedad</span>
-          )}
-        </div>
+        <span className="shrink-0 text-[10px] font-bold text-gray-400 tabular-nums">{intentos} int.</span>
       </div>
 
-      {/* Cliente + teléfono */}
+      {/* 2. Cliente */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="font-semibold text-gray-900 text-sm leading-tight truncate">
@@ -227,81 +455,55 @@ function NovedadCard({
         )}
       </div>
 
-      {/* Ubicación */}
-      {(ubicacion || order.customer_address) && (
-        <div className="flex items-start gap-1.5 text-gray-600">
-          <MapPin className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5" />
-          <div className="min-w-0">
-            <p className="text-xs truncate">{ubicacion || '—'}</p>
-            {order.city && order.province && order.city !== order.province && (
-              <p className="text-[10px] text-gray-400">{order.province}</p>
-            )}
-            {order.customer_address && (
-              <p className="text-[10px] text-gray-400 truncate">{order.customer_address}</p>
-            )}
-          </div>
+      {/* 3. Motivo de Gintracom */}
+      {motivo && (
+        <div>
+          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Motivo de Gintracom</p>
+          <p className="text-xs text-gray-700 mt-0.5">{motivo}</p>
         </div>
       )}
 
-      {/* Producto */}
-      {order.product_summary && (
-        <div className="flex items-start gap-1.5">
-          <Package className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5" />
-          <p className="text-xs text-gray-600 line-clamp-2">{order.product_summary}</p>
+      {/* 4. Playbook — bloque visual con checklist */}
+      {!noSalv && !isRecuperada && (
+        <div className={`rounded-lg border px-3 py-2.5 ${pbStyle.playbookBg} ${pbStyle.playbookBorder}`}>
+          <p className={`text-[11px] font-bold flex items-center gap-1.5 ${pbStyle.playbookTitle}`}>
+            Qué debes hacer
+          </p>
+          <ul className="mt-1.5 space-y-1">
+            {playbook.items.map(item => (
+              <li key={item} className="text-[11px] text-gray-700 flex items-start gap-1.5">
+                <span className={`font-bold shrink-0 ${pbStyle.playbookCheck}`}>✓</span>
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
-      {/* Motivo/estado */}
-      <div className="flex flex-col gap-0.5">
-        {novedadSrc && (
-          <p className="text-[10px] text-gray-400 flex items-center gap-1">
-            <Clock className="w-2.5 h-2.5 shrink-0" />
-            {formatEventDate(novedadSrc)}
-          </p>
-        )}
-        {order.raw_status && (
-          <p className="text-xs text-gray-500 truncate" title={order.raw_status}>
-            {order.raw_status}
-          </p>
-        )}
-        {sug && (
-          <span className={`self-start text-[10px] font-semibold px-1.5 py-0.5 rounded-full leading-tight
-            ${sug.severity === 'critical'
-              ? 'bg-red-200 text-red-800'
-              : sug.severity === 'high'
-                ? 'bg-orange-200 text-orange-800'
-                : 'bg-amber-100 text-amber-700'
-            }`}>
-            {sug.text}
-          </span>
-        )}
-      </div>
-
-      {/* Botones de contacto — grandes para móvil */}
-      {hasPhone && (
-        <div className="grid grid-cols-2 gap-2">
+      {/* 5. Acciones — WhatsApp es el CTA dominante */}
+      {hasPhone && !noSalv && !isRecuperada && (
+        <div className="space-y-2">
           {waUrl && (
             <a href={waUrl} target="_blank" rel="noopener noreferrer"
-               className="flex items-center justify-center gap-2
+               className="flex items-center justify-center gap-2 w-full
                           bg-green-500 hover:bg-green-600 active:bg-green-700
-                          text-white text-sm font-bold px-3 py-3 rounded-xl
-                          transition-colors shadow-sm">
-              <MessageCircle className="w-5 h-5" />WhatsApp
+                          text-white text-base font-bold px-3 py-3.5 rounded-xl
+                          transition-colors shadow-md shadow-green-200/60">
+              <MessageCircle className="w-5 h-5" />Escribir por WhatsApp
             </a>
           )}
           {telUrl && (
             <a href={telUrl}
-               className="flex items-center justify-center gap-2
-                          bg-blue-500 hover:bg-blue-600 active:bg-blue-700
-                          text-white text-sm font-bold px-3 py-3 rounded-xl
-                          transition-colors shadow-sm">
-              <Phone className="w-5 h-5" />Llamar
+               className="flex items-center justify-center gap-2 w-full
+                          bg-blue-50 hover:bg-blue-100 active:bg-blue-200
+                          text-blue-700 text-sm font-semibold px-3 py-2.5 rounded-xl
+                          border border-blue-200 transition-colors">
+              <Phone className="w-4 h-4" />Llamar
             </a>
           )}
         </div>
       )}
 
-      {/* Acciones + Ver detalle */}
       <div className="space-y-2">
         {noSalv ? (
           <span className="inline-flex items-center gap-1.5 text-sm font-semibold
@@ -317,13 +519,26 @@ function NovedadCard({
           <div className="flex justify-center py-2">
             <Spinner className="w-5 h-5 text-red-500" />
           </div>
-        ) : accion ? (
-          <span className={`inline-flex items-center gap-1.5 text-sm font-semibold
-                           px-3 py-2 rounded-xl w-full justify-center
-                           ${ACTION_BADGE[accion]?.color ?? 'bg-gray-100 text-gray-600'}`}>
-            <CheckCircle2 className="w-4 h-4" />
-            {ACTION_BADGE[accion]?.label ?? accion}
-          </span>
+        ) : needsConfirm ? (
+          <div className="space-y-1.5">
+            <p className="text-xs font-semibold text-gray-700 text-center">
+              ¿La transportadora logró comunicarse con el cliente?
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => onConfirm('contacted')}
+                className="flex items-center justify-center gap-1.5 bg-blue-100 hover:bg-blue-200
+                           text-blue-700 text-sm font-medium px-3 py-2.5 rounded-xl transition-colors">
+                Sí
+              </button>
+              <button
+                onClick={() => onConfirm('no_contact')}
+                className="flex items-center justify-center gap-1.5 bg-red-100 hover:bg-red-200
+                           text-red-700 text-sm font-medium px-3 py-2.5 rounded-xl transition-colors">
+                No
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="grid grid-cols-2 gap-2">
             <button
@@ -335,10 +550,10 @@ function NovedadCard({
               <CheckCircle2 className="w-4 h-4 shrink-0" />Contactado
             </button>
             <button
-              onClick={onRescheduled}
+              onClick={onReprogramar}
               className="flex items-center justify-center gap-1.5
-                         bg-indigo-100 hover:bg-indigo-200 active:bg-indigo-300
-                         text-indigo-700 text-sm font-medium px-3 py-2.5 rounded-xl
+                         bg-purple-100 hover:bg-purple-200 active:bg-purple-300
+                         text-purple-700 text-sm font-medium px-3 py-2.5 rounded-xl
                          transition-colors">
               <CalendarClock className="w-4 h-4 shrink-0" />Reprogramar
             </button>
@@ -368,16 +583,77 @@ function NovedadCard({
             </button>
           </div>
         )}
-
-        <Link
-          href={`/orders/${order.id}`}
-          className="flex items-center justify-center gap-1.5 text-sm font-medium
-                     text-red-600 hover:text-red-800 border border-red-200 hover:border-red-400
-                     bg-white hover:bg-red-50 px-3 py-2.5 rounded-xl transition-colors w-full">
-          <ExternalLink className="w-4 h-4" />
-          Ver detalle
-        </Link>
       </div>
+
+      {/* 6. Información secundaria */}
+      <div className="border-t border-gray-100 pt-2 space-y-1.5">
+        {(ubicacion || order.customer_address) && (
+          <div className="flex items-start gap-1.5 text-gray-500">
+            <MapPin className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-xs truncate">{ubicacion || '—'}</p>
+              {order.city && order.province && order.city !== order.province && (
+                <p className="text-[10px] text-gray-400">{order.province}</p>
+              )}
+            </div>
+          </div>
+        )}
+        {order.product_summary && (
+          <div className="flex items-start gap-1.5">
+            <Package className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5" />
+            <p className="text-xs text-gray-600 line-clamp-2">{order.product_summary}</p>
+          </div>
+        )}
+        {order.delivery_resolution === 'rescheduled' && order.rescheduled_date && (
+          <div className="flex items-start gap-1.5">
+            <CalendarClock className="w-3.5 h-3.5 text-purple-500 shrink-0 mt-0.5" />
+            <p className="text-xs text-purple-700 font-semibold">
+              {order.rescheduled_date}{order.rescheduled_note ? ` · ${order.rescheduled_note}` : ''}
+            </p>
+          </div>
+        )}
+        {incumplido && (
+          <div className="flex items-start gap-1.5">
+            <History className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5" />
+            <p className="text-[11px] text-gray-400">
+              Último acuerdo incumplido — {order.rescheduled_date}
+              {order.rescheduled_note ? ` · ${order.rescheduled_note}` : ''}
+            </p>
+          </div>
+        )}
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-gray-400">
+          {novedadSrc && (
+            <span className="flex items-center gap-1">
+              <Clock className="w-2.5 h-2.5 shrink-0" />
+              Última novedad: {timeAgo(novedadSrc)}
+            </span>
+          )}
+          <span>Última gestión: {lastActionLabel(order)}</span>
+          {order.last_escalation_at && (
+            <span className="text-orange-600 font-medium">Escalado {timeAgo(order.last_escalation_at)}</span>
+          )}
+        </div>
+        {sug && (
+          <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full leading-tight
+            ${sug.severity === 'critical'
+              ? 'bg-red-200 text-red-800'
+              : sug.severity === 'high'
+                ? 'bg-orange-200 text-orange-800'
+                : 'bg-amber-100 text-amber-700'
+            }`}>
+            {sug.text}
+          </span>
+        )}
+      </div>
+
+      <Link
+        href={`/orders/${order.id}`}
+        className="flex items-center justify-center gap-1.5 text-sm font-medium
+                   text-red-600 hover:text-red-800 border border-red-200 hover:border-red-400
+                   bg-white hover:bg-red-50 px-3 py-2.5 rounded-xl transition-colors w-full">
+        <ExternalLink className="w-4 h-4" />
+        Ver detalle
+      </Link>
     </div>
   )
 }
@@ -486,20 +762,22 @@ export default function NovedadPage() {
 
   const initNovedadTab = (): Tab => {
     const f = searchParamsObj.get('filter')
-    if (f === '2-intentos')    return 'dos'
     if (f === 'indemnizacion') return 'indemnizacion'
-    return 'all'
+    return 'sin-contacto'
   }
   const [activeTab, setActiveTab]     = useState<Tab>(initNovedadTab)
   const [indemnizacionOrders, setIndemnizacionOrders] = useState<Order[]>([])
   const [searchQuery, setSearchQuery] = useState('')
 
-  const [actionMap, setActionMap]   = useState<Record<string, string>>({})
   const [loadingRow, setLoadingRow] = useState<Record<string, boolean>>({})
   const [taskMap, setTaskMap]       = useState<Record<string, string>>({})
   const [recuperadasDbOrders, setRecuperadasDbOrders] = useState<RecuperadaEntry[]>([])
   const [entregadasFilter, setEntregadasFilter] = useState<'hoy' | 'ayer' | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
+
+  const [reprogramandoId, setReprogramandoId] = useState<string | null>(null)
+  const [reprogError, setReprogError]         = useState<string | null>(null)
+  const [reprogSaving, setReprogSaving]       = useState(false)
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
 
@@ -572,35 +850,68 @@ export default function NovedadPage() {
     })
   }
 
-  async function postAction(
-    orderId: string,
-    actionKey: string,
-    actionType: ActionType,
-    contactResult?: ContactResult,
-  ) {
+  // Único punto de escritura para acciones de Novedades — siempre pasa por el
+  // motor de dominio (/api/orders/[id]/actions → recordNoveltyAction), nunca
+  // escribe directamente novelty_type/delivery_resolution desde el cliente.
+  async function postNoveltyAction(orderId: string, body: Record<string, unknown>): Promise<boolean> {
     setLoadingRow(prev => ({ ...prev, [orderId]: true }))
     try {
-      const taskBody = actionKey === 'rescheduled'
-        ? { status: 'completed', result: 'rescheduled' }
-        : { status: 'in_progress' }
-      await Promise.all([
-        fetch(`/api/orders/${orderId}/actions`, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ action_type: actionType, contact_result: contactResult ?? null }),
-        }),
-        patchTask(orderId, taskBody),
-      ])
-      setActionMap(prev => ({ ...prev, [orderId]: actionKey }))
+      const res = await fetch(`/api/orders/${orderId}/actions`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(body),
+      })
+      if (res.ok) {
+        const payload = await res.json()
+        if (payload?.order) {
+          setAllOrders(prev => prev.map(o => o.id === orderId ? { ...o, ...payload.order } : o))
+        }
+        return true
+      }
+      const errBody = await res.json().catch(() => ({}))
+      setReprogError(errBody?.error ?? 'No se pudo guardar la acción')
+      return false
     } finally {
       setLoadingRow(prev => ({ ...prev, [orderId]: false }))
+    }
+  }
+
+  async function handleContacted(orderId: string) {
+    const ok = await postNoveltyAction(orderId, { action_type: 'contacted' })
+    if (ok) patchTask(orderId, { status: 'in_progress' })
+  }
+
+  async function handleNoAnswer(orderId: string) {
+    const ok = await postNoveltyAction(orderId, { action_type: 'contacted', contact_result: 'no_answer' })
+    if (ok) patchTask(orderId, { status: 'in_progress' })
+  }
+
+  async function handleConfirm(orderId: string, confirmedType: NoveltyType) {
+    await postNoveltyAction(orderId, { action_type: 'contacted', confirm_communication: confirmedType })
+  }
+
+  async function handleReschedule(orderId: string, date: string, note: string | null) {
+    setReprogSaving(true)
+    setReprogError(null)
+    try {
+      const ok = await postNoveltyAction(orderId, {
+        action_type: 'rescheduled',
+        rescheduled_date: date,
+        rescheduled_note: note,
+      })
+      if (ok) {
+        await patchTask(orderId, { status: 'completed', result: 'rescheduled' })
+        setReprogramandoId(null)
+      }
+    } finally {
+      setReprogSaving(false)
     }
   }
 
   async function markNoSalvable(orderId: string) {
     setLoadingRow(prev => ({ ...prev, [orderId]: true }))
     try {
-      await Promise.all([
+      const [patchRes] = await Promise.all([
         fetch(`/api/orders/${orderId}`, {
           method:  'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -608,9 +919,10 @@ export default function NovedadPage() {
         }),
         patchTask(orderId, { status: 'completed', result: 'no_action' }),
       ])
-      setAllOrders(prev =>
-        prev.map(o => o.id === orderId ? { ...o, follow_up_result: 'no_action' } : o)
-      )
+      if (patchRes.ok) {
+        const updated = await patchRes.json()
+        setAllOrders(prev => prev.map(o => o.id === orderId ? { ...o, ...updated } : o))
+      }
     } finally {
       setLoadingRow(prev => ({ ...prev, [orderId]: false }))
     }
@@ -650,17 +962,34 @@ export default function NovedadPage() {
     () => allOrders.filter(o => o.follow_up_result === 'no_action'),
     [allOrders],
   )
-  const dosExactos = useMemo(
-    () => activeOrders.filter(o => (o.delivery_attempts ?? 0) === 2),
+  const reprogramadosList = useMemo(() => {
+    const list = activeOrders.filter(o => o.delivery_resolution === 'rescheduled')
+    const today = rdTodayDateStr()
+    const priority = (o: Order) => {
+      if (!o.rescheduled_date) return 3
+      if (o.rescheduled_date < today) return 0 // vencido
+      if (o.rescheduled_date === today) return 1 // hoy
+      return 2 // próximo
+    }
+    return [...list].sort((a, b) => {
+      const pa = priority(a), pb = priority(b)
+      if (pa !== pb) return pa - pb
+      return (a.rescheduled_date ?? '').localeCompare(b.rescheduled_date ?? '')
+    })
+  }, [activeOrders])
+
+  const sinContactoList = useMemo(
+    () => activeOrders.filter(o =>
+      o.delivery_resolution !== 'rescheduled' &&
+      (o.novelty_type === 'no_contact' || o.novelty_type == null)
+    ),
     [activeOrders],
   )
-  const tresOmas = useMemo(
-    () => activeOrders.filter(o => (o.delivery_attempts ?? 0) >= 3),
+  const contactoRealizadoList = useMemo(
+    () => activeOrders.filter(o =>
+      o.delivery_resolution !== 'rescheduled' && o.novelty_type === 'contacted'
+    ),
     [activeOrders],
-  )
-  const reprogramadosSesion = useMemo(
-    () => activeOrders.filter(o => actionMap[o.id] === 'rescheduled'),
-    [activeOrders, actionMap],
   )
 
   const displayedOrders = useMemo(() => {
@@ -669,35 +998,37 @@ export default function NovedadPage() {
 
     let base: Order[]
     switch (activeTab) {
-      case 'dos':           base = dosExactos;          break
-      case 'tres-mas':      base = tresOmas;             break
-      case 'reprogramados': base = reprogramadosSesion;  break
-      case 'no-salvables':  base = noSalvables;          break
-      default:              base = activeOrders
+      case 'sin-contacto':       base = sinContactoList;        break
+      case 'contacto-realizado': base = contactoRealizadoList;  break
+      case 'reprogramados':      base = reprogramadosList;      break
+      case 'no-salvables':       base = noSalvables;            break
+      default:                   base = []
     }
 
-    base = [...base].sort((a, b) => (b.delivery_attempts ?? 0) - (a.delivery_attempts ?? 0))
+    if (activeTab !== 'reprogramados') {
+      base = [...base].sort((a, b) => (b.delivery_attempts ?? 0) - (a.delivery_attempts ?? 0))
+    }
 
     if (!searchQuery.trim()) return base
     const q = searchQuery.toLowerCase()
     return base.filter(o =>
-      (o.tracking_number  ?? '').toLowerCase().includes(q) ||
-      (o.customer_name    ?? '').toLowerCase().includes(q) ||
-      (o.customer_phone   ?? '').toLowerCase().includes(q) ||
-      (o.city             ?? '').toLowerCase().includes(q) ||
-      (o.raw_status       ?? '').toLowerCase().includes(q)
+      (o.tracking_number     ?? '').toLowerCase().includes(q) ||
+      (o.customer_name       ?? '').toLowerCase().includes(q) ||
+      (o.customer_phone      ?? '').toLowerCase().includes(q) ||
+      (o.city                ?? '').toLowerCase().includes(q) ||
+      (o.last_attempt_reason ?? '').toLowerCase().includes(q) ||
+      (o.raw_status          ?? '').toLowerCase().includes(q)
     )
-  }, [activeOrders, noSalvables, dosExactos, tresOmas, reprogramadosSesion, activeTab, searchQuery])
+  }, [sinContactoList, contactoRealizadoList, reprogramadosList, noSalvables, activeTab, searchQuery])
 
   const tabCounts = useMemo<Record<Tab, number>>(() => ({
-    all:            activeOrders.length,
-    dos:            dosExactos.length,
-    'tres-mas':     tresOmas.length,
-    reprogramados:  reprogramadosSesion.length,
-    'no-salvables': noSalvables.length,
-    recuperadas:    recuperadasDbOrders.length,
-    indemnizacion:  indemnizacionOrders.length,
-  }), [activeOrders, dosExactos, tresOmas, reprogramadosSesion, noSalvables, recuperadasDbOrders, indemnizacionOrders])
+    'sin-contacto':       sinContactoList.length,
+    'contacto-realizado': contactoRealizadoList.length,
+    reprogramados:        reprogramadosList.length,
+    'no-salvables':       noSalvables.length,
+    recuperadas:          recuperadasDbOrders.length,
+    indemnizacion:        indemnizacionOrders.length,
+  }), [sinContactoList, contactoRealizadoList, reprogramadosList, noSalvables, recuperadasDbOrders, indemnizacionOrders])
 
   const displayedRecuperadas = useMemo(() => {
     let entries = [...recuperadasDbOrders]
@@ -735,12 +1066,20 @@ export default function NovedadPage() {
   )
   const totalPagesRecuperadas = Math.ceil(displayedRecuperadas.length / PAGE_SIZE)
 
-  const repSesion = reprogramadosSesion.length
+  const totalReprogramados = reprogramadosList.length
+
+  const reprogramandoOrder = reprogramandoId ? allOrders.find(o => o.id === reprogramandoId) ?? null : null
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const totalPages = activeTab === 'recuperadas' ? totalPagesRecuperadas : activeTab === 'indemnizacion' ? 1 : totalPagesNovedad
   const activeCount = activeTab === 'recuperadas' ? displayedRecuperadas.length : activeTab === 'indemnizacion' ? indemnizacionOrders.length : displayedOrders.length
+
+  const infoBannerText = activeTab === 'contacto-realizado'
+    ? 'Objetivo: coordinar el siguiente intento de entrega.'
+    : activeTab === 'reprogramados'
+      ? 'Da seguimiento a los acuerdos — prioriza los vencidos.'
+      : 'Objetivo: restablecer comunicación entre cliente y transportadora.'
 
   return (
     <div className="space-y-3 md:space-y-4">
@@ -776,16 +1115,16 @@ export default function NovedadPage() {
                 <p className="text-white font-semibold text-sm md:text-base">Gestión de novedades</p>
                 {/* Subtítulo solo en desktop */}
                 <p className="hidden md:block text-red-100 text-xs mt-0.5">
-                  Coordina reentregas y recupera pedidos antes de que lleguen a devolución
+                  Clasifica rápidamente cada incidencia y aplica el playbook correcto para recuperar la entrega
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
-              {/* Reprogramados — solo desktop */}
-              {repSesion > 0 && (
+              {/* Reprogramados */}
+              {totalReprogramados > 0 && (
                 <span className="hidden md:block text-sm text-green-200 font-semibold">
-                  ✓ {repSesion} reprogramado{repSesion !== 1 ? 's' : ''} esta sesión
+                  ✓ {totalReprogramados} reprogramado{totalReprogramados !== 1 ? 's' : ''}
                 </span>
               )}
               <p className="text-red-100 text-[10px] md:text-xs hidden sm:block">
@@ -805,9 +1144,9 @@ export default function NovedadPage() {
           </div>
 
           {/* Reprogramados en móvil — fila separada */}
-          {repSesion > 0 && (
+          {totalReprogramados > 0 && (
             <p className="md:hidden text-xs text-green-200 font-semibold mt-2">
-              ✓ {repSesion} reprogramado{repSesion !== 1 ? 's' : ''} esta sesión
+              ✓ {totalReprogramados} reprogramado{totalReprogramados !== 1 ? 's' : ''}
             </p>
           )}
         </div>
@@ -827,7 +1166,7 @@ export default function NovedadPage() {
             <div className="flex items-center gap-2 flex-wrap flex-1">
               {([
                 { label: 'Trabajados',    count: perf.novedadesTrabajadasHoy,  cls: 'bg-blue-100   text-blue-700'   },
-                { label: 'Reprogramados', count: perf.pedidosReprogramadosHoy, cls: 'bg-indigo-100 text-indigo-700' },
+                { label: 'Reprogramados', count: perf.pedidosReprogramadosHoy, cls: 'bg-purple-100 text-purple-700' },
                 { label: 'Contactados',   count: perf.pedidosContactadosHoy,   cls: 'bg-slate-100  text-slate-700'  },
                 { label: 'No responden',  count: perf.pedidosNoRespondenHoy,   cls: 'bg-amber-100  text-amber-700'  },
                 { label: 'No salvables',  count: perf.pedidosNoSalvablesHoy,   cls: 'bg-red-100    text-red-700'    },
@@ -865,50 +1204,49 @@ export default function NovedadPage() {
         <div className="grid grid-cols-2 md:grid-cols-3 gap-2 md:gap-3">
           {([
             {
-              tab:   'all'      as Tab,
-              count: activeOrders.length,
-              label: 'Pendientes',
-              sub:   'Total activos en novedad',
-              Icon:  AlertCircle,
-              base:  'border-red-200 bg-red-50 text-red-700',
-              active:'border-red-400 bg-red-100 text-red-800 ring-2 ring-red-300/50',
-              hover: 'hover:bg-red-100',
+              tab:         'sin-contacto' as Tab,
+              count:       sinContactoList.length,
+              label:       'Sin contacto',
+              explanation: 'Gintracom no logró hablar con el cliente.',
+              objetivo:    'Restablecer la comunicación.',
+              Icon:        PhoneMissed,
+              style:       COLOR_STYLES.amber,
             },
             {
-              tab:   'dos'      as Tab,
-              count: dosExactos.length,
-              label: '2 intentos',
-              sub:   'Último intento disponible',
-              Icon:  RotateCcw,
-              base:  'border-orange-200 bg-orange-50 text-orange-700',
-              active:'border-orange-400 bg-orange-100 text-orange-800 ring-2 ring-orange-300/50',
-              hover: 'hover:bg-orange-100',
+              tab:         'contacto-realizado' as Tab,
+              count:       contactoRealizadoList.length,
+              label:       'Contacto realizado',
+              explanation: 'El cliente ya habló con Gintracom.',
+              objetivo:    'Coordinar la siguiente entrega.',
+              Icon:        MessageCircle,
+              style:       COLOR_STYLES.blue,
             },
             {
-              tab:   'tres-mas' as Tab,
-              count: tresOmas.length,
-              label: 'Riesgo alto (3+)',
-              sub:   'Alto riesgo de devolución',
-              Icon:  ShieldAlert,
-              base:  'border-rose-200 bg-rose-50 text-rose-700',
-              active:'border-rose-400 bg-rose-100 text-rose-800 ring-2 ring-rose-300/50',
-              hover: 'hover:bg-rose-100',
+              tab:         'reprogramados' as Tab,
+              count:       reprogramadosList.length,
+              label:       'Reprogramados',
+              explanation: 'Existe una fecha acordada.',
+              objetivo:    'Dar seguimiento al acuerdo.',
+              Icon:        CalendarClock,
+              style:       COLOR_STYLES.purple,
             },
-          ] as const).map(({ tab, count, label, sub, Icon, base, active, hover }, idx) => (
+          ] as const).map(({ tab, count, label, explanation, objetivo, Icon, style }, idx) => (
             <button
               key={tab}
               onClick={() => handleTabChange(tab)}
-              // En móvil, "Pendientes" ocupa 2 columnas para destacarlo
               className={`flex items-center gap-2 md:gap-3 p-3 md:p-4 rounded-xl border-2 text-left transition-all
                 ${idx === 0 ? 'col-span-2 md:col-span-1' : ''}
-                ${activeTab === tab ? active : `${base} ${hover}`}`}
+                ${activeTab === tab ? style.kpiActive : `${style.kpiBase} ${style.kpiHover}`}`}
             >
               <div className="flex-1 min-w-0">
-                <p className="text-2xl md:text-3xl font-black tabular-nums leading-none">{count}</p>
-                <p className="text-xs md:text-sm font-bold mt-1">{label}</p>
-                <p className="text-[10px] md:text-xs opacity-60 mt-0.5 truncate">{sub}</p>
+                <div className="flex items-center gap-2">
+                  <Icon className="w-5 h-5 md:w-6 md:h-6 opacity-70 shrink-0" />
+                  <p className="text-2xl md:text-3xl font-black tabular-nums leading-none">{count}</p>
+                </div>
+                <p className="text-xs md:text-sm font-bold mt-1.5">{label}</p>
+                <p className="text-[10px] md:text-[11px] opacity-70 mt-0.5 leading-snug">{explanation}</p>
+                <p className="text-[9px] md:text-[10px] font-semibold mt-1 opacity-90">Objetivo: {objetivo}</p>
               </div>
-              <Icon className="w-6 h-6 md:w-7 md:h-7 opacity-25 shrink-0" />
             </button>
           ))}
         </div>
@@ -954,7 +1292,7 @@ export default function NovedadPage() {
             {
               label: 'Reprogramados hoy',
               count: perf?.pedidosReprogramadosHoy ?? '…',
-              cls:   'bg-indigo-50 text-indigo-700 border-indigo-100',
+              cls:   'bg-purple-50 text-purple-700 border-purple-100',
             },
             {
               label: 'Contactados hoy',
@@ -999,7 +1337,7 @@ export default function NovedadPage() {
           <div className="px-4 py-2.5 md:px-5 md:py-3 bg-red-50 border-b border-red-200 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
             <p className="text-xs md:text-sm font-semibold text-red-800">
-              Prioriza contactar primero los pedidos con 2 o más intentos
+              {infoBannerText}
             </p>
           </div>
 
@@ -1011,7 +1349,7 @@ export default function NovedadPage() {
                 type="text"
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Buscar guía, nombre, teléfono, ciudad…"
+                placeholder="Buscar guía, nombre, teléfono, ciudad, motivo…"
                 className="w-full pl-9 pr-4 py-2.5 md:py-2 text-sm border border-gray-200 rounded-lg
                            focus:outline-none focus:ring-2 focus:ring-red-300 focus:border-red-300
                            placeholder:text-gray-400"
@@ -1067,10 +1405,10 @@ export default function NovedadPage() {
                   : 'No hay pedidos en esta categoría'}
               </p>
               <button
-                onClick={() => { handleTabChange('all'); setSearchQuery('') }}
+                onClick={() => { handleTabChange('sin-contacto'); setSearchQuery('') }}
                 className="text-red-500 text-sm mt-2 hover:underline"
               >
-                Ver todos los pendientes
+                Ver Sin contacto
               </button>
             </div>
           )}
@@ -1083,19 +1421,17 @@ export default function NovedadPage() {
           )}
 
           {/* ── MOBILE: Cards novedades activas (< md) ── */}
-          {!loading && activeTab !== 'recuperadas' && pagedOrders.length > 0 && (
+          {!loading && activeTab !== 'recuperadas' && activeTab !== 'indemnizacion' && pagedOrders.length > 0 && (
             <div className="md:hidden divide-y divide-red-50">
               <div className="p-3 space-y-3">
                 {pagedOrders.map(order => {
-                  const nombre    = order.customer_name ?? ''
-                  const intentos  = order.delivery_attempts ?? 0
-                  const accion    = actionMap[order.id]
-                  const busy      = !!loadingRow[order.id]
+                  const busy = !!loadingRow[order.id]
 
-                  const lastRawFecha = order.tracking_novedades?.at(-1)?.fecha ?? null
+                  const lastRawFecha = getLatestNovedadEvent(order.tracking_novedades)?.fecha ?? null
                   const novedadSrc   = order.last_novedad_at ?? (lastRawFecha ? parseEFIDate(lastRawFecha) : null)
 
                   const dias = daysInNovedad(order)
+                  const intentos = order.delivery_attempts ?? 0
                   const sug  = intentos === 2 ? supervisorSuggestion(dias) : null
 
                   const isHighlighted = !!(trackingParam && order.tracking_number === trackingParam)
@@ -1104,16 +1440,15 @@ export default function NovedadPage() {
                     <NovedadCard
                       key={order.id}
                       order={order}
-                      accion={accion}
                       busy={busy}
                       novedadSrc={novedadSrc}
-                      dias={dias}
                       sug={sug}
-                      onContacted={() => postAction(order.id, 'contacted', 'contacted')}
-                      onRescheduled={() => postAction(order.id, 'rescheduled', 'rescheduled')}
-                      onNoAnswer={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
+                      onContacted={() => handleContacted(order.id)}
+                      onNoAnswer={() => handleNoAnswer(order.id)}
+                      onReprogramar={() => { setReprogError(null); setReprogramandoId(order.id) }}
                       onNoSalvable={() => markNoSalvable(order.id)}
                       onRecuperada={() => markRecuperada(order.id)}
+                      onConfirm={type => handleConfirm(order.id, type)}
                       isHighlighted={isHighlighted}
                     />
                   )
@@ -1123,11 +1458,11 @@ export default function NovedadPage() {
           )}
 
           {/* ── DESKTOP: Tabla novedades activas (≥ md) ── */}
-          {!loading && activeTab !== 'recuperadas' && pagedOrders.length > 0 && (
+          {!loading && activeTab !== 'recuperadas' && activeTab !== 'indemnizacion' && pagedOrders.length > 0 && (
             <table className="hidden md:table w-full text-sm">
               <thead className="bg-red-50/60 border-b border-red-100">
                 <tr>
-                  {['Guía', 'Cliente', 'Ciudad', 'Intentos', 'Motivo', 'Contactar', 'Acción', ''].map(h => (
+                  {['Guía', 'Cliente', 'Ciudad', 'Novedad', 'Contactar', 'Acción', ''].map(h => (
                     <th key={h}
                         className="px-3 py-3 text-left text-xs font-semibold text-red-800 whitespace-nowrap">
                       {h}
@@ -1142,12 +1477,16 @@ export default function NovedadPage() {
                   const waUrl     = whatsAppUrl(order.customer_phone, buildNovedadMsg(nombre, order.product_summary))
                   const telUrl    = callUrl(order.customer_phone)
                   const hasPhone  = !!order.customer_phone
-                  const accion    = actionMap[order.id]
                   const busy      = !!loadingRow[order.id]
                   const noSalv       = order.follow_up_result === 'no_action'
                   const isRecuperada = order.follow_up_result === 'recovered'
+                  const needsConfirm = order.novelty_type == null && order.delivery_resolution !== 'rescheduled'
+                  const badge     = noveltyBadge(order)
+                  const playbook  = playbookFor(order)
+                  const incumplido = acuerdoIncumplido(order)
+                  const motivo    = motivoReal(order)
 
-                  const lastRawFecha = order.tracking_novedades?.at(-1)?.fecha ?? null
+                  const lastRawFecha = getLatestNovedadEvent(order.tracking_novedades)?.fecha ?? null
                   const novedadSrc   = order.last_novedad_at ?? (lastRawFecha ? parseEFIDate(lastRawFecha) : null)
 
                   const dias = daysInNovedad(order)
@@ -1186,6 +1525,10 @@ export default function NovedadPage() {
                             {daysSince(novedadSrc)}
                           </p>
                         )}
+                        <span className={`inline-flex text-[9px] font-bold px-1.5 py-0.5 rounded-full mt-1
+                          ${intentos >= 3 ? 'bg-red-100 text-red-700' : intentos === 2 ? 'bg-orange-100 text-orange-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                          {intentos} int.
+                        </span>
                       </td>
 
                       {/* Cliente */}
@@ -1218,68 +1561,56 @@ export default function NovedadPage() {
                         )}
                       </td>
 
-                      {/* Intentos + alerta */}
-                      <td className="px-3 py-2.5">
+                      {/* Novedad: badge + motivo + última gestión + reprogramación + playbook */}
+                      <td className="px-3 py-2.5 max-w-[240px]">
                         <div className="flex flex-col gap-1">
-                          <span className={`text-sm font-black tabular-nums
-                            ${intentos >= 3 ? 'text-red-600'
-                              : intentos === 2 ? 'text-orange-600'
-                              : 'text-yellow-600'}`}>
-                            {intentos}
-                          </span>
-                          {intentos >= 3 ? (
-                            <>
-                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold
-                                               bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full">
-                                <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                                Riesgo alto
-                              </span>
-                              <span className="text-[10px] text-red-600 font-medium leading-tight">
-                                {dias}d en novedad
-                              </span>
-                            </>
-                          ) : intentos === 2 ? (
-                            <>
-                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold
-                                               bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded-full">
-                                <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-                                Último intento
-                              </span>
-                              <span className="text-[10px] text-gray-400 tabular-nums">
-                                {dias}d en novedad
-                              </span>
-                              {sug && (
-                                <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full leading-tight
-                                  ${sug.severity === 'critical'
-                                    ? 'bg-red-200 text-red-800'
-                                    : sug.severity === 'high'
-                                      ? 'bg-orange-200 text-orange-800'
-                                      : 'bg-amber-100 text-amber-700'
-                                  }`}>
-                                  {sug.text}
-                                </span>
-                              )}
-                            </>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold
-                                             bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded-full">
-                              Pendiente
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span title={badge.tooltip}
+                                  className={`self-start inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${COLOR_STYLES[badge.color].badge}`}>
+                              <badge.Icon className="w-2.5 h-2.5" />
+                              {badge.label.toUpperCase()}
                             </span>
+                            {isVencido(order) && (
+                              <span title="El acuerdo pasó su fecha sin nueva gestión"
+                                    className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">
+                                <AlertCircle className="w-2.5 h-2.5" />Vencido
+                              </span>
+                            )}
+                            {order.novelty_type === 'no_contact' && countConsecutiveNoContact(order.tracking_novedades) >= 2 && (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-800">
+                                {countConsecutiveNoContact(order.tracking_novedades)} consec. sin contacto
+                              </span>
+                            )}
+                          </div>
+                          {motivo && (
+                            <div>
+                              <p className="text-[9px] font-bold text-gray-400 uppercase tracking-wide">Motivo de Gintracom</p>
+                              <p className="text-xs text-gray-700 truncate" title={motivo}>{motivo}</p>
+                            </div>
                           )}
-                        </div>
-                      </td>
-
-                      {/* Motivo */}
-                      <td className="px-3 py-2.5 max-w-[120px]">
-                        {novedadSrc && (
-                          <p className="text-[10px] text-gray-400 mb-0.5 flex items-center gap-1">
-                            <Clock className="w-2.5 h-2.5 shrink-0" />
-                            {formatEventDate(novedadSrc)}
+                          <p className="text-[10px] text-gray-400">
+                            Última novedad: {novedadSrc ? timeAgo(novedadSrc) : '—'} · Gestión: {lastActionLabel(order)}
+                            {order.last_escalation_at && <span className="text-orange-600 ml-1">· Escalado {timeAgo(order.last_escalation_at)}</span>}
                           </p>
-                        )}
-                        <p className="text-xs text-gray-500 truncate" title={order.raw_status ?? ''}>
-                          {order.raw_status ?? '—'}
-                        </p>
+                          {order.delivery_resolution === 'rescheduled' && order.rescheduled_date && (
+                            <p className="text-[10px] font-semibold text-purple-700">
+                              {order.rescheduled_date}{order.rescheduled_note ? ` · ${order.rescheduled_note}` : ''}
+                            </p>
+                          )}
+                          {incumplido && (
+                            <p className="text-[10px] text-gray-400">
+                              Último acuerdo incumplido — {order.rescheduled_date}
+                            </p>
+                          )}
+                          {sug ? (
+                            <span className={`self-start text-[10px] font-semibold px-1.5 py-0.5 rounded-full leading-tight
+                              ${sug.severity === 'critical' ? 'bg-red-200 text-red-800' : sug.severity === 'high' ? 'bg-orange-200 text-orange-800' : 'bg-amber-100 text-amber-700'}`}>
+                              {sug.text}
+                            </span>
+                          ) : !noSalv && !isRecuperada ? (
+                            <p className={`text-[10px] italic font-medium ${COLOR_STYLES[playbook.color].playbookTitle}`}>{playbook.title}</p>
+                          ) : null}
+                        </div>
                       </td>
 
                       {/* Contactar */}
@@ -1322,17 +1653,25 @@ export default function NovedadPage() {
                           </span>
                         ) : busy ? (
                           <Spinner className="w-4 h-4 text-red-500" />
-                        ) : accion ? (
-                          <span className={`inline-flex items-center gap-1 text-xs font-semibold
-                                           px-2.5 py-1 rounded-full
-                                           ${ACTION_BADGE[accion]?.color ?? 'bg-gray-100 text-gray-600'}`}>
-                            <CheckCircle2 className="w-3 h-3" />
-                            {ACTION_BADGE[accion]?.label ?? accion}
-                          </span>
+                        ) : needsConfirm ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleConfirm(order.id, 'contacted')}
+                              className="bg-blue-100 hover:bg-blue-200 text-blue-700 text-[11px] font-medium px-2 py-1 rounded"
+                            >
+                              Sí contactó
+                            </button>
+                            <button
+                              onClick={() => handleConfirm(order.id, 'no_contact')}
+                              className="bg-red-100 hover:bg-red-200 text-red-700 text-[11px] font-medium px-2 py-1 rounded"
+                            >
+                              No
+                            </button>
+                          </div>
                         ) : (
                           <div className="grid grid-cols-2 gap-1">
                             <button
-                              onClick={() => postAction(order.id, 'contacted', 'contacted')}
+                              onClick={() => handleContacted(order.id)}
                               className="flex items-center gap-1 bg-slate-100 hover:bg-slate-200
                                          text-slate-700 text-[11px] font-medium px-2 py-1 rounded
                                          transition-colors whitespace-nowrap"
@@ -1340,15 +1679,15 @@ export default function NovedadPage() {
                               <CheckCircle2 className="w-3 h-3 shrink-0" />Contactado
                             </button>
                             <button
-                              onClick={() => postAction(order.id, 'rescheduled', 'rescheduled')}
-                              className="flex items-center gap-1 bg-indigo-100 hover:bg-indigo-200
-                                         text-indigo-700 text-[11px] font-medium px-2 py-1 rounded
+                              onClick={() => { setReprogError(null); setReprogramandoId(order.id) }}
+                              className="flex items-center gap-1 bg-purple-100 hover:bg-purple-200
+                                         text-purple-700 text-[11px] font-medium px-2 py-1 rounded
                                          transition-colors whitespace-nowrap"
                             >
                               <CalendarClock className="w-3 h-3 shrink-0" />Reprogramar
                             </button>
                             <button
-                              onClick={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
+                              onClick={() => handleNoAnswer(order.id)}
                               className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
                                          text-amber-700 text-[11px] font-medium px-2 py-1 rounded
                                          transition-colors whitespace-nowrap"
@@ -1700,11 +2039,22 @@ export default function NovedadPage() {
       <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3 md:px-5 md:py-4">
         <p className="text-xs text-gray-500 leading-relaxed">
           <strong className="text-gray-700">Flujo recomendado:</strong>{' '}
-          Envía WhatsApp o llama para coordinar la nueva entrega →
-          Registra &quot;Reprogramar&quot; cuando el cliente confirme una nueva fecha →
-          Si no responde en 2 intentos, marca como &quot;No salv.&quot; para gestionar la devolución.
+          Restablece o confirma la comunicación con el cliente →
+          Coordina el próximo intento y, si hay acuerdo real de fecha, regístralo en &quot;Reprogramar&quot; →
+          Si no hay forma de contactar tras varios intentos, marca &quot;No salv.&quot; para gestionar la devolución.
         </p>
       </div>
+
+      {/* ── Modal de reprogramación ── */}
+      {reprogramandoOrder && (
+        <ReprogramarModal
+          order={reprogramandoOrder}
+          saving={reprogSaving}
+          error={reprogError}
+          onClose={() => { setReprogramandoId(null); setReprogError(null) }}
+          onSave={(date, note) => handleReschedule(reprogramandoOrder.id, date, note)}
+        />
+      )}
     </div>
   )
 }

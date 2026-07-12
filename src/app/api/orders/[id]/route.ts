@@ -66,6 +66,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       return NextResponse.json({ error: 'Sin campos válidos para actualizar' }, { status: 400 })
     }
 
+    // Motor de Novedades: marcar "No salvable" es una gestión real del agente,
+    // aunque no pase por /actions (no inserta agent_actions — es una decisión
+    // administrativa, no un contacto). Se registra igual en last_action_at.
+    if (update.follow_up_result === 'no_action') {
+      update.last_action_at = new Date().toISOString()
+    }
+
     const { data, error } = await supabase
       .from('orders')
       .update(update)

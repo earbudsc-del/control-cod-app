@@ -1,6 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import type { DeliveryResolution } from '@/types'
 import { parseEFITracking } from './efi-parser'
 import { parseEFIDate } from './parse-efi-date'
+import { processNoveltyTracking } from '@/lib/novelty/process-novelty-tracking'
+import { getLatestNovedadEvent } from '@/lib/novelty/novedad-history'
 
 const EFI_BASE = 'https://effi.com.co/tracking/index'
 
@@ -107,7 +110,6 @@ export async function updateOrderTracking(
   if (tracking.estado_actual && isValidEstadoText(tracking.estado_actual)) {
     updates.raw_status = tracking.estado_actual
   }
-  if (tracking.last_attempt_reason)            updates.last_attempt_reason  = tracking.last_attempt_reason
   if (tracking.historial_estados.length  > 0)  updates.tracking_history     = tracking.historial_estados
   if (tracking.historial_novedades.length > 0) updates.tracking_novedades   = tracking.historial_novedades
 
@@ -119,17 +121,45 @@ export async function updateOrderTracking(
   const shipmentCreatedAt = parseEFIDate(tracking.fecha_creacion)
   if (shipmentCreatedAt) updates.shipment_created_at = shipmentCreatedAt
 
-  // last_novedad_at: fecha del último intento fallido / novedad según EFI
-  // Usa el mismo índice que ya usa el parser para last_attempt_reason
-  const lastNovedad   = tracking.historial_novedades.at(-1)
-  const lastNovedadAt = parseEFIDate(lastNovedad?.fecha)
+  // Evento de novedad realmente más reciente — determinado por fecha, NUNCA
+  // por posición del arreglo (bug corregido: `.at(-1)` asumía orden ascendente,
+  // pero tracking_novedades llega con el más reciente en el índice 0).
+  const latestNovedad = getLatestNovedadEvent(tracking.historial_novedades)
+  const lastNovedadAt = latestNovedad ? parseEFIDate(latestNovedad.fecha) : null
   if (lastNovedadAt) updates.last_novedad_at = lastNovedadAt
+
+  // last_attempt_reason: el motivo del evento realmente más reciente. Antes
+  // se usaba tracking.last_attempt_reason directo del parser, que padecía el
+  // mismo bug de indexación — quedaba fijado al motivo más antiguo del
+  // historial en vez del vigente.
+  const currentReason = latestNovedad?.mensaje ?? tracking.last_attempt_reason ?? null
+  if (currentReason) updates.last_attempt_reason = currentReason
 
   // status_since: fecha en que EFI registró el estado actual
   // EFI devuelve historial_estados en orden descendente (más reciente primero)
   const firstEstado = tracking.historial_estados.at(0)
   const statusSince = parseEFIDate(firstEstado?.fecha)
   if (statusSince) updates.status_since = statusSince
+
+  // ── Motor de Novedades: delega la decisión a processNoveltyTracking ────────
+  // Solo reclasifica/reabre cuando hay un evento realmente nuevo (ver la
+  // función); un sync repetido sin cambios no toca estos campos.
+  const { data: previousNoveltyState } = await supabase
+    .from('orders')
+    .select('delivery_attempts, last_attempt_reason, delivery_resolution, normalized_status')
+    .eq('id', orderId)
+    .single()
+
+  const noveltyUpdate = processNoveltyTracking({
+    normalizedStatus:           tracking.normalized_status,
+    previousNormalizedStatus:   previousNoveltyState?.normalized_status ?? currentNormalizedStatus ?? null,
+    deliveryAttempts:           tracking.attempts,
+    previousDeliveryAttempts:   previousNoveltyState?.delivery_attempts ?? null,
+    lastAttemptReason:          currentReason,
+    previousLastAttemptReason:  previousNoveltyState?.last_attempt_reason ?? null,
+    previousDeliveryResolution: (previousNoveltyState?.delivery_resolution as DeliveryResolution | null) ?? null,
+  })
+  if (noveltyUpdate) Object.assign(updates, noveltyUpdate)
 
   const { error: updateErr } = await supabase
     .from('orders')
@@ -157,6 +187,6 @@ export async function updateOrderTracking(
     orderId,
     normalized_status:   tracking.normalized_status,
     delivery_attempts:   tracking.attempts,
-    last_attempt_reason: tracking.last_attempt_reason,
+    last_attempt_reason: currentReason,
   }
 }

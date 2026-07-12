@@ -1,14 +1,24 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
-import type { ActionType, ContactResult } from '@/types'
+import type { ActionType, ContactResult, NoveltyType } from '@/types'
 import { isAgentOrAbove } from '@/lib/roles'
 import { createLocalFulfillment } from '@/lib/shopify/fulfillments'
+import { recordNoveltyAction, type NoveltyActionInput } from '@/lib/novelty/record-novelty-action'
 
 interface ActionBody {
   action_type: ActionType
   contact_result?: ContactResult
   notes?: string
+  // Motor de Novedades — solo aplican cuando el pedido está en normalized_status='novedad'
+  confirm_communication?: NoveltyType
+  rescheduled_date?: string
+  rescheduled_note?: string
 }
+
+// action_type que el motor de Novedades intercepta cuando el pedido está en
+// normalized_status='novedad'. Fuera de novedad (Reparto, SD Delivery) estos
+// mismos valores siguen el camino genérico de siempre, sin cambios.
+const NOVELTY_ACTION_TYPES = new Set<ActionType>(['contacted', 'rescheduled', 'recovered'])
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -38,6 +48,71 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     ]
     if (!VALID_TYPES.includes(action_type)) {
       return NextResponse.json({ error: 'Tipo de acción inválido' }, { status: 400 })
+    }
+
+    // ── Motor de Novedades: delega en recordNoveltyAction cuando el pedido ──
+    // está en normalized_status='novedad'. Reparto y SD Delivery reutilizan
+    // los mismos action_type ('contacted', 'rescheduled') pero nunca están en
+    // normalized_status='novedad', así que este chequeo los deja intactos.
+    if (NOVELTY_ACTION_TYPES.has(action_type)) {
+      const { data: order } = await supabase
+        .from('orders')
+        .select('normalized_status')
+        .eq('id', order_id)
+        .single()
+
+      if (order?.normalized_status === 'novedad') {
+        let noveltyInput: NoveltyActionInput
+
+        if (action_type === 'rescheduled') {
+          if (!body.rescheduled_date) {
+            return NextResponse.json(
+              { error: 'Se requiere rescheduled_date para reprogramar' },
+              { status: 400 },
+            )
+          }
+          noveltyInput = {
+            kind: 'rescheduled',
+            orderId: order_id,
+            agentId: profile.id,
+            rescheduledDate: body.rescheduled_date,
+            rescheduledNote: body.rescheduled_note ?? null,
+          }
+        } else if (action_type === 'contacted' && body.confirm_communication) {
+          noveltyInput = {
+            kind: 'confirm_classification',
+            orderId: order_id,
+            agentId: profile.id,
+            confirmedType: body.confirm_communication,
+          }
+        } else if (action_type === 'contacted') {
+          noveltyInput = {
+            kind: 'contacted',
+            orderId: order_id,
+            agentId: profile.id,
+            contactResult: contact_result ?? null,
+            notes: notes ?? null,
+          }
+        } else {
+          noveltyInput = {
+            kind: 'recovered',
+            orderId: order_id,
+            agentId: profile.id,
+            notes: notes ?? null,
+          }
+        }
+
+        const result = await recordNoveltyAction(supabase, noveltyInput)
+        if (!result.ok) {
+          console.error(`[actions/novelty] order=${order_id} kind=${noveltyInput.kind} error=${result.error}`)
+          return NextResponse.json({ error: result.error }, { status: result.status })
+        }
+        // Shape distinto del path genérico ({ action, order }) — el único
+        // consumidor de esta rama es /novedad, que necesita el estado fresco
+        // del pedido (novelty_type, delivery_resolution, etc.) para actualizar
+        // la UI sin re-fetch completo.
+        return NextResponse.json(result.data, { status: 201 })
+      }
     }
 
     const { data, error } = await supabase

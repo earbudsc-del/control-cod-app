@@ -45,6 +45,8 @@ export type ActionType =
   | 'route_confirmed'
   | 'customer_declined'
   | 'local_dispatched'
+export type NoveltyType         = 'no_contact' | 'contacted'
+export type DeliveryResolution  = 'pending' | 'rescheduled' | 'delivered' | 'returned'
 export type InvalidReason =
   | 'courier_no_call'
   | 'courier_no_show'
@@ -200,6 +202,12 @@ export interface Order {
   duplicate_alert?: boolean
   duplicate_of_order_id?: string | null
   duplicate_reason?: string | null
+  // Motor de Novedades — clasificación comunicacional (migración 037)
+  novelty_type?: NoveltyType | null
+  delivery_resolution?: DeliveryResolution | null
+  rescheduled_date?: string | null
+  rescheduled_note?: string | null
+  last_escalation_at?: string | null
 }
 
 export interface AbandonedCart {
