@@ -128,6 +128,60 @@ function extractGintracomDate(reason: string | null | undefined): string | null 
   return `${m[1]}-${m[2]}-${m[3]}`
 }
 
+// ── Filtro secundario: cantidad de intentos de entrega ───────────────────────
+// A partir de 3 intentos Gintracom puede enviar la guía a devolución — este
+// filtro es puramente de conteo (delivery_attempts), independiente de la
+// clasificación comunicacional (novelty_type) que gobierna la navegación
+// principal por pestañas.
+
+type IntentosFilter = 'todos' | '1' | '2' | '3plus'
+
+const INTENTOS_OPTIONS: { value: IntentosFilter; label: string }[] = [
+  { value: 'todos', label: 'Intentos: Todos' },
+  { value: '1',     label: '1 intento' },
+  { value: '2',     label: '2 intentos' },
+  { value: '3plus', label: '3+ intentos — Riesgo de devolución' },
+]
+
+function matchesIntentosFilter(attempts: number, filter: IntentosFilter): boolean {
+  if (filter === 'todos') return true
+  if (filter === '1') return attempts === 1
+  if (filter === '2') return attempts === 2
+  return attempts >= 3 // '3plus'
+}
+
+// Timestamp base para "más antiguo primero" — misma cadena de fallback que
+// daysInNovedad(), pero en milisegundos para poder comparar directamente.
+function novedadTimestampMs(order: Order): number {
+  const base = order.last_novedad_at ?? order.status_since ?? order.last_tracking_update ?? order.created_at
+  return base ? new Date(base).getTime() : Date.now()
+}
+
+// Orden por defecto de las vistas activas: más intentos primero, luego sin
+// gestión previa primero (last_action_at nulo), luego evento de novedad más
+// antiguo primero. Se aplica siempre (no solo con Intentos=Todos) porque es
+// un orden razonable también dentro de un subconjunto ya filtrado.
+function noveltyDefaultCompare(a: Order, b: Order): number {
+  const da = a.delivery_attempts ?? 0
+  const db = b.delivery_attempts ?? 0
+  if (da !== db) return db - da
+
+  const aHasAction = !!a.last_action_at
+  const bHasAction = !!b.last_action_at
+  if (aHasAction !== bHasAction) return aHasAction ? 1 : -1 // sin gestión primero
+
+  return novedadTimestampMs(a) - novedadTimestampMs(b) // más antiguo primero
+}
+
+// Sin contacto prioriza además los intentos consecutivos sin contacto (señal
+// más fuerte de estancamiento) por encima del orden general.
+function sinContactoCompare(a: Order, b: Order): number {
+  const ca = countConsecutiveNoContact(a.tracking_novedades)
+  const cb = countConsecutiveNoContact(b.tracking_novedades)
+  if (ca !== cb) return cb - ca
+  return noveltyDefaultCompare(a, b)
+}
+
 // Código de color único por clasificación — se usa idéntico en KPI, badge,
 // playbook y acento de la tarjeta para que todo el sistema "entrene" al
 // agente con el mismo lenguaje visual en todas partes.
@@ -422,6 +476,12 @@ function NovedadCard({
                 <AlertCircle className="w-3 h-3" />Acuerdo vencido
               </span>
             )}
+            {intentos >= 3 && (
+              <span title="3 o más intentos fallidos — Gintracom puede enviar la guía a devolución"
+                    className="inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-full bg-red-600 text-white">
+                <AlertCircle className="w-3.5 h-3.5" />Riesgo de devolución
+              </span>
+            )}
             {consecutiveNoContact >= 2 && (
               <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-800">
                 {consecutiveNoContact} intentos consecutivos sin contacto
@@ -432,7 +492,10 @@ function NovedadCard({
             <p className="text-[10px] text-orange-600">No sabemos si Gintracom logró hablar con el cliente.</p>
           )}
         </div>
-        <span className="shrink-0 text-[10px] font-bold text-gray-400 tabular-nums">{intentos} int.</span>
+        <span className={`shrink-0 inline-flex items-center text-[10px] font-bold px-2 py-1 rounded-full tabular-nums
+          ${intentos >= 3 ? 'bg-red-100 text-red-700' : intentos === 2 ? 'bg-orange-100 text-orange-700' : intentos === 1 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-500'}`}>
+          {intentos} intento{intentos !== 1 ? 's' : ''}
+        </span>
       </div>
 
       {/* 2. Cliente */}
@@ -768,6 +831,7 @@ export default function NovedadPage() {
   const [activeTab, setActiveTab]     = useState<Tab>(initNovedadTab)
   const [indemnizacionOrders, setIndemnizacionOrders] = useState<Order[]>([])
   const [searchQuery, setSearchQuery] = useState('')
+  const [intentosFilter, setIntentosFilter] = useState<IntentosFilter>('todos')
 
   const [loadingRow, setLoadingRow] = useState<Record<string, boolean>>({})
   const [taskMap, setTaskMap]       = useState<Record<string, string>>({})
@@ -829,8 +893,10 @@ export default function NovedadPage() {
     }, 100)
   }, [allOrders, trackingParam])
 
-  // Reset paginación al cambiar tab, búsqueda o filtro de fecha
-  useEffect(() => { setCurrentPage(1) }, [activeTab, searchQuery, entregadasFilter])
+  // Reset paginación al cambiar tab, búsqueda, filtro de fecha o filtro de intentos.
+  // intentosFilter NO se resetea al cambiar de pestaña — es un filtro secundario
+  // persistente que se aplica dentro de cualquier pestaña activa.
+  useEffect(() => { setCurrentPage(1) }, [activeTab, searchQuery, entregadasFilter, intentosFilter])
 
   // ── Acciones ──────────────────────────────────────────────────────────────
 
@@ -1005,8 +1071,15 @@ export default function NovedadPage() {
       default:                   base = []
     }
 
-    if (activeTab !== 'reprogramados') {
-      base = [...base].sort((a, b) => (b.delivery_attempts ?? 0) - (a.delivery_attempts ?? 0))
+    base = base.filter(o => matchesIntentosFilter(o.delivery_attempts ?? 0, intentosFilter))
+
+    if (activeTab === 'sin-contacto') {
+      base = [...base].sort(sinContactoCompare)
+    } else if (activeTab !== 'reprogramados') {
+      // Reprogramados conserva su propio orden (vencido → hoy → próximo,
+      // ya viene pre-ordenado en reprogramadosList) — el filtro de intentos
+      // solo reduce el conjunto, sin alterar esa prioridad.
+      base = [...base].sort(noveltyDefaultCompare)
     }
 
     if (!searchQuery.trim()) return base
@@ -1019,7 +1092,7 @@ export default function NovedadPage() {
       (o.last_attempt_reason ?? '').toLowerCase().includes(q) ||
       (o.raw_status          ?? '').toLowerCase().includes(q)
     )
-  }, [sinContactoList, contactoRealizadoList, reprogramadosList, noSalvables, activeTab, searchQuery])
+  }, [sinContactoList, contactoRealizadoList, reprogramadosList, noSalvables, activeTab, searchQuery, intentosFilter])
 
   const tabCounts = useMemo<Record<Tab, number>>(() => ({
     'sin-contacto':       sinContactoList.length,
@@ -1032,6 +1105,7 @@ export default function NovedadPage() {
 
   const displayedRecuperadas = useMemo(() => {
     let entries = [...recuperadasDbOrders]
+    entries = entries.filter(e => matchesIntentosFilter(e.order.delivery_attempts ?? 0, intentosFilter))
     if (entregadasFilter) {
       const todayMs     = rdMidnightUTC(0)
       const yesterdayMs = rdMidnightUTC(-1)
@@ -1051,7 +1125,22 @@ export default function NovedadPage() {
       )
     }
     return entries
-  }, [recuperadasDbOrders, entregadasFilter, searchQuery])
+  }, [recuperadasDbOrders, entregadasFilter, searchQuery, intentosFilter])
+
+  // Indemnización: mismo motor de filtro de intentos que el resto de pestañas.
+  const displayedIndemnizacion = useMemo(
+    () => indemnizacionOrders.filter(o => matchesIntentosFilter(o.delivery_attempts ?? 0, intentosFilter)),
+    [indemnizacionOrders, intentosFilter],
+  )
+
+  // KPI/chip rápido — conteo de novedades activas (gestionables) con 3+
+  // intentos, riesgo real de que Gintracom devuelva la guía. No sustituye los
+  // KPIs principales de clasificación (Sin contacto / Contacto realizado /
+  // Reprogramados) — es un contador adicional e informativo.
+  const tresMasIntentosCount = useMemo(
+    () => activeOrders.filter(o => (o.delivery_attempts ?? 0) >= 3).length,
+    [activeOrders],
+  )
 
   // Paginación
   const pagedOrders = useMemo(
@@ -1073,7 +1162,7 @@ export default function NovedadPage() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const totalPages = activeTab === 'recuperadas' ? totalPagesRecuperadas : activeTab === 'indemnizacion' ? 1 : totalPagesNovedad
-  const activeCount = activeTab === 'recuperadas' ? displayedRecuperadas.length : activeTab === 'indemnizacion' ? indemnizacionOrders.length : displayedOrders.length
+  const activeCount = activeTab === 'recuperadas' ? displayedRecuperadas.length : activeTab === 'indemnizacion' ? displayedIndemnizacion.length : displayedOrders.length
 
   const infoBannerText = activeTab === 'contacto-realizado'
     ? 'Objetivo: coordinar el siguiente intento de entrega.'
@@ -1341,20 +1430,62 @@ export default function NovedadPage() {
             </p>
           </div>
 
-          {/* Buscador */}
-          <div className="px-3 py-2.5 md:px-4 md:py-3 border-b border-red-100 bg-white">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Buscar guía, nombre, teléfono, ciudad, motivo…"
-                className="w-full pl-9 pr-4 py-2.5 md:py-2 text-sm border border-gray-200 rounded-lg
-                           focus:outline-none focus:ring-2 focus:ring-red-300 focus:border-red-300
-                           placeholder:text-gray-400"
-              />
+          {/* Buscador + filtro de intentos */}
+          <div className="px-3 py-2.5 md:px-4 md:py-3 border-b border-red-100 bg-white space-y-2">
+            <div className="flex flex-col sm:flex-row gap-2">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="Buscar guía, nombre, teléfono, ciudad, motivo…"
+                  className="w-full pl-9 pr-4 py-2.5 md:py-2 text-sm border border-gray-200 rounded-lg
+                             focus:outline-none focus:ring-2 focus:ring-red-300 focus:border-red-300
+                             placeholder:text-gray-400"
+                />
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <select
+                  value={intentosFilter}
+                  onChange={e => setIntentosFilter(e.target.value as IntentosFilter)}
+                  className="flex-1 sm:flex-none text-xs sm:text-sm font-medium text-gray-700 bg-white
+                             border border-gray-200 rounded-lg px-2.5 py-2.5 sm:py-2
+                             focus:outline-none focus:ring-2 focus:ring-red-300 focus:border-red-300"
+                >
+                  {INTENTOS_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                {tresMasIntentosCount > 0 && (
+                  <button
+                    onClick={() => setIntentosFilter(f => f === '3plus' ? 'todos' : '3plus')}
+                    title="3 o más intentos — Gintracom puede enviar la guía a devolución"
+                    className={`hidden sm:flex items-center gap-1 text-xs font-bold px-2.5 py-2 rounded-lg
+                                border transition-colors whitespace-nowrap
+                      ${intentosFilter === '3plus'
+                        ? 'bg-red-600 border-red-600 text-white'
+                        : 'bg-red-50 border-red-200 text-red-700 hover:bg-red-100'
+                      }`}
+                  >
+                    ⚠ 3+ intentos: {tresMasIntentosCount}
+                  </button>
+                )}
+              </div>
             </div>
+            {tresMasIntentosCount > 0 && (
+              <button
+                onClick={() => setIntentosFilter(f => f === '3plus' ? 'todos' : '3plus')}
+                className={`sm:hidden flex items-center justify-center gap-1 w-full text-xs font-bold
+                            px-2.5 py-2 rounded-lg border transition-colors
+                  ${intentosFilter === '3plus'
+                    ? 'bg-red-600 border-red-600 text-white'
+                    : 'bg-red-50 border-red-200 text-red-700 hover:bg-red-100'
+                  }`}
+              >
+                ⚠ 3+ intentos: {tresMasIntentosCount}
+              </button>
+            )}
           </div>
 
           {/* Tabs de filtro — touch-friendly */}
@@ -1526,8 +1657,8 @@ export default function NovedadPage() {
                           </p>
                         )}
                         <span className={`inline-flex text-[9px] font-bold px-1.5 py-0.5 rounded-full mt-1
-                          ${intentos >= 3 ? 'bg-red-100 text-red-700' : intentos === 2 ? 'bg-orange-100 text-orange-700' : 'bg-yellow-100 text-yellow-700'}`}>
-                          {intentos} int.
+                          ${intentos >= 3 ? 'bg-red-100 text-red-700' : intentos === 2 ? 'bg-orange-100 text-orange-700' : intentos === 1 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-500'}`}>
+                          {intentos} intento{intentos !== 1 ? 's' : ''}
                         </span>
                       </td>
 
@@ -1574,6 +1705,12 @@ export default function NovedadPage() {
                               <span title="El acuerdo pasó su fecha sin nueva gestión"
                                     className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">
                                 <AlertCircle className="w-2.5 h-2.5" />Vencido
+                              </span>
+                            )}
+                            {intentos >= 3 && (
+                              <span title="3 o más intentos fallidos — Gintracom puede enviar la guía a devolución"
+                                    className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-600 text-white">
+                                <AlertCircle className="w-2.5 h-2.5" />Riesgo de devolución
                               </span>
                             )}
                             {order.novelty_type === 'no_contact' && countConsecutiveNoContact(order.tracking_novedades) >= 2 && (
@@ -1855,11 +1992,12 @@ export default function NovedadPage() {
           )}
 
           {/* ── MOBILE: Cards indemnizacion (< md) ── */}
-          {!loading && activeTab === 'indemnizacion' && indemnizacionOrders.length > 0 && (
+          {!loading && activeTab === 'indemnizacion' && displayedIndemnizacion.length > 0 && (
             <div className="md:hidden p-3 space-y-3">
-              {indemnizacionOrders.map(order => {
+              {displayedIndemnizacion.map(order => {
                 const ubicacion = order.city || order.province || ''
                 const lastUpdate = order.last_tracking_update ?? order.created_at
+                const intentos = order.delivery_attempts ?? 0
                 return (
                   <div key={order.id} className="bg-violet-50/60 border border-violet-200 rounded-xl p-3 space-y-2">
                     <div className="flex items-start justify-between gap-2">
@@ -1871,10 +2009,16 @@ export default function NovedadPage() {
                           {order.order_number ? `#${order.order_number}` : ''}
                         </p>
                       </div>
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-100 text-violet-700 border border-violet-200 shrink-0">
-                        <Scale className="w-3 h-3" />
-                        Indemnización
-                      </span>
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-100 text-violet-700 border border-violet-200">
+                          <Scale className="w-3 h-3" />
+                          Indemnización
+                        </span>
+                        <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-full tabular-nums
+                          ${intentos >= 3 ? 'bg-red-100 text-red-700' : intentos === 2 ? 'bg-orange-100 text-orange-700' : intentos === 1 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-500'}`}>
+                          {intentos} intento{intentos !== 1 ? 's' : ''}
+                        </span>
+                      </div>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <User className="w-3 h-3 text-violet-400 shrink-0" />
@@ -1912,7 +2056,7 @@ export default function NovedadPage() {
           )}
 
           {/* ── DESKTOP: Tabla indemnizacion (≥ md) ── */}
-          {!loading && activeTab === 'indemnizacion' && indemnizacionOrders.length > 0 && (
+          {!loading && activeTab === 'indemnizacion' && displayedIndemnizacion.length > 0 && (
             <table className="hidden md:table w-full text-sm">
               <thead className="bg-violet-50/60 border-b border-violet-100">
                 <tr>
@@ -1924,9 +2068,10 @@ export default function NovedadPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-violet-50">
-                {indemnizacionOrders.map(order => {
+                {displayedIndemnizacion.map(order => {
                   const ubicacion = order.city || order.province || '—'
                   const lastUpdate = order.last_tracking_update ?? order.created_at
+                  const intentos = order.delivery_attempts ?? 0
                   return (
                     <tr key={order.id} className="hover:bg-violet-50/40 transition-colors">
                       <td className="px-3 py-2.5">
@@ -1937,10 +2082,16 @@ export default function NovedadPage() {
                       </td>
                       <td className="px-3 py-2.5">
                         <p className="text-xs font-semibold text-gray-800">{order.customer_name}</p>
-                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-violet-100 text-violet-700 mt-0.5">
-                          <Scale className="w-2.5 h-2.5" />
-                          Indemnización
-                        </span>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-violet-100 text-violet-700">
+                            <Scale className="w-2.5 h-2.5" />
+                            Indemnización
+                          </span>
+                          <span className={`inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded-full tabular-nums
+                            ${intentos >= 3 ? 'bg-red-100 text-red-700' : intentos === 2 ? 'bg-orange-100 text-orange-700' : intentos === 1 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-500'}`}>
+                            {intentos} int.
+                          </span>
+                        </div>
                       </td>
                       <td className="px-3 py-2.5">
                         {order.customer_phone ? (
@@ -1977,10 +2128,12 @@ export default function NovedadPage() {
           )}
 
           {/* ── Empty state indemnizacion ── */}
-          {!loading && activeTab === 'indemnizacion' && indemnizacionOrders.length === 0 && (
+          {!loading && activeTab === 'indemnizacion' && displayedIndemnizacion.length === 0 && (
             <div className="py-12 text-center">
               <Scale className="w-10 h-10 text-violet-300 mx-auto mb-3" />
-              <p className="text-sm font-semibold text-gray-500">Sin indemnizaciones activas</p>
+              <p className="text-sm font-semibold text-gray-500">
+                {intentosFilter !== 'todos' ? 'Sin indemnizaciones con ese filtro de intentos' : 'Sin indemnizaciones activas'}
+              </p>
             </div>
           )}
 

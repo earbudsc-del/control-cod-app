@@ -4,6 +4,63 @@
 
 ---
 
+## FEATURE: Motor operativo de Novedades + flujo de recuperación (2026-07-12) — commit `a1ee965`
+
+### Qué se hizo
+
+Implementación del motor de clasificación y recuperación operativa de pedidos en `normalized_status='novedad'`, separando dos ejes independientes: **novelty_type** (condición comunicacional del intento fallido más reciente reportado por la transportadora — `no_contact` | `contacted` | `null` si es ambiguo) y **delivery_resolution** (estado operativo del caso — `pending` | `rescheduled` | `delivered` | `returned`). Ambos ejes se recalculan solo ante un evento nuevo de la transportadora (nuevo intento, cambio de `last_attempt_reason`, o entrada a `novedad`), nunca por gestión interna del agente.
+
+### Migraciones (aditivas, sin romper nada existente)
+
+| Migración | Contenido |
+|---|---|
+| `037_novelty_type_delivery_resolution.sql` | Agrega a `orders`: `novelty_type`, `delivery_resolution`, `rescheduled_date`, `rescheduled_note`, `last_escalation_at`. CHECK constraints permiten NULL (no fuerzan clasificación). Backfill idempotente: solo pedidos `normalized_status='novedad'` reciben `delivery_resolution='pending'` como punto de partida; `novelty_type` queda NULL para todos (la clasificación real la hace `classifyNovelty()` en TS, no SQL). Índices parciales `WHERE normalized_status='novedad'`. |
+| `038_refresh_orders_view_novelty.sql` | Recrea la vista `orders_with_sla` (mismo problema que `016_refresh_orders_view.sql`: Postgres congela la lista de columnas de `o.*` al crear la vista) para que las 5 columnas nuevas sean visibles vía `/api/orders` y `/api/orders/[id]`. |
+
+### Lógica nueva — `src/lib/novelty/`
+
+| Archivo | Responsabilidad |
+|---|---|
+| `classify-novelty.ts` | `classifyNovelty(reason)` — clasifica el texto crudo (`last_attempt_reason`) por patrones regex calibrados contra datos reales de Gintracom/EFI (el sujeto siempre es "Destinatario", el verbo decide: indica/informa/solicita/agenda/rechaza → `contacted`; no contesta/no responde/teléfono apagado → `no_contact`). No usa `raw_status` como señal (es "Novedad" en ~100% de los casos). Evidencia ambigua → `null`, nunca se asume. |
+| `extract-reschedule-date.ts` | `extractRescheduleDate(reason)` — solo devuelve fecha si hay evidencia explícita de reprogramación (`reprograma`/`agenda`/`acuerda entrega`) Y una fecha parseable en uno de 4 formatos reales conocidos. Nunca inventa fecha. |
+| `novedad-history.ts` | `getLatestNovedadEvent()`/`countConsecutiveNoContact()` — ordenan `tracking_novedades` por fecha real parseada, nunca por posición del array (bug evitado: un evento antiguo tratado como vigente por estar en el índice 0). |
+| `process-novelty-tracking.ts` | `processNoveltyTracking()` — función pura llamada desde el pipeline de tracking (cron/manual). Decide si un evento de EFI es realmente nuevo (`enteredNovedadNow \|\| attemptsIncreased \|\| reasonChanged`) antes de reclasificar; sync repetidos no tocan nada. Si `normalized_status` pasa a `delivered`/`returned`, refleja automáticamente en `delivery_resolution` (el agente nunca escribe esos valores directamente). |
+| `record-novelty-action.ts` | `recordNoveltyAction()` — único punto de escritura para acciones manuales del agente (`contacted` / `confirm_classification` / `rescheduled` / `recovered`): inserta en `agent_actions` + actualiza `last_action_at` y, según el tipo, `novelty_type`/`delivery_resolution`/`rescheduled_date`/`rescheduled_note`. Reprogramar exige fecha `YYYY-MM-DD` válida (400 si no). |
+
+### Integración con pipeline existente
+
+- `src/lib/tracking/update-order.ts` — llama a `processNoveltyTracking()` durante el sync de tracking (cron EFI + consulta manual), sin modificar `follow_up_result`, `normalized_status` ni el parser EFI.
+- `src/app/api/orders/[id]/actions/route.ts` — endpoint de acciones extendido para soportar los nuevos `action_type` del motor de novedades.
+- `src/app/api/orders/[id]/route.ts` — expone los campos nuevos en el detalle de pedido.
+- `src/app/(app)/novedad/page.tsx` — reescritura mayor (+1022/-Δ líneas) del módulo `/novedad` para operar sobre `novelty_type`/`delivery_resolution` en vez de solo `delivery_attempts`/`last_attempt_reason` crudos.
+- `src/types/index.ts` — agrega tipos `NoveltyType`, `DeliveryResolution`, campos nuevos en `Order`.
+
+### Cierre técnico de la sesión (2026-07-12)
+
+- `npx tsc --noEmit` → sin errores (verificado antes del commit; `tsconfig.tsbuildinfo` restaurado a su estado previo tras el chequeo, no incluido en el commit).
+- Staging selectivo: únicamente los 12 archivos de Novedades. **Excluidos deliberadamente** (arquitectura abandonada, ver [[Genesis AI Runtime]]): `src/components/settings/GenesisTab.tsx`, `src/lib/genesis/respond.ts`, `src/lib/genesis/build-business-brain.ts`, `src/lib/genesis/build-identity.ts`, `src/lib/genesis/build-system-prompt.ts` — quedan modificados/untracked en el working tree, sin commitear.
+- Commit `a1ee965` en `main`, pusheado a `origin/main` (`dd0a4b2..a1ee965`).
+- Ruta COD NO se mezcló en este commit (instrucción explícita del usuario).
+
+### NO se rompió
+
+- `follow_up_result`, `normalized_status`, parser EFI (`efi-parser.ts`) — sin cambios de lógica.
+- Flujo SD Delivery, Confirmación, Reparto, Tránsito, Devoluciones — sin cambios.
+- Genesis AI Runtime — permanece congelado y fuera del commit (ver sección propia más abajo).
+
+### Mejora posterior: filtro secundario por cantidad de intentos (2026-07-12, mismo commit)
+
+Añadido un filtro secundario por `delivery_attempts` (Todos / 1 intento / 2 intentos / 3+ intentos — Riesgo de devolución) junto al buscador de `/novedad`, sin tocar la navegación principal por pestañas (Sin contacto / Contacto realizado / Reprogramados / No salvables / Entregadas / Indemnización). Motivo operativo: a partir de 3 intentos Gintracom puede enviar la guía a devolución.
+
+- Filtro persistente entre pestañas (no se resetea al cambiar de tab), se combina con búsqueda y con cada lista base ya filtrada por resolución/clasificación.
+- Orden por defecto (`noveltyDefaultCompare`): `delivery_attempts` DESC → sin gestión previa (`last_action_at` nulo) primero → evento de novedad más antiguo primero. "Sin contacto" prioriza además `consecutive_no_contact_attempts` DESC (`sinContactoCompare`). "Reprogramados" conserva su propio orden (vencido → hoy → próximo), el filtro solo reduce el conjunto.
+- Badge fuerte rojo "Riesgo de devolución" cuando `delivery_attempts >= 3` (cards + tabla, incluida Indemnización). Badge de conteo "N intento(s)" recoloreado por severidad.
+- Chip rápido "⚠ 3+ intentos: X" y KPI informativo — no reemplaza los KPIs principales de clasificación (Fila 1).
+- Único archivo modificado: `src/app/(app)/novedad/page.tsx`. Sin migraciones, sin cambios de endpoints, sin tocar Génesis.
+- `npx tsc --noEmit` → sin errores ✅.
+
+---
+
 ## FEATURE: SD Delivery V3 — Fase A, auditoría final de fricción (2026-07-08)
 
 ### Qué se hizo
