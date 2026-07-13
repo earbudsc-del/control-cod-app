@@ -63,11 +63,17 @@ export async function GET() {
         .eq('action_type', 'courier_claim')
         .gte('created_at', todayIso),
 
-      // Críticos activos: pedidos en reparto con más de 48h sin cambio de estado
+      // Críticos activos: pedidos en reparto EFI/Gintracom (con guía) con más de 48h sin cambio
+      // de estado. Excluye anuladas/canceladas y pedidos SD locales (tracking_number IS NULL) —
+      // mismo universo "activo" que usa /reparto y /api/flujo-stats, para no inflar el conteo
+      // con pedidos SD nunca cerrados por el mensajero (ver CLAUDE.md — fix desfase /reparto).
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('normalized_status', 'en_reparto')
+        .not('tracking_number', 'is', null)
+        .not('raw_status', 'ilike', '%anulad%')
+        .not('raw_status', 'ilike', '%cancelad%')
         .lt('status_since', cutoff48h),
 
       // Entregados ayer: status_since registra cuándo EFI confirmó entrega real

@@ -4,6 +4,45 @@
 
 ---
 
+## FIX: Desfase de conteos en /reparto + reorganización Nuevos vs Reintentos (2026-07-13)
+
+### Síntoma reportado
+
+`/reparto` mostraba 3 números que no podían representar el mismo estado actual: pipeline "27 en reparto", tabla "Todos" 218 pedidos, "Críticos +48h" 187 pedidos.
+
+### Causa raíz (diagnóstico)
+
+Tres queries sobre `normalized_status='en_reparto'` con filtros distintos:
+
+| Fuente | Filtro real |
+|---|---|
+| `/api/flujo-stats` (→ "27") | `en_reparto` + `tracking_number IS NOT NULL` + excluye `raw_status` anulada/cancelada |
+| `/api/orders?status=en_reparto` (→ "218", tabla "Todos") | solo `en_reparto` — sin excluir SD local, sin excluir anuladas, sin límite de antigüedad |
+| Cálculo client-side "+48h" (→ "187") | sobre el mismo universo contaminado de 218 |
+
+Causa doble: (1) `/api/orders` no aplicaba los mismos filtros de exclusión que `/api/flujo-stats`; (2) el cron de tracking EFI excluye por diseño los pedidos SD locales (`tracking_number IS NULL` — ver flujo `/sd-delivery`), así que un pedido SD que entra a `en_reparto` y el mensajero nunca cierra queda "atascado" indefinidamente, inflando tanto "Todos" como "+48h" con pedidos ajenos al courier EFI/Gintracom.
+
+### Fix aplicado
+
+1. **`src/app/api/orders/route.ts`** — nuevo branch `status === 'en_reparto'`: excluye `raw_status` anulada/cancelada (mismo criterio que `in_transit`, ya existente). Nuevo param opcional `requireTracking=true` → agrega `tracking_number IS NOT NULL`. Sin este param el comportamiento es igual que antes (usado por `/sd-delivery` para su propio pool de pedidos SD, que **no** debe excluirse por tracking).
+2. **`src/app/(app)/reparto/page.tsx`** — el fetch principal ahora pasa `requireTracking=true`, restringiendo la tabla al universo EFI/Gintracom real (mismo universo que el pipeline "27"), sin mezclar pedidos SD locales.
+3. **`src/app/api/reparto/performance/route.ts`** — `criticosActivos` (chip "+48h activos" del strip "Mi día") agrega los mismos filtros (`tracking_number IS NOT NULL` + excluye anulada/cancelada) para consistencia con la tabla.
+
+### Reorganización: Nuevos vs Reintentos (pedido explícito del usuario)
+
+La organización principal del tab dejó de ser por antigüedad (Crítico/Riesgo/Normal) y pasó a ser por **Nuevos en reparto** (`delivery_attempts === 0`) vs **Reintentos** (`delivery_attempts >= 1`, proxy de "ya tuvo un intento fallido antes de volver a en_reparto" — no existe hoy un contador dedicado de reingresos a `en_reparto`, se reutiliza `delivery_attempts` que ya mantiene el parser EFI).
+
+- `Tab = 'all' | 'nuevos' | 'reintentos' | 'entregados'` (antes incluía `critico`/`riesgo`/`normal` como tabs).
+- Días/horas quedan como **filtro secundario** (`RiskFilter = 'todos' | 'critico' | 'riesgo' | 'normal'`), aplicable dentro de cualquier tab primario vía chips "Riesgo: Todos · +48h Crítico · 1-2 días · 0-1 día" — ya no es el eje organizador, pero sigue disponible.
+- Compat con deep links existentes (ej. Supervisor IA → `/reparto?filter=critical`): el query param ahora setea `riskFilter` en vez de `activeTab` (que queda en `'all'`), preservando el enlace pero mostrando el universo completo filtrado por riesgo en vez de forzar un tab que ya no existe.
+- El badge rojo pulsante "N CRÍTICOS" del banner y el chip "+48h activos" de "Mi día" se mantienen sin cambios — siguen siendo la señal de riesgo visible, solo dejaron de ser la forma primaria de navegar la tabla.
+
+**Limitación conocida (documentada, no corregida en este fix):** `delivery_attempts` es un proxy razonable pero no perfecto para "Reintento" — cuenta intentos de entrega fallidos reportados por EFI, no específicamente cuántas veces el pedido reingresó a `en_reparto`. Si en el futuro se necesita precisión exacta, requeriría parsear `tracking_history` buscando entradas repetidas de estados `en_reparto`.
+
+**Qué NO se tocó:** `/sd-delivery`, `applyConfirmationAction()`, el cron de tracking EFI, `/api/flujo-stats` (ya tenía los filtros correctos, quedó como referencia), `/api/reparto/entregados`. `npx tsc --noEmit` → sin errores ✅.
+
+---
+
 ## FEATURE: Motor operativo de Novedades + flujo de recuperación (2026-07-12) — commit `a1ee965`
 
 ### Qué se hizo

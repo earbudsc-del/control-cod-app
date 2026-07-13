@@ -15,10 +15,15 @@ import {
 } from 'lucide-react'
 import { horasEnTransito } from '@/lib/transit-helpers'
 import { FlujoKpis } from '@/components/shared/flujo-kpis'
+import { OrderOperativeDrawer } from '@/components/orders/OrderOperativeDrawer'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
-type Tab = 'all' | 'critico' | 'riesgo' | 'normal' | 'entregados'
+// Organización principal: Nuevos en reparto vs Reintentos (pedidos con intento fallido previo).
+// Días/horas de antigüedad quedan como información de riesgo (badge por pedido + filtro secundario),
+// ya no son el eje organizador — ver CLAUDE.md "CORRECCIÓN OPERATIVA DEL MÓDULO REPARTO".
+type Tab = 'all' | 'nuevos' | 'reintentos' | 'entregados'
+type RiskFilter = 'todos' | 'critico' | 'riesgo' | 'normal'
 
 interface RepartoPerfData {
   entregadosHoy:   number
@@ -59,6 +64,13 @@ function criticality(order: Order): 'critico' | 'riesgo' | 'normal' {
   if (h >= 48) return 'critico'
   if (h >= 24) return 'riesgo'
   return 'normal'
+}
+
+// Reintento = ya tuvo al menos un intento de entrega fallido antes de volver a en_reparto.
+// Usa delivery_attempts (contador de intentos fallidos que mantiene el parser EFI) como proxy —
+// no existe hoy un contador de "veces que reingresó a en_reparto" separado.
+function isReintento(order: Order): boolean {
+  return (order.delivery_attempts ?? 0) >= 1
 }
 
 function repartoDesdeLabel(order: Order): string {
@@ -119,11 +131,17 @@ const ACTION_BADGE: Record<string, { label: string; color: string }> = {
 
 
 const TAB_META: { tab: Tab; label: string }[] = [
-  { tab: 'all',        label: 'Todos'       },
-  { tab: 'critico',    label: '+48h Crítico'},
-  { tab: 'riesgo',     label: '1-2 días'    },
-  { tab: 'normal',     label: '0-1 día'     },
-  { tab: 'entregados', label: 'Entregados'  },
+  { tab: 'all',        label: 'Todos'             },
+  { tab: 'nuevos',     label: 'Nuevos en reparto' },
+  { tab: 'reintentos', label: 'Reintentos'        },
+  { tab: 'entregados', label: 'Entregados'        },
+]
+
+const RISK_META: { filter: RiskFilter; label: string }[] = [
+  { filter: 'todos',   label: 'Todos'        },
+  { filter: 'critico', label: '+48h Crítico' },
+  { filter: 'riesgo',  label: '1-2 días'     },
+  { filter: 'normal',  label: '0-1 día'      },
 ]
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -160,6 +178,7 @@ interface RepartoCardProps {
   onEntrego:        () => void
   onNoAnswer:       () => void
   onEscalar:        () => void
+  onOpenDetail:     () => void
 }
 
 function RepartoCard({
@@ -173,6 +192,7 @@ function RepartoCard({
   onEntrego,
   onNoAnswer,
   onEscalar,
+  onOpenDetail,
 }: RepartoCardProps) {
   const crit      = criticality(order)
   const critStyle = CRIT_STYLES[crit]
@@ -192,7 +212,9 @@ function RepartoCard({
     : 'bg-white'
 
   return (
-    <div className={`p-4 border-b border-amber-100 ${cardBase}
+    <div
+      onClick={onOpenDetail}
+      className={`p-4 border-b border-amber-100 cursor-pointer ${cardBase}
       ${isHighlighted ? 'ring-2 ring-inset ring-blue-500 bg-blue-50/60' : ''}
       ${accion === 'escalado' ? 'ring-1 ring-inset ring-orange-300' : ''}`}
     >
@@ -256,7 +278,7 @@ function RepartoCard({
       {hasPhone && !isEntregado && !busy && !accion && (
         <div className="flex gap-2 mt-3">
           {waUrl && (
-            <a href={waUrl} target="_blank" rel="noopener noreferrer"
+            <a href={waUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
                className="flex-1 flex items-center justify-center gap-2
                           bg-green-500 text-white py-3 rounded-xl text-sm font-semibold
                           active:bg-green-700 transition-colors">
@@ -264,7 +286,7 @@ function RepartoCard({
             </a>
           )}
           {telUrl && (
-            <a href={telUrl}
+            <a href={telUrl} onClick={e => e.stopPropagation()}
                className="flex-1 flex items-center justify-center gap-2
                           bg-blue-500 text-white py-3 rounded-xl text-sm font-semibold
                           active:bg-blue-700 transition-colors">
@@ -300,28 +322,28 @@ function RepartoCard({
         ) : (
           <div className="grid grid-cols-2 gap-2">
             <button
-              onClick={onContactado}
+              onClick={e => { e.stopPropagation(); onContactado() }}
               className="flex items-center justify-center gap-1.5 bg-slate-100 active:bg-slate-200
                          text-slate-700 text-sm font-medium py-2.5 rounded-lg transition-colors"
             >
               <CheckCircle2 className="w-4 h-4" />Contactado
             </button>
             <button
-              onClick={onEntrego}
+              onClick={e => { e.stopPropagation(); onEntrego() }}
               className="flex items-center justify-center gap-1.5 bg-green-100 active:bg-green-200
                          text-green-700 text-sm font-medium py-2.5 rounded-lg transition-colors"
             >
               <CheckCircle2 className="w-4 h-4" />Entregó
             </button>
             <button
-              onClick={onNoAnswer}
+              onClick={e => { e.stopPropagation(); onNoAnswer() }}
               className="flex items-center justify-center gap-1.5 bg-amber-100 active:bg-amber-200
                          text-amber-700 text-sm font-medium py-2.5 rounded-lg transition-colors"
             >
               <PhoneMissed className="w-4 h-4" />No responde
             </button>
             <button
-              onClick={onEscalar}
+              onClick={e => { e.stopPropagation(); onEscalar() }}
               className="flex items-center justify-center gap-1.5 bg-orange-100 active:bg-orange-200
                          text-orange-700 text-sm font-medium py-2.5 rounded-lg transition-colors"
             >
@@ -331,10 +353,11 @@ function RepartoCard({
         )}
       </div>
 
-      {/* Ver detalle */}
+      {/* Ver detalle — página completa */}
       <div className="mt-3 flex justify-end">
         <Link
           href={`/orders/${order.id}`}
+          onClick={e => e.stopPropagation()}
           className="inline-flex items-center gap-1.5 text-sm font-medium
                      text-amber-600 hover:text-amber-800"
         >
@@ -358,13 +381,16 @@ export default function RepartoPage() {
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
 
-  const initRepartoTab = (): Tab => {
+  // Compat con deep links existentes (ej. Supervisor IA → /reparto?filter=critical):
+  // el filtro de riesgo se preserva como filtro secundario, ya no como tab primario.
+  const initRiskFilter = (): RiskFilter => {
     const f = searchParamsObj.get('filter')
     if (f === 'critical') return 'critico'
     if (f === 'risk')     return 'riesgo'
-    return 'all'
+    return 'todos'
   }
-  const [activeTab, setActiveTab]     = useState<Tab>(initRepartoTab)
+  const [activeTab, setActiveTab]     = useState<Tab>('all')
+  const [riskFilter, setRiskFilter]   = useState<RiskFilter>(initRiskFilter)
   const [searchQuery, setSearchQuery] = useState('')
 
   const [actionMap, setActionMap]   = useState<Record<string, string>>({})
@@ -372,6 +398,7 @@ export default function RepartoPage() {
   const [deliveredDbOrders, setDeliveredDbOrders] = useState<DeliveredEntry[]>([])
   const [deliveredMetaMap,  setDeliveredMetaMap]  = useState<Record<string, { reported_at: string; courier_confirmed: boolean }>>({})
   const [currentPage, setCurrentPage] = useState(1)
+  const [openOrderId, setOpenOrderId] = useState<string | null>(null)
 
   const PAGE_SIZE = 50
 
@@ -383,7 +410,9 @@ export default function RepartoPage() {
       const [ordersRes, inTransitRes, perfRes, entregadosRes]: [OrdersResponse, OrdersResponse, RepartoPerfData, DeliveredEntry[]] =
         await Promise.all([
           // sortBy=status_since_asc → más viejos (críticos) primero; limit=500 para no cortar histórico
-          fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc').then(r => r.json()),
+          // requireTracking=true → solo universo EFI/Gintracom (con guía); excluye pedidos SD
+          // locales (tracking_number IS NULL, flujo propio en /sd-delivery) y anuladas/canceladas
+          fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc&requireTracking=true').then(r => r.json()),
           fetch('/api/orders?status=in_transit&limit=200&page=1').then(r => r.json()),
           fetch('/api/reparto/performance').then(r => r.json()),
           fetch('/api/reparto/entregados').then(r => r.json()),
@@ -475,27 +504,36 @@ export default function RepartoPage() {
     return [...deliveredDbOrders, ...sessionOnly]
   }, [deliveredDbOrders, allOrders, actionMap, deliveredDbIds, deliveredMetaMap])
 
+  // Usado solo para el badge "N CRÍTICOS" del banner y el aviso de guías estancadas —
+  // el desglose Riesgo/Normal ya no se calcula aparte, se filtra bajo demanda con `criticality()`.
   const criticos = useMemo(
     () => activeOrders.filter(o => horasEnReparto(o) >= 48),
     [activeOrders],
   )
-  const riesgo = useMemo(
-    () => activeOrders.filter(o => horasEnReparto(o) >= 24 && horasEnReparto(o) < 48),
+
+  // Organización principal del tab: Nuevos en reparto (sin intento fallido previo) vs
+  // Reintentos (ya tuvieron al menos un intento fallido). Días/horas quedan como filtro
+  // secundario (riskFilter) dentro de cada tab, no como el eje organizador.
+  const nuevosEnReparto = useMemo(
+    () => activeOrders.filter(o => !isReintento(o)),
     [activeOrders],
   )
-  const normales = useMemo(
-    () => activeOrders.filter(o => horasEnReparto(o) < 24),
+  const reintentos = useMemo(
+    () => activeOrders.filter(isReintento),
     [activeOrders],
   )
 
   const displayedOrders = useMemo(() => {
     let base: Order[]
     switch (activeTab) {
-      case 'critico':    base = [...criticos].sort((a, b) => repartoSinceMs(a) - repartoSinceMs(b)); break
-      case 'riesgo':     base = [...riesgo].sort((a, b) => repartoSinceMs(a) - repartoSinceMs(b));   break
-      case 'normal':     base = [...normales].sort((a, b) => repartoSinceMs(b) - repartoSinceMs(a)); break
+      case 'nuevos':     base = sortedAll(nuevosEnReparto); break
+      case 'reintentos': base = sortedAll(reintentos);      break
       case 'entregados': base = allEntregados.map(e => e.order); break
       default:           base = sortedAll(activeOrders)
+    }
+
+    if (activeTab !== 'entregados' && riskFilter !== 'todos') {
+      base = base.filter(o => criticality(o) === riskFilter)
     }
 
     if (!searchQuery.trim()) return base
@@ -507,7 +545,7 @@ export default function RepartoPage() {
       (o.city             ?? '').toLowerCase().includes(q) ||
       (o.carrier          ?? '').toLowerCase().includes(q)
     )
-  }, [activeOrders, allEntregados, criticos, riesgo, normales, activeTab, searchQuery])
+  }, [activeOrders, allEntregados, nuevosEnReparto, reintentos, activeTab, riskFilter, searchQuery])
 
   const transitCriticos = useMemo(
     () => inTransitOrders.filter(o => horasEnTransito(o) >= 48),
@@ -516,11 +554,10 @@ export default function RepartoPage() {
 
   const tabCounts = useMemo<Record<Tab, number>>(() => ({
     all:        activeOrders.length,
-    critico:    criticos.length,
-    riesgo:     riesgo.length,
-    normal:     normales.length,
+    nuevos:     nuevosEnReparto.length,
+    reintentos: reintentos.length,
     entregados: allEntregados.length,
-  }), [activeOrders, criticos, riesgo, normales, allEntregados])
+  }), [activeOrders, nuevosEnReparto, reintentos, allEntregados])
 
   const pagedOrders = useMemo(
     () => displayedOrders.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
@@ -528,7 +565,7 @@ export default function RepartoPage() {
   )
   const totalPages = Math.ceil(displayedOrders.length / PAGE_SIZE)
 
-  useEffect(() => { setCurrentPage(1) }, [activeTab, searchQuery])
+  useEffect(() => { setCurrentPage(1) }, [activeTab, riskFilter, searchQuery])
 
   const entregadosSesionCount = allEntregados.length
 
@@ -630,38 +667,28 @@ export default function RepartoPage() {
       {/* ── Dashboard operativo ── */}
       <div className="space-y-2">
 
-        {/* Fila 1: tarjetas de acción clickeables */}
-        <div className="grid grid-cols-3 gap-2 md:gap-3">
+        {/* Fila 1: Nuevos vs Reintentos — organización operativa principal */}
+        <div className="grid grid-cols-2 gap-2 md:gap-3">
           {([
             {
-              tab:   'critico'  as Tab,
-              count: criticos.length,
-              label: 'Críticos (+48h)',
-              sub:   'Sin movimiento +2 días',
-              Icon:  ShieldAlert,
+              tab:   'nuevos' as Tab,
+              count: nuevosEnReparto.length,
+              label: 'Nuevos en reparto',
+              sub:   'Primer intento de entrega',
+              Icon:  Package,
+              base:  'border-blue-200 bg-blue-50 text-blue-700',
+              active:'border-blue-400 bg-blue-100 text-blue-800 ring-2 ring-blue-300/50',
+              hover: 'hover:bg-blue-100',
+            },
+            {
+              tab:   'reintentos' as Tab,
+              count: reintentos.length,
+              label: 'Reintentos',
+              sub:   'Ya tuvieron un intento fallido',
+              Icon:  RefreshCw,
               base:  'border-red-200 bg-red-50 text-red-700',
               active:'border-red-400 bg-red-100 text-red-800 ring-2 ring-red-300/50',
               hover: 'hover:bg-red-100',
-            },
-            {
-              tab:   'riesgo'   as Tab,
-              count: riesgo.length,
-              label: 'En riesgo (1-2d)',
-              sub:   'Requieren seguimiento',
-              Icon:  AlertTriangle,
-              base:  'border-orange-200 bg-orange-50 text-orange-700',
-              active:'border-orange-400 bg-orange-100 text-orange-800 ring-2 ring-orange-300/50',
-              hover: 'hover:bg-orange-100',
-            },
-            {
-              tab:   'normal'   as Tab,
-              count: normales.length,
-              label: 'Normales (0-1d)',
-              sub:   'Recién en reparto',
-              Icon:  Bike,
-              base:  'border-amber-200 bg-amber-50 text-amber-700',
-              active:'border-amber-400 bg-amber-100 text-amber-800 ring-2 ring-amber-300/50',
-              hover: 'hover:bg-amber-100',
             },
           ] as const).map(({ tab, count, label, sub, Icon, base, active, hover }) => (
             <button
@@ -676,6 +703,24 @@ export default function RepartoPage() {
                 <p className="hidden md:block text-xs opacity-60 mt-0.5 truncate">{sub}</p>
               </div>
               <Icon className="w-5 h-5 md:w-7 md:h-7 opacity-25 shrink-0" />
+            </button>
+          ))}
+        </div>
+
+        {/* Riesgo por antigüedad — información secundaria, filtra dentro del tab activo */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider shrink-0">Riesgo:</span>
+          {RISK_META.map(({ filter, label }) => (
+            <button
+              key={filter}
+              onClick={() => setRiskFilter(filter === 'todos' ? 'todos' : (riskFilter === filter ? 'todos' : filter))}
+              className={`shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors whitespace-nowrap
+                ${riskFilter === filter
+                  ? 'bg-amber-500 text-white border-amber-500'
+                  : 'bg-white text-gray-600 border-gray-200 hover:border-amber-300'
+                }`}
+            >
+              {label}
             </button>
           ))}
         </div>
@@ -737,7 +782,7 @@ export default function RepartoPage() {
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
               <p className="text-sm font-semibold text-amber-800">
-                Prioridad: pedidos críticos (+48h) primero · Escala al courier si no localizas al cliente
+                Prioridad: gestiona primero Reintentos (ya tuvieron un intento fallido) · Escala al courier si no localizas al cliente
               </p>
             </div>
             <div className="flex flex-wrap gap-x-4 gap-y-0.5 pl-6 text-xs text-amber-700">
@@ -790,7 +835,7 @@ export default function RepartoPage() {
           )}
 
           {/* Banner: guías críticas viejas detectadas */}
-          {!loading && activeTab === 'critico' && criticos.length > 0 && (
+          {!loading && riskFilter === 'critico' && criticos.length > 0 && (
             <div className="mx-4 my-2 flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
               <ShieldAlert className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
               <div className="text-xs text-red-700 leading-relaxed">
@@ -811,7 +856,7 @@ export default function RepartoPage() {
                   : 'No hay pedidos en esta categoría'}
               </p>
               <button
-                onClick={() => { setActiveTab('all'); setSearchQuery('') }}
+                onClick={() => { setActiveTab('all'); setRiskFilter('todos'); setSearchQuery('') }}
                 className="text-amber-600 text-sm mt-2 hover:underline"
               >
                 Ver todos en reparto
@@ -849,6 +894,7 @@ export default function RepartoPage() {
                     onEntrego={() => markDelivered(order.id)}
                     onNoAnswer={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
                     onEscalar={() => postAction(order.id, 'escalado', 'courier_claim')}
+                    onOpenDetail={() => setOpenOrderId(order.id)}
                   />
                 )
               })}
@@ -897,7 +943,8 @@ export default function RepartoPage() {
                     <tr
                       key={order.id}
                       ref={(el: HTMLTableRowElement | null) => { if (el) rowRefs.current.set(order.id, el) }}
-                      className={`transition-colors group ${rowBase}
+                      onClick={() => setOpenOrderId(order.id)}
+                      className={`transition-colors group cursor-pointer ${rowBase}
                         ${isHighlighted ? 'ring-2 ring-inset ring-blue-500 bg-blue-50/60' : ''}
                         ${accion === 'escalado' ? 'ring-1 ring-inset ring-orange-300' : ''}`}
                     >
@@ -984,7 +1031,7 @@ export default function RepartoPage() {
                         {hasPhone ? (
                           <div className="flex items-center gap-1.5">
                             {waUrl && (
-                              <a href={waUrl} target="_blank" rel="noopener noreferrer"
+                              <a href={waUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
                                  className="flex items-center gap-1 bg-green-500 hover:bg-green-600
                                             text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg
                                             transition-colors shadow-sm">
@@ -992,7 +1039,7 @@ export default function RepartoPage() {
                               </a>
                             )}
                             {telUrl && (
-                              <a href={telUrl}
+                              <a href={telUrl} onClick={e => e.stopPropagation()}
                                  className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
                                             text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg
                                             transition-colors shadow-sm">
@@ -1031,7 +1078,7 @@ export default function RepartoPage() {
                         ) : (
                           <div className="grid grid-cols-2 gap-1">
                             <button
-                              onClick={() => postAction(order.id, 'contacted', 'contacted')}
+                              onClick={e => { e.stopPropagation(); postAction(order.id, 'contacted', 'contacted') }}
                               className="flex items-center gap-1 bg-slate-100 hover:bg-slate-200
                                          text-slate-700 text-[11px] font-medium px-2 py-1 rounded
                                          transition-colors whitespace-nowrap"
@@ -1039,7 +1086,7 @@ export default function RepartoPage() {
                               <CheckCircle2 className="w-3 h-3 shrink-0" />Contactado
                             </button>
                             <button
-                              onClick={() => markDelivered(order.id)}
+                              onClick={e => { e.stopPropagation(); markDelivered(order.id) }}
                               className="flex items-center gap-1 bg-green-100 hover:bg-green-200
                                          text-green-700 text-[11px] font-medium px-2 py-1 rounded
                                          transition-colors whitespace-nowrap"
@@ -1047,7 +1094,7 @@ export default function RepartoPage() {
                               <CheckCircle2 className="w-3 h-3 shrink-0" />Entregó
                             </button>
                             <button
-                              onClick={() => postAction(order.id, 'no_answer', 'contacted', 'no_answer')}
+                              onClick={e => { e.stopPropagation(); postAction(order.id, 'no_answer', 'contacted', 'no_answer') }}
                               className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
                                          text-amber-700 text-[11px] font-medium px-2 py-1 rounded
                                          transition-colors whitespace-nowrap"
@@ -1055,7 +1102,7 @@ export default function RepartoPage() {
                               <PhoneMissed className="w-3 h-3 shrink-0" />No resp.
                             </button>
                             <button
-                              onClick={() => postAction(order.id, 'escalado', 'courier_claim')}
+                              onClick={e => { e.stopPropagation(); postAction(order.id, 'escalado', 'courier_claim') }}
                               className="flex items-center gap-1 bg-orange-100 hover:bg-orange-200
                                          text-orange-700 text-[11px] font-medium px-2 py-1 rounded
                                          transition-colors whitespace-nowrap"
@@ -1066,10 +1113,11 @@ export default function RepartoPage() {
                         )}
                       </td>
 
-                      {/* Ver detalle */}
+                      {/* Ver detalle — página completa */}
                       <td className="px-3 py-2.5">
                         <Link
                           href={`/orders/${order.id}`}
+                          onClick={e => e.stopPropagation()}
                           className="inline-flex items-center gap-1 text-xs font-medium
                                      text-amber-600 hover:text-amber-800 whitespace-nowrap hover:underline"
                         >
@@ -1165,6 +1213,12 @@ export default function RepartoPage() {
           Si el pedido lleva +48h sin entregarse, usa "Escalar" para notificar al courier.
         </p>
       </div>
+
+      <OrderOperativeDrawer
+        orderId={openOrderId}
+        onClose={() => setOpenOrderId(null)}
+        onMutated={fetchData}
+      />
     </div>
   )
 }

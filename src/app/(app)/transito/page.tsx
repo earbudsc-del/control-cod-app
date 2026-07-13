@@ -4,18 +4,32 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { Spinner } from '@/components/ui/spinner'
-import { formatEventDate } from '@/lib/utils'
+import { formatEventDate, whatsAppUrl, callUrl } from '@/lib/utils'
 import type { Order } from '@/types'
 import {
   Package, RefreshCw, ShieldAlert, AlertTriangle,
   Clock, ExternalLink, MapPin, ChevronLeft, ChevronRight,
-  Search, X, Ban, XCircle, Truck,
+  Search, X, Ban, XCircle, Truck, MessageCircle, Phone,
 } from 'lucide-react'
 import {
   transitSinceMs, horasEnTransito, transitCriticality,
   sinMovimientoLabel, TRANSIT_STYLES,
 } from '@/lib/transit-helpers'
 import { isCancelledGuide } from '@/lib/order-status-helpers'
+import { OrderOperativeDrawer } from '@/components/orders/OrderOperativeDrawer'
+
+function buildTransitoWaMsg(order: Order): string {
+  const nombre   = (order.customer_name ?? '').trim() || 'cliente'
+  const producto = (order.product_summary ?? '').trim()
+  const p        = producto.length > 32 ? producto.slice(0, 30) + '...' : producto || 'tu pedido'
+  return [
+    `Hola ${nombre} 😊,`,
+    '',
+    `Tu pedido de ${p} 📦 está en camino.`,
+    '',
+    '¿Podemos ayudarte con algo mientras llega?',
+  ].join('\n')
+}
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
@@ -102,6 +116,7 @@ export default function TransitoPage() {
   const [markingId,    setMarkingId]    = useState<string | null>(null)
   const [updateToast,  setUpdateToast]  = useState<{ msg: string; type: 'ok' | 'err' } | null>(null)
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [openOrderId, setOpenOrderId] = useState<string | null>(null)
 
   const PAGE_SIZE = 50
 
@@ -656,10 +671,13 @@ export default function TransitoPage() {
                   const style        = isAnulada ? TRANSIT_STYLES.normal : TRANSIT_STYLES[crit]
                   const stuckSinceTs = order.status_since ?? order.shipment_created_at ?? order.shopify_created_at ?? order.created_at
                   const loc          = cityDisplay(order)
+                  const waUrl        = whatsAppUrl(order.customer_phone, buildTransitoWaMsg(order))
+                  const telUrl       = callUrl(order.customer_phone)
 
                   return (
                     <tr key={order.id}
-                        className={`transition-colors group
+                        onClick={() => setOpenOrderId(order.id)}
+                        className={`transition-colors group cursor-pointer
                           ${isAnulada
                             ? 'bg-gray-50/50 hover:bg-gray-100/40 opacity-75'
                             : style.row}`}>
@@ -767,8 +785,31 @@ export default function TransitoPage() {
                       {/* Acciones */}
                       <td className="px-3 py-2.5">
                         <div className="flex flex-col gap-1.5 items-start">
+                          {waUrl && (
+                            <a
+                              href={waUrl} target="_blank" rel="noopener noreferrer"
+                              onClick={e => e.stopPropagation()}
+                              className="inline-flex items-center gap-1 text-xs font-medium
+                                         text-green-600 hover:text-green-800 whitespace-nowrap"
+                            >
+                              <MessageCircle className="w-3 h-3" />
+                              WhatsApp
+                            </a>
+                          )}
+                          {telUrl && (
+                            <a
+                              href={telUrl}
+                              onClick={e => e.stopPropagation()}
+                              className="inline-flex items-center gap-1 text-xs font-medium
+                                         text-blue-500 hover:text-blue-700 whitespace-nowrap"
+                            >
+                              <Phone className="w-3 h-3" />
+                              Llamar
+                            </a>
+                          )}
                           <Link
                             href={`/orders/${order.id}`}
+                            onClick={e => e.stopPropagation()}
                             className="inline-flex items-center gap-1 text-xs font-medium
                                        text-blue-600 hover:text-blue-800 whitespace-nowrap hover:underline"
                           >
@@ -778,7 +819,7 @@ export default function TransitoPage() {
                           {!isAnulada && (
                             <>
                               <button
-                                onClick={() => handleRefreshTracking(order)}
+                                onClick={e => { e.stopPropagation(); handleRefreshTracking(order) }}
                                 disabled={updatingId !== null || markingId !== null}
                                 title="Consultar EFI y actualizar estado ahora"
                                 className="inline-flex items-center gap-1 text-xs font-medium
@@ -792,7 +833,7 @@ export default function TransitoPage() {
                                 {updatingId === order.id ? 'Actualizando…' : 'Actualizar'}
                               </button>
                               <button
-                                onClick={() => handleMarkAnulada(order)}
+                                onClick={e => { e.stopPropagation(); handleMarkAnulada(order) }}
                                 disabled={updatingId !== null || markingId !== null}
                                 title="Marcar como anulada manualmente — solo admin/novelty_agent"
                                 className="inline-flex items-center gap-1 text-xs font-medium
@@ -885,6 +926,12 @@ export default function TransitoPage() {
           <strong className="text-gray-500"> last_tracking_update</strong> no se usa para este cálculo.
         </p>
       </div>
+
+      <OrderOperativeDrawer
+        orderId={openOrderId}
+        onClose={() => setOpenOrderId(null)}
+        onMutated={() => fetchData(true)}
+      />
 
     </div>
   )

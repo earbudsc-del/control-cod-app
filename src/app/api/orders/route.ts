@@ -49,6 +49,19 @@ export async function GET(request: Request) {
         .eq('normalized_status', 'in_transit')
         .not('raw_status', 'ilike', '%anulada%')
         .not('raw_status', 'ilike', '%cancelada%')
+    } else if (status === 'en_reparto') {
+      // en_reparto activo: excluye guías anuladas/canceladas que el cron aún no reclasificó
+      // (mismo criterio que in_transit, evita contaminar el universo "activo" con anuladas).
+      query = query
+        .eq('normalized_status', 'en_reparto')
+        .not('raw_status', 'ilike', '%anulad%')
+        .not('raw_status', 'ilike', '%cancelad%')
+      // requireTracking=true: restringe al universo EFI/Gintracom (tracking_number asignado),
+      // usado por /reparto para no mezclar pedidos locales SD (tracking_number IS NULL,
+      // que tienen su propio flujo de cierre en /sd-delivery y nunca son tocados por el cron EFI).
+      if (searchParams.get('requireTracking') === 'true') {
+        query = query.not('tracking_number', 'is', null)
+      }
     } else if (status) {
       query = query.eq('normalized_status', status)
     }

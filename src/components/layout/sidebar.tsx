@@ -77,6 +77,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { href: '/confirmacion',   label: 'Confirmaciones', icon: ClipboardList, alert: 'indigo' },
     { href: '/reparto',        label: 'En Reparto',     icon: Bike,          alert: 'amber'  },
     { href: '/transito',       label: 'Tránsito',       icon: Box,           alert: null     },
+    { href: '/inbox',          label: 'Inbox WhatsApp', icon: MessageSquare, alert: null     },
   ],
 
   santo_domingo_delivery_agent: [

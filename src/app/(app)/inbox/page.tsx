@@ -1,15 +1,18 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useSearchParams } from 'next/navigation'
 import WaConversationList from '@/components/whatsapp/WaConversationList'
 import WaMessagePane    from '@/components/whatsapp/WaMessagePane'
 import type { WaConversation, WaMessage, WaAgentOption } from '@/components/whatsapp/types'
 import { createClient } from '@/lib/supabase/client'
 
-// Roles con acceso al Inbox WhatsApp — mismo set que is_wa_inbox_role() (migración 030).
-const INBOX_ROLES = ['admin', 'ia_supervisor', 'confirmation_agent', 'dispatch_agent', 'novelty_agent', 'agent']
+// Roles con acceso al Inbox WhatsApp — mismo set que is_wa_inbox_role() (migración 030 + 039).
+const INBOX_ROLES = ['admin', 'ia_supervisor', 'confirmation_agent', 'dispatch_agent', 'novelty_agent', 'agent', 'delivery_agent']
 
 export default function InboxPage() {
+  const searchParams = useSearchParams()
+  const deepLinkHandled = useRef(false)
   const [conversations,    setConversations]    = useState<WaConversation[]>([])
   const [selectedId,       setSelectedId]       = useState<string | null>(null)
   const [selectedConv,     setSelectedConv]     = useState<WaConversation | null>(null)
@@ -42,6 +45,23 @@ export default function InboxPage() {
   useEffect(() => {
     loadConversations()
   }, [loadConversations])
+
+  // Deep link ?conversation=<id> — usado por el botón "Abrir conversación (Inbox)"
+  // del detalle operativo de un pedido (Reparto/Tránsito/orders/[id]). Abre esa
+  // conversación aunque no esté en los primeros 100 resultados ya cargados.
+  useEffect(() => {
+    const convId = searchParams.get('conversation')
+    if (!convId || deepLinkHandled.current) return
+    deepLinkHandled.current = true
+    fetch(`/api/whatsapp/conversations/${convId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(json => {
+        if (json?.data) selectConversation(json.data)
+      })
+      .catch(() => {})
+  // selectConversation se define más abajo pero es function declaration (hoisted)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
 
   useEffect(() => {
     const poll = async () => {
