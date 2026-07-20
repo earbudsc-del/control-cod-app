@@ -8,7 +8,7 @@ import { type Order, STATUS_LABELS, STATUS_COLORS } from '@/types'
 import {
   Truck, RefreshCw, MessageCircle, Phone,
   MapPin, ExternalLink, Search, ChevronLeft, ChevronRight,
-  Package, ClipboardList, CheckCircle2, ListFilter,
+  Package, ClipboardList, CheckCircle2, ListFilter, PackageCheck,
 } from 'lucide-react'
 
 const PAGE_SIZE = 50
@@ -71,7 +71,7 @@ export default function DespachadosPage() {
   const [searchQuery, setSearchQuery]   = useState('')
   const [currentPage, setCurrentPage]   = useState(1)
   const [statusFilter, setStatusFilter] = useState<DespachadoStatusFilter>('')
-  const [pipelineCounts, setPipelineCounts] = useState<{ pendingTotal: number; confirmadosSinGuia: number } | null>(null)
+  const [pipelineCounts, setPipelineCounts] = useState<{ pendingTotal: number; confirmadosSinGuia: number; entregadosSd: number } | null>(null)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -86,6 +86,7 @@ export default function DespachadosPage() {
       setPipelineCounts({
         pendingTotal:       pipelineRes.pendingTotal       ?? 0,
         confirmadosSinGuia: pipelineRes.confirmadosSinGuia ?? 0,
+        entregadosSd:       pipelineRes.entregadosSd       ?? 0,
       })
       setLastRefresh(new Date())
     } catch (err) {
@@ -234,6 +235,23 @@ export default function DespachadosPage() {
               <p className="text-2xl font-black tabular-nums text-white leading-none">{loading ? '…' : total}</p>
             </div>
           </div>
+
+          <div className="flex items-center justify-center w-8 bg-gray-50 shrink-0">
+            <ChevronRight className="w-4 h-4 text-gray-300" />
+          </div>
+
+          {/* Paso 4 — Link a Entregados (SD) */}
+          <Link href="/confirmados?tab=entregados"
+            className="flex-1 flex items-center gap-3 px-5 py-3.5 hover:bg-emerald-50 transition-colors group">
+            <PackageCheck className="w-5 h-5 text-gray-300 group-hover:text-emerald-500 shrink-0 transition-colors" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 4</p>
+              <p className="text-sm font-bold text-gray-600 group-hover:text-emerald-700 leading-tight transition-colors">Entregados</p>
+              <p className="text-2xl font-black tabular-nums text-emerald-600 leading-none">
+                {pipelineCounts ? pipelineCounts.entregadosSd : '…'}
+              </p>
+            </div>
+          </Link>
         </div>
       </div>
 

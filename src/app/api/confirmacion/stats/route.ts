@@ -96,6 +96,9 @@ export async function GET() {
       { count: tresMasIntentosPendientes },
       { count: duplicadosPendientes },
       { count: numeroIncorrecto },
+      // Pipeline nav — pago SD (migración 046)
+      { count: sdPorCobrar },
+      { count: entregadosSd },
     ] = await Promise.all([
 
       // Nuevos: pedidos de HOY (en RD) con 0 intentos de contacto — sin contacto previo
@@ -267,6 +270,28 @@ export async function GET() {
         .eq('confirmation_status', 'wrong_number')
         .neq('normalized_status', 'delivered')
         .neq('normalized_status', 'returned'),
+
+      // SD · Por cobrar (para pipeline nav + tab de /confirmados)
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .is('tracking_number', null)
+        .in('normalized_status', ['en_reparto', 'delivered'])
+        .eq('payment_status', 'pending')
+        .is('archived_at', null)
+        .eq('is_test', false)
+        .or(sdFilter),
+
+      // Entregados SD (pagados) — para pipeline nav + tab de /confirmados
+      supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .is('tracking_number', null)
+        .eq('normalized_status', 'delivered')
+        .eq('payment_status', 'paid')
+        .is('archived_at', null)
+        .eq('is_test', false)
+        .or(sdFilter),
     ])
 
     return NextResponse.json({
@@ -302,6 +327,9 @@ export async function GET() {
       tresMasIntentosPendientes:      tresMasIntentosPendientes      ?? 0,
       duplicadosPendientes:           duplicadosPendientes           ?? 0,
       numeroIncorrecto:               numeroIncorrecto               ?? 0,
+      // Pipeline nav — pago SD (migración 046)
+      sdPorCobrar:                    sdPorCobrar                    ?? 0,
+      entregadosSd:                   entregadosSd                   ?? 0,
     })
   } catch (err) {
     console.error('[GET /api/confirmacion/stats]', err)

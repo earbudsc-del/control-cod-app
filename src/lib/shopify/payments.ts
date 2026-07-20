@@ -21,24 +21,28 @@ interface OrderMarkAsPaidResponse {
 
 interface OrderFinancialStatusResponse {
   order: {
-    id:              string
-    financialStatus: string  // PAID | PENDING | PARTIALLY_PAID | REFUNDED | etc.
+    id:                     string
+    displayFinancialStatus: string  // PAID | PENDING | PARTIALLY_PAID | REFUNDED | etc.
   } | null
 }
 
 // Consulta el estado financiero actual de la orden.
+// NOTA: `financialStatus` no existe en Order a partir de la API version 2024-07
+// (usada por SHOPIFY_API_VERSION en client.ts) — el campo vigente es
+// `displayFinancialStatus`. Devuelve los mismos valores en mayúsculas (PAID,
+// PENDING, etc.), así que el resto de esta función no necesita cambios.
 async function getFinancialStatus(shopifyOrderGid: string): Promise<string | null> {
   const query = `
     query OrderFinancialStatus($id: ID!) {
       order(id: $id) {
         id
-        financialStatus
+        displayFinancialStatus
       }
     }
   `
   try {
     const data = await shopifyGraphQL<OrderFinancialStatusResponse>(query, { id: shopifyOrderGid })
-    return data.order?.financialStatus ?? null
+    return data.order?.displayFinancialStatus ?? null
   } catch {
     return null
   }

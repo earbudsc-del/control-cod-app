@@ -11,10 +11,11 @@ import {
   CheckCircle2, PhoneMissed, XCircle, ExternalLink,
   MapPin, RotateCcw, Clock, Inbox, TrendingUp,
   MapPinOff, ChevronLeft, ChevronRight, Search, Truck,
-  CalendarDays, ShoppingBag, Package, ListFilter,
+  CalendarDays, ShoppingBag, Package, ListFilter, PackageCheck,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
+import { MarkPaidButton } from '@/components/orders/mark-paid-button'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,8 @@ interface ConfirmStats {
   santoDomingoConfirmadosSinGuia?: number
   santoDomingoTotal?:              number
   fueraDeCoberturaTotal?:          number
+  sdPorCobrar?:                    number
+  entregadosSd?:                   number
 }
 
 interface ConfirmResult {
@@ -85,10 +88,24 @@ const TERMINAL: Record<string, { label: string; color: string }> = {
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 
+// Para pedidos SD, confirmation_status por sí solo se queda "Confirmado" para
+// siempre — nunca refleja que el pedido avanzó a entregado/pagado, porque esa
+// información vive en normalized_status/payment_status (columnas separadas a
+// propósito, ver 046_orders_payment_status.sql). Este badge es puramente
+// visual: NO escribe ni deriva ningún campo, solo decide qué mostrar según la
+// etapa operativa más avanzada. confirmation_status nunca se modifica aquí.
 function getConfirmBadge(
   order: Order,
   terminalOverride?: string,
 ): { label: string; cls: string } {
+  if (isSantoDomingoOrder(order.city, order.province, order.customer_address)) {
+    if ((order.payment_status ?? 'pending') === 'paid') {
+      return { label: 'Pagado', cls: 'bg-green-600 text-white' }
+    }
+    if (order.normalized_status === 'delivered') {
+      return { label: 'Entregado', cls: 'bg-blue-100 text-blue-700' }
+    }
+  }
   const raw      = terminalOverride ?? (order.confirmation_status as string) ?? 'pending'
   const status   = raw === 'wrong_number' ? 'unreachable' : raw
   const attempts = order.confirmation_attempts ?? 0
@@ -120,6 +137,18 @@ function getDelayBadge(order: Order): { label: string; cls: string } | null {
   if (hoursOld >= 48) return { label: '+48h', cls: 'bg-red-100 text-red-700 font-bold animate-pulse' }
   if (hoursOld >= 24) return { label: '+24h', cls: 'bg-amber-100 text-amber-700 font-bold' }
   return null
+}
+
+// Pedido SD local ya despachado/entregado que todavía no tiene el cobro
+// registrado — mismo criterio que "SD · Por cobrar" en /confirmados, para
+// que el botón "Pagado" aparezca exactamente en el mismo universo de pedidos
+// en ambos módulos. Ver POST /api/orders/[id]/mark-paid.
+function isPagoPendiente(order: Order): boolean {
+  return (
+    !order.tracking_number &&
+    (order.payment_status ?? 'pending') !== 'paid' &&
+    (order.normalized_status === 'en_reparto' || order.normalized_status === 'delivered')
+  )
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -357,9 +386,10 @@ interface PedidoCardProps {
   onConfirmed: () => void; onNoAnswer: () => void
   onNoCoverage: () => void; onCancelled: () => void
   onSetMethod: (m: ContactMethod) => void
+  onPaidSuccess?: () => void
 }
 
-function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCoverage, onCancelled, onSetMethod }: PedidoCardProps) {
+function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCoverage, onCancelled, onSetMethod, onPaidSuccess }: PedidoCardProps) {
   const nombre    = order.customer_name ?? ''
   const waUrl     = whatsAppUrl(order.customer_phone, buildConfirmMsg(nombre, order.product_summary, order.cod_amount))
   const telUrl    = callUrl(order.customer_phone)
@@ -414,6 +444,11 @@ function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCovera
           {logBadge.label}
         </span>
       </div>
+
+      {/* Pagado (pedido SD ya despachado/entregado, pago pendiente) */}
+      {isPagoPendiente(order) && onPaidSuccess && (
+        <MarkPaidButton orderId={order.id} onSuccess={onPaidSuccess} className="w-full flex items-center justify-center gap-1.5 min-h-[40px] bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-xl shadow-sm" />
+      )}
 
       {/* Acciones (solo si pendiente sin tracking) */}
       {isPending && (
@@ -890,6 +925,19 @@ export default function ConfirmacionPage() {
         showToast(msg, 'success')
         if (action !== 'confirmed') {
           setTimeout(() => setOrders(prev => prev.filter(o => o.id !== orderId)), 1500)
+        } else if (data.auto_dispatched) {
+          // El pedido SD se auto-despachó a en_reparto en el mismo request de
+          // confirmación (ver applyConfirmationAction). Reflejarlo aquí de
+          // inmediato — si no, el pedido queda con normalized_status='pending'
+          // en el array local hasta el próximo refetch (cada 3 min o manual),
+          // y el botón "Pagado" (que depende de normalized_status='en_reparto'
+          // vía isPagoPendiente) no aparece hasta entonces.
+          const patch = (o: Order): Order =>
+            o.id === orderId
+              ? { ...o, normalized_status: 'en_reparto', confirmation_status: 'confirmed' }
+              : o
+          setSdData(prev => prev.map(patch))
+          setPedidosData(prev => prev.map(patch))
         }
       }
     } finally {
@@ -996,8 +1044,10 @@ export default function ConfirmacionPage() {
       </span>
     )
     if (!isPending) return null
-    const waUrl  = whatsAppUrl(order.customer_phone)
-    const telUrl = callUrl(order.customer_phone)
+    // WhatsApp/Llamar NO se repiten aquí — el llamador (columna "Acción" de la
+    // tabla Pedidos/Santo Domingo) ya los renderiza una sola vez antes de
+    // invocar esta función. Antes había un segundo bloque WA/Llamar duplicado
+    // dentro de este componente (fix 2026-07-20).
     return (
       <div className="grid grid-cols-2 gap-1">
         <button onClick={() => postConfirmation(order.id, 'confirmed')}
@@ -1020,22 +1070,6 @@ export default function ConfirmacionPage() {
                      text-gray-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
           <XCircle className="w-3 h-3 shrink-0" />Ya no desea
         </button>
-        {waUrl && (
-          <a href={waUrl} target="_blank" rel="noopener noreferrer"
-             onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'whatsapp' }))}
-             className="flex items-center gap-1 bg-green-500 hover:bg-green-600
-                        text-white text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
-            <MessageCircle className="w-3 h-3 shrink-0" />WhatsApp
-          </a>
-        )}
-        {telUrl && (
-          <a href={telUrl}
-             onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'call' }))}
-             className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
-                        text-white text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
-            <Phone className="w-3 h-3 shrink-0" />Llamar
-          </a>
-        )}
       </div>
     )
   }
@@ -1196,6 +1230,20 @@ export default function ConfirmacionPage() {
                 <p className="text-xs md:text-sm font-bold text-gray-600 group-hover:text-blue-700 leading-tight">Despachados</p>
                 <p className="text-xl md:text-2xl font-black tabular-nums text-blue-600 leading-none">
                   {stats ? stats.despachados : '…'}
+                </p>
+              </div>
+            </Link>
+            <div className="flex items-center justify-center w-7 md:w-8 bg-gray-50 shrink-0">
+              <ChevronRight className="w-4 h-4 text-gray-300" />
+            </div>
+            <Link href="/confirmados?tab=entregados"
+              className="flex-1 flex items-center gap-2 md:gap-3 px-3 md:px-5 py-3.5 hover:bg-emerald-50 transition-colors group">
+              <PackageCheck className="w-4 md:w-5 h-4 md:h-5 text-gray-300 group-hover:text-emerald-500 shrink-0" />
+              <div className="min-w-0">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 4</p>
+                <p className="text-xs md:text-sm font-bold text-gray-600 group-hover:text-emerald-700 leading-tight">Entregados</p>
+                <p className="text-xl md:text-2xl font-black tabular-nums text-emerald-600 leading-none">
+                  {stats ? stats.entregadosSd : '…'}
                 </p>
               </div>
             </Link>
@@ -1466,6 +1514,16 @@ export default function ConfirmacionPage() {
                         onNoCoverage={() => postConfirmation(order.id, 'no_coverage')}
                         onCancelled={() => postConfirmation(order.id, 'cancelled')}
                         onSetMethod={m => setMethodMap(prev => ({ ...prev, [order.id]: m }))}
+                        onPaidSuccess={() => {
+                          showToast('✓ Pedido marcado como pagado', 'success')
+                          const patch = (o: Order): Order =>
+                            o.id === order.id ? { ...o, payment_status: 'paid', normalized_status: 'delivered' } : o
+                          setSdData(prev => prev.map(patch))
+                          setPedidosData(prev => prev.map(patch))
+                          if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery, statusFilter)
+                          else fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
+                          fetchStats()
+                        }}
                       />
                     </div>
                   ))}
@@ -1570,7 +1628,18 @@ export default function ConfirmacionPage() {
 
                             {/* Acción */}
                             <td className="px-3 py-2.5">
-                              {isPending ? (
+                              {viewMode === 'santo_domingo' && isPagoPendiente(order) ? (
+                                <MarkPaidButton
+                                  orderId={order.id}
+                                  onSuccess={() => {
+                                    showToast('✓ Pedido marcado como pagado', 'success')
+                                    setSdData(prev => prev.map(o =>
+                                      o.id === order.id ? { ...o, payment_status: 'paid', normalized_status: 'delivered' } : o))
+                                    fetchSD(sdPage, searchQuery, statusFilter)
+                                    fetchStats()
+                                  }}
+                                />
+                              ) : isPending ? (
                                 <div className="flex flex-col gap-1">
                                   {hasPhone && (
                                     <div className="flex gap-1">
@@ -1579,7 +1648,7 @@ export default function ConfirmacionPage() {
                                            onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'whatsapp' }))}
                                            className="flex items-center gap-1 bg-green-500 hover:bg-green-600
                                                       text-white text-[11px] font-semibold px-2 py-1 rounded-lg">
-                                          <MessageCircle className="w-3 h-3" />WA
+                                          <MessageCircle className="w-3 h-3" />WhatsApp
                                         </a>
                                       )}
                                       {telUrl && (

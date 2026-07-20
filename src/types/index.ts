@@ -9,6 +9,7 @@ export type UserRole =
   | 'agent'
   | 'viewer'
 export type ConfirmationStatus     = 'pending' | 'confirmed' | 'unreachable' | 'cancelled'
+export type PaymentStatus          = 'pending' | 'paid'
 export type CartRecoveryStatus     = 'pending' | 'contacted' | 'no_answer' | 'recovered' | 'discarded'
 export type ConfirmationMethod     = 'call' | 'whatsapp' | 'other'
 export type ConfirmationConfidence = 'high' | 'medium' | 'low' | 'risky'
@@ -45,6 +46,7 @@ export type ActionType =
   | 'route_confirmed'
   | 'customer_declined'
   | 'local_dispatched'
+  | 'paid'
 export type NoveltyType         = 'no_contact' | 'contacted'
 export type DeliveryResolution  = 'pending' | 'rescheduled' | 'delivered' | 'returned'
 export type InvalidReason =
@@ -202,6 +204,12 @@ export interface Order {
   duplicate_alert?: boolean
   duplicate_of_order_id?: string | null
   duplicate_reason?: string | null
+  // Estado financiero (migración 046) — independiente de normalized_status.
+  // delivered_at/delivered_by NO existen como columnas: se derivan de
+  // agent_actions (action_type='delivered', fila más reciente).
+  payment_status?: PaymentStatus
+  paid_at?: string | null
+  paid_by?: string | null
   // Motor de Novedades — clasificación comunicacional (migración 037)
   novelty_type?: NoveltyType | null
   delivery_resolution?: DeliveryResolution | null
@@ -379,6 +387,7 @@ export const ACTION_LABELS: Record<ActionType, string> = {
   route_confirmed:    'Confirmó salida a ruta',
   customer_declined:  'Cliente no desea el pedido',
   local_dispatched:   'Despachado localmente por mensajero SD',
+  paid:               'Registró pago (COD cobrado)',
 }
 
 export type TaskType = 'follow_up' | 'novedad' | 'confirmation' | 'recovery'

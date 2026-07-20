@@ -4,18 +4,53 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { Spinner } from '@/components/ui/spinner'
-import { formatCurrency, formatEventDate } from '@/lib/utils'
+import { formatCurrency, formatEventDate, whatsAppUrl, callUrl } from '@/lib/utils'
 import {
   CheckCircle2, RefreshCw, Package, Search,
   Calendar, Truck, MapPin, AlertTriangle,
   ChevronLeft, ChevronRight, ClipboardList, ShoppingCart,
-  Navigation,
+  Navigation, MessageCircle, Phone, ExternalLink, PackageCheck,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
+import { MarkPaidButton } from '@/components/orders/mark-paid-button'
 
 type FilterType  = 'todos' | 'hoy' | 'ayer' | 'rango' | 'recuperados'
 type AlertFilter = 'todos' | 'duplicados' | 'cobertura' | 'zona_desconocida' | 'santo_domingo'
+type MainTab     = 'confirmados' | 'sd_por_cobrar' | 'entregados'
+
+interface SdPorCobrarOrder {
+  id:                string
+  order_number:      string | null
+  customer_name:     string | null
+  customer_phone:    string | null
+  customer_address:  string | null
+  city:              string | null
+  province:          string | null
+  product_summary:   string | null
+  cod_amount:        number | null
+  normalized_status: string
+  status_since:      string | null
+  created_at:        string
+}
+
+interface EntregadoOrder {
+  id:                 string
+  order_number:       string | null
+  customer_name:      string | null
+  customer_phone:     string | null
+  customer_address:   string | null
+  city:               string | null
+  province:           string | null
+  product_summary:    string | null
+  cod_amount:         number | null
+  paid_at:            string | null
+  paid_by:            string | null
+  paid_by_name:       string | null
+  delivered_at:       string | null
+  delivered_by_name:  string | null
+  created_at:         string
+}
 
 interface ConfirmadoOrder {
   id:                        string
@@ -75,13 +110,20 @@ function RecoveredBadge({ source, cartId }: { source: string; cartId: string }) 
 export default function ConfirmadosPage() {
   const searchParams   = useSearchParams()
   const initialFilter  = (searchParams.get('filter') as FilterType) ?? 'todos'
+  const tabParam       = searchParams.get('tab')
+  const initialMainTab: MainTab =
+    tabParam === 'sd_por_cobrar' || tabParam === 'entregados' ? tabParam : 'confirmados'
+
+  const [mainTab, setMainTab] = useState<MainTab>(initialMainTab)
 
   const [orders, setOrders]           = useState<ConfirmadoOrder[]>([])
   const [stats, setStats]             = useState({ confirmados_hoy: 0, confirmados_ayer: 0, recuperados: 0 })
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const [activeFilter, setActiveFilter] = useState<FilterType>(initialFilter)
-  const [pipelineCounts, setPipelineCounts] = useState<{ pendingTotal: number; despachados: number } | null>(null)
+  const [pipelineCounts, setPipelineCounts] = useState<{
+    pendingTotal: number; despachados: number; sdPorCobrar: number; entregadosSd: number
+  } | null>(null)
   const [fromDate, setFromDate]       = useState('')
   const [toDate, setToDate]           = useState('')
   const [searchQuery, setSearchQuery] = useState('')
@@ -91,6 +133,45 @@ export default function ConfirmadosPage() {
   const [dispatching, setDispatching]       = useState<Record<string, boolean>>({})
   const [dispatchErrors, setDispatchErrors] = useState<Record<string, string>>({})
   const [toast, setToast]                   = useState<{ msg: string; ok: boolean } | null>(null)
+
+  // ── SD · Por cobrar / Entregados ──────────────────────────────────────────
+  const [sdPorCobrarData, setSdPorCobrarData]       = useState<SdPorCobrarOrder[]>([])
+  const [sdPorCobrarLoading, setSdPorCobrarLoading] = useState(true)
+  const [entregadosData, setEntregadosData]         = useState<EntregadoOrder[]>([])
+  const [entregadosLoading, setEntregadosLoading]   = useState(true)
+
+  const fetchSdPorCobrar = useCallback(async () => {
+    setSdPorCobrarLoading(true)
+    try {
+      const res = await fetch('/api/confirmados?tab=sd_por_cobrar')
+        .then(r => r.json() as Promise<{ data: SdPorCobrarOrder[] }>)
+      setSdPorCobrarData(res.data ?? [])
+    } catch (err) {
+      console.error('[confirmados/fetchSdPorCobrar]', err)
+    } finally {
+      setSdPorCobrarLoading(false)
+    }
+  }, [])
+
+  const fetchEntregados = useCallback(async () => {
+    setEntregadosLoading(true)
+    try {
+      const res = await fetch('/api/confirmados?tab=entregados')
+        .then(r => r.json() as Promise<{ data: EntregadoOrder[] }>)
+      setEntregadosData(res.data ?? [])
+    } catch (err) {
+      console.error('[confirmados/fetchEntregados]', err)
+    } finally {
+      setEntregadosLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchSdPorCobrar()
+    fetchEntregados()
+    const interval = setInterval(() => { fetchSdPorCobrar(); fetchEntregados() }, 3 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [fetchSdPorCobrar, fetchEntregados])
 
   function showToast(msg: string, ok: boolean) {
     setToast({ msg, ok })
@@ -128,8 +209,10 @@ export default function ConfirmadosPage() {
       setOrders(res.data  ?? [])
       setStats(res.stats  ?? { confirmados_hoy: 0, confirmados_ayer: 0, recuperados: 0 })
       setPipelineCounts({
-        pendingTotal: pipelineRes.pendingTotal ?? 0,
-        despachados:  pipelineRes.despachados  ?? 0,
+        pendingTotal: pipelineRes.pendingTotal  ?? 0,
+        despachados:  pipelineRes.despachados   ?? 0,
+        sdPorCobrar:  pipelineRes.sdPorCobrar    ?? 0,
+        entregadosSd: pipelineRes.entregadosSd   ?? 0,
       })
       setLastRefresh(new Date())
     } catch (err) {
@@ -367,9 +450,76 @@ export default function ConfirmadosPage() {
               </p>
             </div>
           </Link>
+
+          <div className="flex items-center justify-center w-8 bg-gray-50 shrink-0">
+            <ChevronRight className="w-4 h-4 text-gray-300" />
+          </div>
+
+          {/* Paso 4 — Entregados (SD, pagados) */}
+          <button
+            onClick={() => setMainTab('entregados')}
+            className="flex-1 flex items-center gap-3 px-5 py-3.5 hover:bg-emerald-50 transition-colors group text-left"
+          >
+            <PackageCheck className="w-5 h-5 text-gray-300 group-hover:text-emerald-500 shrink-0 transition-colors" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Paso 4</p>
+              <p className="text-sm font-bold text-gray-600 group-hover:text-emerald-700 leading-tight transition-colors">Entregados</p>
+              <p className="text-2xl font-black tabular-nums text-emerald-600 leading-none">
+                {pipelineCounts ? pipelineCounts.entregadosSd : '…'}
+              </p>
+            </div>
+          </button>
         </div>
       </div>
 
+      {/* ── Tabs del módulo ── */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* El conteo del tab usa el largo real de la lista ya cargada (no un
+            COUNT aparte) — así nunca puede divergir de las filas mostradas. */}
+        {([
+          { key: 'confirmados',   label: 'Confirmados',                                                      cls: 'green'   },
+          { key: 'sd_por_cobrar', label: `SD · Por cobrar (${sdPorCobrarLoading ? '…' : sdPorCobrarData.length})`, cls: 'amber'   },
+          { key: 'entregados',    label: `Entregados (${entregadosLoading ? '…' : entregadosData.length})`,       cls: 'emerald' },
+        ] as { key: MainTab; label: string; cls: string }[]).map(({ key, label, cls }) => (
+          <button
+            key={key}
+            onClick={() => setMainTab(key)}
+            className={`px-4 py-2 text-sm font-semibold rounded-lg transition-colors
+              ${mainTab === key
+                ? cls === 'green' ? 'bg-green-600 text-white'
+                  : cls === 'amber' ? 'bg-amber-600 text-white'
+                    : 'bg-emerald-600 text-white'
+                : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {mainTab === 'sd_por_cobrar' && (
+        <SdPorCobrarTab
+          data={sdPorCobrarData}
+          loading={sdPorCobrarLoading}
+          onPaidSuccess={(orderId) => {
+            showToast('✓ Pedido marcado como pagado', true)
+            // Quita la fila de inmediato (sin esperar el refetch) — así
+            // desaparece de "SD · Por cobrar" al instante. El refetch de abajo
+            // reconcilia el estado real y trae la fila nueva a "Entregados"
+            // con mensajero/fecha de pago resueltos desde el servidor.
+            setSdPorCobrarData(prev => prev.filter(o => o.id !== orderId))
+            fetchEntregados()
+            fetchSdPorCobrar()
+            fetchData()
+          }}
+        />
+      )}
+
+      {mainTab === 'entregados' && (
+        <EntregadosTab data={entregadosData} loading={entregadosLoading} />
+      )}
+
+      {mainTab === 'confirmados' && (
+      <>
       {/* ── Tarjetas de resumen ── */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <button
@@ -865,7 +1015,279 @@ export default function ConfirmadosPage() {
           </div>
         )}
       </div>
+      </>
+      )}
 
+    </div>
+  )
+}
+
+// ── Tab: SD · Por cobrar ─────────────────────────────────────────────────────
+
+type SdSubFilter = 'todos' | 'pendiente_entrega' | 'entregado_pendiente_pago'
+
+function SdPorCobrarTab({
+  data, loading, onPaidSuccess,
+}: {
+  data: SdPorCobrarOrder[]
+  loading: boolean
+  onPaidSuccess: (orderId: string) => void
+}) {
+  const LOGISTIC_LABEL: Record<string, { label: string; cls: string }> = {
+    en_reparto: { label: 'En reparto', cls: 'bg-orange-100 text-orange-700' },
+    delivered:  { label: 'Entregado',  cls: 'bg-green-100 text-green-700'   },
+  }
+
+  // Clasificación pedida: "Confirmados pendientes de entrega" (en_reparto,
+  // aún no delivered) vs "Entregados pendientes de pago" (delivered). Ambos
+  // ya excluyen pagados porque esta pestaña solo recibe payment_status='pending'
+  // desde el servidor — nunca hay que filtrar eso aquí.
+  const [subFilter, setSubFilter] = useState<SdSubFilter>('todos')
+
+  const pendienteEntrega       = useMemo(() => data.filter(o => o.normalized_status !== 'delivered'), [data])
+  const entregadoPendientePago = useMemo(() => data.filter(o => o.normalized_status === 'delivered'), [data])
+
+  const displayed =
+    subFilter === 'pendiente_entrega'         ? pendienteEntrega :
+    subFilter === 'entregado_pendiente_pago'  ? entregadoPendientePago :
+    data
+
+  return (
+    <div className="bg-white rounded-xl border-2 border-amber-200 overflow-hidden shadow-sm">
+      <div className="px-4 py-3 border-b border-amber-100 bg-amber-50/50">
+        <p className="text-sm font-semibold text-amber-800">Santo Domingo — pendientes de cobro</p>
+        <p className="text-xs text-amber-700 mt-0.5">
+          Pedidos locales ya despachados o entregados por el mensajero cuyo pago todavía no se ha registrado.
+        </p>
+      </div>
+
+      <div className="px-4 py-2.5 border-b border-amber-100 flex items-center gap-2 flex-wrap">
+        {([
+          { key: 'todos',                     label: `Todos (${data.length})` },
+          { key: 'pendiente_entrega',         label: `Confirmados · pendientes de entrega (${pendienteEntrega.length})` },
+          { key: 'entregado_pendiente_pago',  label: `Entregados · pendientes de pago (${entregadoPendientePago.length})` },
+        ] as { key: SdSubFilter; label: string }[]).map(({ key, label }) => (
+          <button
+            key={key}
+            onClick={() => setSubFilter(key)}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors
+              ${subFilter === key
+                ? 'bg-amber-600 text-white'
+                : 'bg-white text-amber-700 border border-amber-200 hover:bg-amber-100'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {loading && (
+        <div className="flex items-center justify-center py-16">
+          <Spinner className="w-6 h-6 text-amber-500" />
+        </div>
+      )}
+
+      {!loading && displayed.length === 0 && (
+        <div className="px-5 py-12 text-center text-gray-500 font-medium">
+          {subFilter === 'todos' ? 'No hay pedidos SD pendientes de cobro' : 'Sin pedidos en este filtro'}
+        </div>
+      )}
+
+      {!loading && displayed.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-amber-50/60 border-b border-amber-100">
+              <tr>
+                {['# Pedido', 'Cliente', 'Sector', 'Producto', 'Monto', 'Estado', 'Desde', 'Acciones'].map(h => (
+                  <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-amber-800 whitespace-nowrap">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-amber-50">
+              {displayed.map(order => {
+                const waUrl  = whatsAppUrl(order.customer_phone)
+                const telUrl = callUrl(order.customer_phone)
+                const logo   = LOGISTIC_LABEL[order.normalized_status] ?? { label: order.normalized_status, cls: 'bg-gray-100 text-gray-600' }
+                return (
+                  <tr key={order.id} className="hover:bg-amber-50/40 transition-colors">
+                    <td className="px-3 py-2.5">
+                      <p className="font-mono text-xs font-semibold text-gray-900 whitespace-nowrap">
+                        {order.order_number ?? '—'}
+                      </p>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <p className="font-medium text-gray-900 text-sm leading-tight truncate max-w-[140px]">
+                        {order.customer_name ?? '—'}
+                      </p>
+                      <p className="font-mono text-xs text-gray-500 mt-0.5">{order.customer_phone ?? '—'}</p>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center gap-1 text-gray-600">
+                        <MapPin className="w-3 h-3 text-gray-400 shrink-0" />
+                        <span className="text-xs truncate max-w-[110px]">{order.city ?? '—'}</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5 max-w-[160px]">
+                      <p className="text-xs text-gray-600 truncate" title={order.product_summary ?? ''}>
+                        {order.product_summary ?? '—'}
+                      </p>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="text-sm font-semibold text-gray-900 whitespace-nowrap tabular-nums">
+                        {formatCurrency(order.cod_amount)}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full ${logo.cls}`}>
+                        {logo.label}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="text-xs text-gray-600 whitespace-nowrap">
+                        {formatEventDate(order.status_since ?? order.created_at)}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <MarkPaidButton orderId={order.id} onSuccess={() => onPaidSuccess(order.id)} />
+                        {waUrl && (
+                          <a href={waUrl} target="_blank" rel="noopener noreferrer"
+                             className="flex items-center gap-1 bg-green-500 hover:bg-green-600
+                                        text-white text-[11px] font-semibold px-2 py-1.5 rounded-lg whitespace-nowrap">
+                            <MessageCircle className="w-3 h-3" />WhatsApp
+                          </a>
+                        )}
+                        {telUrl && (
+                          <a href={telUrl}
+                             className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
+                                        text-white text-[11px] font-semibold px-2 py-1.5 rounded-lg whitespace-nowrap">
+                            <Phone className="w-3 h-3" />Llamar
+                          </a>
+                        )}
+                        <Link href={`/orders/${order.id}`}
+                          className="flex items-center gap-1 text-xs font-medium text-indigo-600
+                                     hover:text-indigo-800 whitespace-nowrap hover:underline">
+                          <ExternalLink className="w-3 h-3" />Ver
+                        </Link>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Tab: Entregados ───────────────────────────────────────────────────────────
+
+function EntregadosTab({ data, loading }: { data: EntregadoOrder[]; loading: boolean }) {
+  return (
+    <div className="bg-white rounded-xl border-2 border-emerald-200 overflow-hidden shadow-sm">
+      <div className="px-4 py-3 border-b border-emerald-100 bg-emerald-50/50">
+        <p className="text-sm font-semibold text-emerald-800">Santo Domingo — entregados y pagados</p>
+        <p className="text-xs text-emerald-700 mt-0.5">
+          Pedidos locales cerrados por completo: entrega confirmada y cobro registrado.
+        </p>
+      </div>
+
+      {loading && (
+        <div className="flex items-center justify-center py-16">
+          <Spinner className="w-6 h-6 text-emerald-500" />
+        </div>
+      )}
+
+      {!loading && data.length === 0 && (
+        <div className="px-5 py-12 text-center text-gray-500 font-medium">
+          Todavía no hay pedidos SD entregados y pagados
+        </div>
+      )}
+
+      {!loading && data.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-emerald-50/60 border-b border-emerald-100">
+              <tr>
+                {['# Pedido', 'Estado', 'Cliente', 'Sector', 'Producto', 'Monto', 'Mensajero',
+                  'Fecha entrega', 'Fecha pago', 'Confirmó pago', ''].map(h => (
+                  <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-emerald-800 whitespace-nowrap">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-emerald-50">
+              {data.map(order => (
+                <tr key={order.id} className="hover:bg-emerald-50/40 transition-colors">
+                  <td className="px-3 py-2.5">
+                    <p className="font-mono text-xs font-semibold text-gray-900 whitespace-nowrap">
+                      {order.order_number ?? '—'}
+                    </p>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-600 text-white whitespace-nowrap">
+                      Pagado
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <p className="font-medium text-gray-900 text-sm leading-tight truncate max-w-[140px]">
+                      {order.customer_name ?? '—'}
+                    </p>
+                    <p className="font-mono text-xs text-gray-500 mt-0.5">{order.customer_phone ?? '—'}</p>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <div className="flex items-center gap-1 text-gray-600">
+                      <MapPin className="w-3 h-3 text-gray-400 shrink-0" />
+                      <span className="text-xs truncate max-w-[100px]">{order.city ?? '—'}</span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2.5 max-w-[150px]">
+                    <p className="text-xs text-gray-600 truncate" title={order.product_summary ?? ''}>
+                      {order.product_summary ?? '—'}
+                    </p>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className="text-sm font-semibold text-gray-900 whitespace-nowrap tabular-nums">
+                      {formatCurrency(order.cod_amount)}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className="text-xs text-gray-700 whitespace-nowrap">
+                      {order.delivered_by_name ?? <span className="text-gray-300 italic">—</span>}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className="text-xs text-gray-600 whitespace-nowrap">
+                      {order.delivered_at ? formatEventDate(order.delivered_at) : '—'}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className="text-xs text-gray-600 whitespace-nowrap">
+                      {order.paid_at ? formatEventDate(order.paid_at) : '—'}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className="text-xs text-gray-700 whitespace-nowrap">
+                      {order.paid_by_name ?? <span className="text-gray-300 italic">—</span>}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <Link href={`/orders/${order.id}`}
+                      className="flex items-center gap-1 text-xs font-medium text-indigo-600
+                                 hover:text-indigo-800 whitespace-nowrap hover:underline">
+                      <ExternalLink className="w-3 h-3" />Ver
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
