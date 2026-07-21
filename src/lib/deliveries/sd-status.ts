@@ -55,6 +55,17 @@ export function isSdEligible(order: SdOrderRow): boolean {
   return !order.tracking_number && isSantoDomingoOrder(order.city, order.province, order.customer_address)
 }
 
+// Mismo criterio que isSdEligible (sin guía + dirección en zona SD), reutilizado
+// para clasificar el CANAL de una entrega ya realizada (normalized_status=
+// 'delivered'), no solo la elegibilidad de un pedido activo. Un pedido con
+// tracking_number asignado siempre clasifica como entrega del courier externo
+// (EFI/Gintracom), nunca como local, sin importar la dirección — ver
+// docs/ARCHITECTURE_RUTA_COD_V1.md y el diagnóstico de métricas de Reparto.
+// Usado por /api/reparto/performance y /api/reparto/entregados.
+export function isLocalSdDelivery(order: SdOrderRow): boolean {
+  return isSdEligible(order)
+}
+
 // Pool A (en_reparto) → 'confirmado'. Pool B (pending) / Pool C (confirmed,
 // aún sin despachar) → 'nuevo'. null = fuera de los pools activos SD.
 export function computePool(order: SdOrderRow): SdPool | null {

@@ -1,5 +1,10 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
+import { isLocalSdDelivery, type SdOrderRow } from '@/lib/deliveries/sd-status'
+
+interface SdDeliveredCandidateRow extends SdOrderRow {
+  last_tracking_update: string
+}
 
 export async function GET() {
   try {
@@ -28,13 +33,18 @@ export async function GET() {
       { count: criticosActivos },
       { count: entregadosAyer },
       { count: contactadosAyer },
+      { data: sdDeliveredRows },
     ] = await Promise.all([
 
-      // Entregados hoy: status_since registra cuándo EFI confirmó entrega real
+      // Entregados hoy (Gintracom/EFI): status_since registra cuándo EFI confirmó
+      // entrega real. tracking_number IS NOT NULL excluye explícitamente las
+      // entregas locales SD, que se cuentan aparte (ver entregadosSdHoy/Ayer más
+      // abajo) — antes ambos canales se mezclaban en este mismo número.
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('normalized_status', 'delivered')
+        .not('tracking_number', 'is', null)
         .not('status_since', 'is', null)
         .gte('status_since', todayIso),
 
@@ -76,11 +86,12 @@ export async function GET() {
         .not('raw_status', 'ilike', '%cancelad%')
         .lt('status_since', cutoff48h),
 
-      // Entregados ayer: status_since registra cuándo EFI confirmó entrega real
+      // Entregados ayer (Gintracom/EFI): mismo criterio que entregadosHoy.
       supabase
         .from('orders')
         .select('*', { count: 'exact', head: true })
         .eq('normalized_status', 'delivered')
+        .not('tracking_number', 'is', null)
         .not('status_since', 'is', null)
         .gte('status_since', yesterdayIso)
         .lt('status_since', todayIso),
@@ -93,16 +104,42 @@ export async function GET() {
         .eq('action_type', 'contacted')
         .gte('created_at', yesterdayIso)
         .lt('created_at', todayIso),
+
+      // Candidatos a entrega local SD (hoy + ayer en una sola query): sin guía
+      // (tracking_number IS NULL), acotado por last_tracking_update — fecha real
+      // de entrega local, escrita por markSdOrderDelivered() en el momento exacto
+      // de la acción (validado contra agent_actions: coincide en el 100% del
+      // histórico auditado, no requiere fallback). La clasificación de zona SD
+      // (isLocalSdDelivery) no es evaluable en SQL — se filtra en memoria sobre
+      // este conjunto ya acotado por fecha (volumen bajo).
+      supabase
+        .from('orders')
+        .select('id, city, province, customer_address, tracking_number, normalized_status, confirmation_status, assigned_to, last_tracking_update')
+        .eq('normalized_status', 'delivered')
+        .is('tracking_number', null)
+        .gte('last_tracking_update', yesterdayIso),
     ])
 
+    const todayMs     = new Date(todayIso).getTime()
+    const yesterdayMs = new Date(yesterdayIso).getTime()
+
+    const sdDelivered = ((sdDeliveredRows ?? []) as SdDeliveredCandidateRow[]).filter(isLocalSdDelivery)
+    const entregadosSdHoy  = sdDelivered.filter(o => new Date(o.last_tracking_update).getTime() >= todayMs).length
+    const entregadosSdAyer = sdDelivered.filter(o => {
+      const ms = new Date(o.last_tracking_update).getTime()
+      return ms >= yesterdayMs && ms < todayMs
+    }).length
+
     return NextResponse.json({
-      entregadosHoy:   entregadosHoy   ?? 0,
-      contactadosHoy:  contactadosHoy  ?? 0,
-      incidenciasHoy:  incidenciasHoy  ?? 0,
-      escaladosHoy:    escaladosHoy    ?? 0,
-      criticosActivos: criticosActivos ?? 0,
-      entregadosAyer:  entregadosAyer  ?? 0,
-      contactadosAyer: contactadosAyer ?? 0,
+      entregadosHoy:    entregadosHoy   ?? 0,
+      contactadosHoy:   contactadosHoy  ?? 0,
+      incidenciasHoy:   incidenciasHoy  ?? 0,
+      escaladosHoy:     escaladosHoy    ?? 0,
+      criticosActivos:  criticosActivos ?? 0,
+      entregadosAyer:   entregadosAyer  ?? 0,
+      contactadosAyer:  contactadosAyer ?? 0,
+      entregadosSdHoy,
+      entregadosSdAyer,
     })
   } catch (err) {
     console.error('[GET /api/reparto/performance]', err)

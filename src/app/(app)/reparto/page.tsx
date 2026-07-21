@@ -26,18 +26,23 @@ type Tab = 'all' | 'nuevos' | 'reintentos' | 'entregados'
 type RiskFilter = 'todos' | 'critico' | 'riesgo' | 'normal'
 
 interface RepartoPerfData {
-  entregadosHoy:   number
-  entregadosAyer:  number
-  contactadosHoy:  number
-  incidenciasHoy:  number
-  escaladosHoy:    number
-  criticosActivos: number
+  entregadosHoy:    number
+  entregadosAyer:   number
+  contactadosHoy:   number
+  incidenciasHoy:   number
+  escaladosHoy:     number
+  criticosActivos:  number
+  entregadosSdHoy:  number
+  entregadosSdAyer: number
 }
 
+type DeliveryChannel = 'gintracom' | 'sd_local'
+
 interface DeliveredEntry {
-  order:            Order
-  reported_at:      string
+  order:             Order
+  reported_at:       string
   courier_confirmed: boolean
+  channel:           DeliveryChannel
 }
 
 interface OrdersResponse {
@@ -173,6 +178,7 @@ interface RepartoCardProps {
   busy:             boolean
   isEntregado:      boolean
   courierConfirmed: boolean
+  channel:          DeliveryChannel
   isHighlighted:    boolean
   onContactado:     () => void
   onEntrego:        () => void
@@ -187,6 +193,7 @@ function RepartoCard({
   busy,
   isEntregado,
   courierConfirmed,
+  channel,
   isHighlighted,
   onContactado,
   onEntrego,
@@ -299,7 +306,12 @@ function RepartoCard({
       {/* Estado / Acciones */}
       <div className="mt-3">
         {isEntregado ? (
-          courierConfirmed ? (
+          channel === 'sd_local' ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold
+                             px-3 py-1.5 rounded-full bg-teal-100 text-teal-700">
+              <CheckCircle2 className="w-3.5 h-3.5" />Entregado · Santo Domingo
+            </span>
+          ) : courierConfirmed ? (
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold
                              px-3 py-1.5 rounded-full bg-green-100 text-green-700">
               <CheckCircle2 className="w-3.5 h-3.5" />Confirmado courier
@@ -396,7 +408,7 @@ export default function RepartoPage() {
   const [actionMap, setActionMap]   = useState<Record<string, string>>({})
   const [loadingRow, setLoadingRow] = useState<Record<string, boolean>>({})
   const [deliveredDbOrders, setDeliveredDbOrders] = useState<DeliveredEntry[]>([])
-  const [deliveredMetaMap,  setDeliveredMetaMap]  = useState<Record<string, { reported_at: string; courier_confirmed: boolean }>>({})
+  const [deliveredMetaMap,  setDeliveredMetaMap]  = useState<Record<string, { reported_at: string; courier_confirmed: boolean; channel: DeliveryChannel }>>({})
   const [currentPage, setCurrentPage] = useState(1)
   const [openOrderId, setOpenOrderId] = useState<string | null>(null)
 
@@ -422,8 +434,8 @@ export default function RepartoPage() {
       setPerf(perfRes)
       const dbEntries: DeliveredEntry[] = Array.isArray(entregadosRes) ? entregadosRes : []
       setDeliveredDbOrders(dbEntries)
-      const meta: Record<string, { reported_at: string; courier_confirmed: boolean }> = {}
-      for (const e of dbEntries) meta[e.order.id] = { reported_at: e.reported_at, courier_confirmed: e.courier_confirmed }
+      const meta: Record<string, { reported_at: string; courier_confirmed: boolean; channel: DeliveryChannel }> = {}
+      for (const e of dbEntries) meta[e.order.id] = { reported_at: e.reported_at, courier_confirmed: e.courier_confirmed, channel: e.channel }
       setDeliveredMetaMap(meta)
       setLastRefresh(new Date())
     } catch (err) {
@@ -474,7 +486,9 @@ export default function RepartoPage() {
       const res = await fetch(`/api/reparto/orders/${orderId}/mark-delivered`, { method: 'POST' })
       if (!res.ok) return
       const data: { reported_at: string; courier_confirmed: boolean } = await res.json()
-      setDeliveredMetaMap(prev => ({ ...prev, [orderId]: { reported_at: data.reported_at, courier_confirmed: data.courier_confirmed } }))
+      // Este botón solo existe para el universo Gintracom (activeOrders viene de
+      // requireTracking=true) — el canal siempre es 'gintracom' aquí.
+      setDeliveredMetaMap(prev => ({ ...prev, [orderId]: { reported_at: data.reported_at, courier_confirmed: data.courier_confirmed, channel: 'gintracom' } }))
       setActionMap(prev => ({ ...prev, [orderId]: 'delivered' }))
     } finally {
       setLoadingRow(prev => ({ ...prev, [orderId]: false }))
@@ -497,9 +511,10 @@ export default function RepartoPage() {
     const sessionOnly = allOrders
       .filter(o => actionMap[o.id] === 'delivered' && !deliveredDbIds.has(o.id))
       .map(o => ({
-        order:            o,
-        reported_at:      deliveredMetaMap[o.id]?.reported_at ?? new Date().toISOString(),
+        order:             o,
+        reported_at:       deliveredMetaMap[o.id]?.reported_at ?? new Date().toISOString(),
         courier_confirmed: deliveredMetaMap[o.id]?.courier_confirmed ?? false,
+        channel:           deliveredMetaMap[o.id]?.channel ?? 'gintracom',
       }))
     return [...deliveredDbOrders, ...sessionOnly]
   }, [deliveredDbOrders, allOrders, actionMap, deliveredDbIds, deliveredMetaMap])
@@ -729,12 +744,12 @@ export default function RepartoPage() {
         <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
           {([
             {
-              label: 'Entregados hoy',
+              label: 'Gintracom · Entregados hoy',
               count: perf?.entregadosHoy  ?? '…',
               cls:   'bg-green-50 text-green-700 border-green-100',
             },
             {
-              label: 'Entregados ayer',
+              label: 'Gintracom · Entregados ayer',
               count: perf?.entregadosAyer ?? '…',
               cls:   'bg-green-50/60 text-green-600 border-green-100',
             },
@@ -760,6 +775,29 @@ export default function RepartoPage() {
               <p className="text-[10px] font-medium mt-1 text-center leading-tight opacity-80">{label}</p>
             </div>
           ))}
+        </div>
+
+        {/* Bloque separado: entregas locales SD (mensajero Santo Domingo), nunca
+            mezcladas con el conteo de Gintracom de arriba — ver diagnóstico de
+            métricas de Reparto. */}
+        <div className="flex items-center gap-2 md:gap-3 p-2.5 md:p-3 rounded-lg border border-teal-100 bg-teal-50/60">
+          <span className="text-[10px] font-bold text-teal-500 uppercase tracking-wider shrink-0">
+            🏙️ Santo Domingo
+          </span>
+          <div className="flex items-center gap-3 md:gap-4 flex-1">
+            <div className="flex items-center gap-1.5">
+              <span className="text-base md:text-lg font-black tabular-nums leading-none text-teal-700">
+                {perf?.entregadosSdHoy ?? '…'}
+              </span>
+              <span className="text-[10px] font-medium text-teal-600">Entregadas hoy</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-base md:text-lg font-black tabular-nums leading-none text-teal-600">
+                {perf?.entregadosSdAyer ?? '…'}
+              </span>
+              <span className="text-[10px] font-medium text-teal-600/80">Entregadas ayer</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -880,6 +918,7 @@ export default function RepartoPage() {
                 const isEntregado     = accion === 'delivered' || deliveredDbIds.has(order.id)
                 const deliveredMeta   = deliveredMetaMap[order.id]
                 const courierConfirmed = deliveredMeta?.courier_confirmed ?? false
+                const channel         = deliveredMeta?.channel ?? 'gintracom'
                 const isHighlighted   = !!(trackingParam && order.tracking_number === trackingParam)
                 return (
                   <RepartoCard
@@ -889,6 +928,7 @@ export default function RepartoPage() {
                     busy={busy}
                     isEntregado={isEntregado}
                     courierConfirmed={courierConfirmed}
+                    channel={channel}
                     isHighlighted={isHighlighted}
                     onContactado={() => postAction(order.id, 'contacted', 'contacted')}
                     onEntrego={() => markDelivered(order.id)}
@@ -934,6 +974,7 @@ export default function RepartoPage() {
                   const isEntregado      = accion === 'delivered' || deliveredDbIds.has(order.id)
                   const deliveredMeta    = deliveredMetaMap[order.id]
                   const courierConfirmed = deliveredMeta?.courier_confirmed ?? false
+                  const channel          = deliveredMeta?.channel ?? 'gintracom'
 
                   const rowBase = isEntregado
                     ? 'bg-green-50/30'
@@ -1055,7 +1096,12 @@ export default function RepartoPage() {
                       {/* Acción */}
                       <td className="px-3 py-2.5">
                         {isEntregado ? (
-                          courierConfirmed ? (
+                          channel === 'sd_local' ? (
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold
+                                             px-2.5 py-1 rounded-full bg-teal-100 text-teal-700">
+                              <CheckCircle2 className="w-3 h-3" />Entregado · Santo Domingo
+                            </span>
+                          ) : courierConfirmed ? (
                             <span className="inline-flex items-center gap-1 text-xs font-semibold
                                              px-2.5 py-1 rounded-full bg-green-100 text-green-700">
                               <CheckCircle2 className="w-3 h-3" />Confirmado courier
