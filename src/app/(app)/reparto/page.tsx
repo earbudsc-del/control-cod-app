@@ -425,7 +425,10 @@ export default function RepartoPage() {
           // requireTracking=true → solo universo EFI/Gintracom (con guía); excluye pedidos SD
           // locales (tracking_number IS NULL, flujo propio en /sd-delivery) y anuladas/canceladas
           fetch('/api/orders?status=en_reparto&limit=500&page=1&sortBy=status_since_asc&requireTracking=true').then(r => r.json()),
-          fetch('/api/orders?status=in_transit&limit=200&page=1').then(r => r.json()),
+          // requireTracking=true: protección estructural para "Resumen tránsito" — hoy no
+          // hay pedidos SD en in_transit (auditado), pero no debe depender de que eso se
+          // mantenga por construcción. No afecta a /transito (fetch propio, sin este param).
+          fetch('/api/orders?status=in_transit&limit=200&page=1&requireTracking=true').then(r => r.json()),
           fetch('/api/reparto/performance').then(r => r.json()),
           fetch('/api/reparto/entregados').then(r => r.json()),
         ])

@@ -56,14 +56,22 @@ export async function GET(request: Request) {
         .eq('normalized_status', 'en_reparto')
         .not('raw_status', 'ilike', '%anulad%')
         .not('raw_status', 'ilike', '%cancelad%')
-      // requireTracking=true: restringe al universo EFI/Gintracom (tracking_number asignado),
-      // usado por /reparto para no mezclar pedidos locales SD (tracking_number IS NULL,
-      // que tienen su propio flujo de cierre en /sd-delivery y nunca son tocados por el cron EFI).
-      if (searchParams.get('requireTracking') === 'true') {
-        query = query.not('tracking_number', 'is', null)
-      }
     } else if (status) {
       query = query.eq('normalized_status', status)
+    }
+
+    // requireTracking=true: restringe al universo EFI/Gintracom (tracking_number
+    // asignado). Solo tiene efecto sobre en_reparto/in_transit — usado por /reparto
+    // para no mezclar pedidos locales SD (tracking_number IS NULL, con su propio
+    // flujo de cierre en /sd-delivery y nunca tocados por el cron EFI). Protección
+    // estructural: hoy no hay pedidos SD en in_transit (el cron EFI nunca los toca),
+    // pero el filtro no depende de que eso siga siendo cierto por construcción.
+    // Opt-in explícito — no afecta a otros consumidores de /api/orders que no lo pasen.
+    if (
+      (status === 'en_reparto' || status === 'in_transit')
+      && searchParams.get('requireTracking') === 'true'
+    ) {
+      query = query.not('tracking_number', 'is', null)
     }
     if (cls)      query = query.eq('classification', cls)
     if (assigned) query = query.eq('assigned_to', assigned)

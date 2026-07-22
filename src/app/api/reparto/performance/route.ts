@@ -27,13 +27,11 @@ export async function GET() {
 
     const [
       { count: entregadosHoy },
-      { count: contactadosHoy },
-      { count: incidenciasHoy },
       { count: escaladosHoy },
       { count: criticosActivos },
       { count: entregadosAyer },
-      { count: contactadosAyer },
       { data: sdDeliveredRows },
+      { data: contactedRows },
     ] = await Promise.all([
 
       // Entregados hoy (Gintracom/EFI): status_since registra cuándo EFI confirmó
@@ -48,24 +46,9 @@ export async function GET() {
         .not('status_since', 'is', null)
         .gte('status_since', todayIso),
 
-      // Contactados: cualquier acción de tipo 'contacted' hoy
-      supabase
-        .from('agent_actions')
-        .select('*', { count: 'exact', head: true })
-        .eq('agent_id', agentId)
-        .eq('action_type', 'contacted')
-        .gte('created_at', todayIso),
-
-      // Incidencias: no respondió o número incorrecto hoy
-      supabase
-        .from('agent_actions')
-        .select('*', { count: 'exact', head: true })
-        .eq('agent_id', agentId)
-        .eq('action_type', 'contacted')
-        .in('contact_result', ['no_answer', 'wrong_number'])
-        .gte('created_at', todayIso),
-
-      // Escalados: courier_claim hoy
+      // Escalados: courier_claim hoy. No filtrado por canal — SD Delivery/Ruta COD
+      // no usan este action_type hoy (auditado); si algún día lo usaran, requeriría
+      // el mismo tratamiento que contactadosHoy/incidenciasHoy más abajo.
       supabase
         .from('agent_actions')
         .select('*', { count: 'exact', head: true })
@@ -96,15 +79,6 @@ export async function GET() {
         .gte('status_since', yesterdayIso)
         .lt('status_since', todayIso),
 
-      // Contactados ayer
-      supabase
-        .from('agent_actions')
-        .select('*', { count: 'exact', head: true })
-        .eq('agent_id', agentId)
-        .eq('action_type', 'contacted')
-        .gte('created_at', yesterdayIso)
-        .lt('created_at', todayIso),
-
       // Candidatos a entrega local SD (hoy + ayer en una sola query): sin guía
       // (tracking_number IS NULL), acotado por last_tracking_update — fecha real
       // de entrega local, escrita por markSdOrderDelivered() en el momento exacto
@@ -118,6 +92,17 @@ export async function GET() {
         .eq('normalized_status', 'delivered')
         .is('tracking_number', null)
         .gte('last_tracking_update', yesterdayIso),
+
+      // Contactados/Incidencias (hoy + ayer, una sola query): trae las filas crudas
+      // de agent_actions de este agente en la ventana [ayer, ahora) — la exclusión de
+      // pedidos SD locales se resuelve después con UNA query adicional a orders (por
+      // order_id), nunca una query por acción (sin N+1). Ver resolución más abajo.
+      supabase
+        .from('agent_actions')
+        .select('order_id, created_at, contact_result')
+        .eq('agent_id', agentId)
+        .eq('action_type', 'contacted')
+        .gte('created_at', yesterdayIso),
     ])
 
     const todayMs     = new Date(todayIso).getTime()
@@ -130,14 +115,46 @@ export async function GET() {
       return ms >= yesterdayMs && ms < todayMs
     }).length
 
+    // Resuelve el canal (Gintracom vs SD local) de las acciones 'contacted' con UNA
+    // sola query adicional a orders — order.id → tracking_number. No filtra por
+    // ciudad, payment_status, notas ni rol del agente: el único criterio es
+    // tracking_number IS NOT NULL, igual que el resto del módulo.
+    const contactedOrderIds = [...new Set((contactedRows ?? []).map(r => r.order_id))]
+    let gintracomOrderIds = new Set<string>()
+    if (contactedOrderIds.length) {
+      const { data: ordersForContacted } = await supabase
+        .from('orders')
+        .select('id, tracking_number')
+        .in('id', contactedOrderIds)
+      gintracomOrderIds = new Set(
+        (ordersForContacted ?? []).filter(o => o.tracking_number !== null).map(o => o.id),
+      )
+    }
+
+    const gintracomContacted = (contactedRows ?? []).filter(r => gintracomOrderIds.has(r.order_id))
+
+    const contactadosHoy = gintracomContacted.filter(
+      r => new Date(r.created_at).getTime() >= todayMs,
+    ).length
+
+    const contactadosAyer = gintracomContacted.filter(r => {
+      const ms = new Date(r.created_at).getTime()
+      return ms >= yesterdayMs && ms < todayMs
+    }).length
+
+    const incidenciasHoy = gintracomContacted.filter(r =>
+      new Date(r.created_at).getTime() >= todayMs
+      && (r.contact_result === 'no_answer' || r.contact_result === 'wrong_number'),
+    ).length
+
     return NextResponse.json({
       entregadosHoy:    entregadosHoy   ?? 0,
-      contactadosHoy:   contactadosHoy  ?? 0,
-      incidenciasHoy:   incidenciasHoy  ?? 0,
+      contactadosHoy,
+      incidenciasHoy,
       escaladosHoy:     escaladosHoy    ?? 0,
       criticosActivos:  criticosActivos ?? 0,
       entregadosAyer:   entregadosAyer  ?? 0,
-      contactadosAyer:  contactadosAyer ?? 0,
+      contactadosAyer,
       entregadosSdHoy,
       entregadosSdAyer,
     })
