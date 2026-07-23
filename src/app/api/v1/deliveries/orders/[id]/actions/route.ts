@@ -5,8 +5,9 @@ import { detectSdZone } from '@/lib/sd-zones'
 import { corsHeaders } from '@/lib/cors'
 import { createLocalFulfillment } from '@/lib/shopify/fulfillments'
 import { applyConfirmationAction } from '@/lib/orders/confirmation'
-import { markSdOrderDelivered, recordMarkPaidSideEffect } from '@/lib/deliveries/mark-delivered'
-import { fetchPaidOrderIds, withoutPaidAction } from '@/lib/deliveries/payment-status'
+import { markSdOrderDelivered } from '@/lib/deliveries/mark-delivered'
+import { markOrderPaid } from '@/lib/orders/mark-paid'
+import { withoutPaidAction } from '@/lib/deliveries/payment-status'
 import {
   isSdEligible,
   computePool,
@@ -27,11 +28,11 @@ import {
 // para la máquina de estados y las transiciones permitidas por estado.
 //
 // REGLA APROBADA — entregado ≠ pagado: 'delivered' nunca llama a
-// markOrderAsPaid ni acepta monto cobrado. El cobro se registra únicamente
-// vía la acción 'paid' (requiere status='entregado'), de forma explícita e
-// idempotente. No existe una columna local de "pagado"/monto cobrado
-// separada del financial_status de Shopify — ver el case 'paid' para el
-// detalle de esa limitación y por qué no duplica el cobro.
+// markOrderPaid ni acepta monto cobrado. El cobro se registra únicamente vía
+// la acción 'paid' (requiere status='entregado'), de forma explícita e
+// idempotente, delegando en markOrderPaid() (src/lib/orders/mark-paid.ts) —
+// el mismo motor único que usa POST /api/orders/[id]/mark-paid. Fuente de
+// verdad: orders.payment_status (migración 046_orders_payment_status.sql).
 
 const ALLOWED_ROLES = ['admin', 'santo_domingo_delivery_agent']
 
@@ -51,7 +52,7 @@ const ORDER_FIELDS =
   'id, order_number, customer_name, customer_phone, customer_address, city, province, ' +
   'cod_amount, normalized_status, confirmation_status, tracking_number, assigned_to, ' +
   'store_id, shopify_order_id, source, product_summary, delivery_attempts, created_at, ' +
-  'status_since, last_tracking_update, updated_at, rescheduled_date, rescheduled_note'
+  'status_since, last_tracking_update, updated_at, rescheduled_date, rescheduled_note, payment_status'
 
 interface OrderRow extends SdOrderRow {
   order_number: string | null
@@ -69,6 +70,7 @@ interface OrderRow extends SdOrderRow {
   updated_at: string
   rescheduled_date: string | null
   rescheduled_note: string | null
+  payment_status: 'pending' | 'paid'
 }
 
 function getBearerToken(request: Request): string | null {
@@ -183,21 +185,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     // --- paid: idempotencia operativa. Un segundo intento de pago (doble
     // tap, refresh que reenvía, etc.) no debe crear otra fila en
     // agent_actions ni volver a invocar el side-effect de Shopify — responde
-    // 200 con el estado ya pagado y allowedActions sin 'paid'. ---
-    if (body.action === 'paid' && ownership !== 'other') {
-      const paidIds = await fetchPaidOrderIds(supabase, [orderId])
-      if (paidIds.has(orderId)) {
-        return NextResponse.json({
-          action: 'paid',
-          orderId,
-          status,
-          allowedActions: withoutPaidAction(allowedActions, true),
-          assignedTo: order.assigned_to,
-          paymentStatus: 'paid' as const,
-          alreadyPaid: true,
-          at: new Date().toISOString(),
-        }, { status: 200, headers })
-      }
+    // 200 con el estado ya pagado y allowedActions sin 'paid'. Se lee
+    // order.payment_status directamente (ya viene en ORDER_FIELDS) — sin
+    // heurísticas ni consulta adicional; markOrderPaid() más abajo tiene
+    // además su propio guard atómico para el caso de carrera. ---
+    if (body.action === 'paid' && ownership !== 'other' && order.payment_status === 'paid') {
+      return NextResponse.json({
+        action: 'paid',
+        orderId,
+        status,
+        allowedActions: withoutPaidAction(allowedActions, true),
+        assignedTo: order.assigned_to,
+        paymentStatus: 'paid' as const,
+        alreadyPaid: true,
+        at: new Date().toISOString(),
+      }, { status: 200, headers })
     }
 
     // --- accept: caso especial de concurrencia (409), no encaja en el flujo genérico ---
@@ -326,29 +328,34 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       }
 
       case 'paid': {
-        // Único punto de escritura para "cobrado". Solo alcanzable cuando
-        // status='entregado' (ver computeAllowedActions) y solo si aún no
-        // hay un pago registrado (ver el guard de idempotencia arriba, antes
-        // del switch) — nunca se infiere del delivered. No existe una
-        // columna local de "pagado"/monto cobrado separada de Shopify (ver
-        // src/lib/deliveries/payment-status.ts para el detalle de esa
-        // limitación); recordMarkPaidSideEffect ya es idempotente a nivel
-        // Shopify, y el guard de arriba evita además que este case se
-        // ejecute dos veces — un segundo intento nunca llega aquí.
-        actionType = 'status_updated'
+        // Único punto de escritura para "cobrado": delega en markOrderPaid()
+        // (src/lib/orders/mark-paid.ts) — el mismo motor que ya usa
+        // POST /api/orders/[id]/mark-paid (Confirmación/Confirmados). Un solo
+        // helper actualiza orders.payment_status/paid_at/paid_by, inserta una
+        // única fila en agent_actions (action_type='paid') y sincroniza
+        // Shopify una sola vez — nunca se reimplementa ese UPDATE aquí. Solo
+        // alcanzable cuando status='entregado' (ver computeAllowedActions) y
+        // el guard de arriba (antes del switch) ya filtra el caso "ya
+        // pagado" — markOrderPaid es además idempotente por su cuenta
+        // (columna payment_status + guard atómico), así que un segundo
+        // intento que sí llegue hasta aquí (carrera) tampoco duplica nada.
+        actionType = 'paid'
         notes = `COD cobrado — RD$${body.amountCollected ?? order.cod_amount ?? 0} (Ruta COD)`
-        const { error: insertError } = await supabase
-          .from('agent_actions')
-          .insert({ order_id: orderId, agent_id: profile.id, action_type: actionType, notes })
-          .select('id, created_at').single()
-        if (insertError) throw insertError
-
-        if (order.shopify_order_id && order.source === 'shopify_webhook') {
-          await recordMarkPaidSideEffect(supabase, {
-            orderId, shopifyOrderId: order.shopify_order_id,
-            triggeredBy: profile.id, triggeredAction: 'paid',
-          })
-        }
+        await markOrderPaid(
+          supabase,
+          {
+            id: order.id,
+            payment_status: order.payment_status,
+            shopify_order_id: order.shopify_order_id,
+            source: order.source,
+          },
+          profile.id,
+          {
+            triggeredBy: profile.id,
+            triggeredAction: 'paid',
+            notes,
+          },
+        )
         break
       }
 
@@ -440,13 +447,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     let freshAllowed = computeAllowedActions(freshStatus, freshPool, freshOwnership)
 
     // paymentStatus solo aplica a pedidos entregados — para el resto queda
-    // undefined (no hay nada que reportar). Recién ejecutado 'paid' arriba
-    // ya debe reflejarse aquí (la fila en shopify_sync_log se insertó de
-    // forma síncrona dentro de recordMarkPaidSideEffect).
+    // undefined (no hay nada que reportar). Recién ejecutado 'paid' arriba,
+    // freshOrder ya refleja el UPDATE síncrono que hizo markOrderPaid().
     let paymentStatus: 'pending' | 'paid' | undefined
     if (freshStatus === 'entregado') {
-      const paidIds = await fetchPaidOrderIds(supabase, [orderId])
-      paymentStatus = paidIds.has(orderId) ? 'paid' : 'pending'
+      paymentStatus = freshOrder.payment_status
       freshAllowed = withoutPaidAction(freshAllowed, paymentStatus === 'paid')
     }
 
