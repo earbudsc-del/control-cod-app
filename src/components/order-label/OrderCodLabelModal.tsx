@@ -6,6 +6,7 @@ import { X, Printer, Download } from 'lucide-react'
 import type { OrderCodLabelModel } from '@/lib/order-label/types'
 import { sanitizeFileName } from '@/lib/order-label/format-order-label'
 import { exportOrderCodLabelPng, LabelExportDimensionError } from '@/lib/order-label/export-png'
+import { useFittedLabelTier } from '@/lib/order-label/use-fitted-label-tier'
 import { OrderCodLabel } from './OrderCodLabel'
 import './print-isolation.css'
 
@@ -23,6 +24,7 @@ export function OrderCodLabelModal({ model, onClose }: OrderCodLabelModalProps) 
   const labelRef = useRef<HTMLDivElement>(null)
   const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { tier, probeRef, probeTier } = useFittedLabelTier(model)
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -91,9 +93,16 @@ export function OrderCodLabelModal({ model, onClose }: OrderCodLabelModalProps) 
             }}
           >
             <div style={{ transform: `scale(${PREVIEW_SCALE})`, transformOrigin: 'top left' }}>
-              <OrderCodLabel ref={labelRef} model={model} />
+              <OrderCodLabel ref={labelRef} model={model} tier={tier} />
             </div>
           </div>
+        </div>
+
+        {/* Sonda oculta fuera de pantalla — mide el tier de compactación más
+            espacioso que cabe para ESTE pedido concreto (ver
+            useFittedLabelTier). Nunca se pinta al usuario. */}
+        <div style={{ position: 'fixed', top: 0, left: -9999, visibility: 'hidden' }} aria-hidden="true">
+          <OrderCodLabel ref={probeRef} model={model} tier={probeTier} />
         </div>
 
         {error && <p className="px-4 pt-2 text-sm text-red-600">{error}</p>}
@@ -104,7 +113,7 @@ export function OrderCodLabelModal({ model, onClose }: OrderCodLabelModalProps) 
         {typeof document !== 'undefined' &&
           createPortal(
             <div className="cod-label-print-portal">
-              <OrderCodLabel model={model} />
+              <OrderCodLabel model={model} tier={tier} />
             </div>,
             document.body,
           )}

@@ -24,7 +24,13 @@ export const COD_LABEL_LOGO_PATH = '/brand/luma-teeth-logo.png'
 // v2 (2026-07-25): compactación para volver a 4x6in EXACTAS (altura fija, no
 // min-height) tras detectar que el contenido real puede desbordar — ver
 // reporte de corrección de la Fase 17.
-export const COD_LABEL_TEMPLATE_VERSION = 2
+// v3 (2026-07-25): layout adaptativo por tiers (label-tiers.ts +
+// useFittedLabelTier) — tier 0 (espacioso, casi el diseño original) es el
+// caso normal; solo compacta progresivamente cuando el contenido real de un
+// pedido concreto no cabe, medido en el navegador. v2 comprimía TODO
+// permanentemente, dejando ~55-60% de la etiqueta ocupada incluso en
+// pedidos normales.
+export const COD_LABEL_TEMPLATE_VERSION = 3
 
 export const DELIVERY_LABEL_SD = 'Santo Domingo · Transporte local'
 export const DELIVERY_LABEL_COURIER = 'Gintracom · Servicio de mensajería'
