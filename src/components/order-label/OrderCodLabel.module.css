@@ -1,0 +1,125 @@
+/*
+  Template visual del Sticker COD — v2 (2026-07-25).
+  Debe medir EXACTAMENTE 4in x 6in (altura fija, no min-height) para producir
+  un PNG de 1200x1800px reales y una sola página de impresión física.
+
+  v1 usaba height:6in fijo y el contenido real (footer + advertencia) se
+  recortaba en TODOS los pedidos, no solo los de dirección larga (bug
+  confirmado con capturas reales). v2 corrige esto compactando paddings,
+  tipografía secundaria, interlineado y logo, y acotando de forma EXPLÍCITA
+  (nunca silenciosa) los dos únicos bloques de longitud variable:
+    - dirección del destinatario → truncateAddress() en format-order-label.ts
+      recorta el STRING (no CSS) a ~130 caracteres + "…" literal. Se probó
+      primero con -webkit-line-clamp, pero html-to-image no lo reproduce al
+      exportar PNG (deja hueco en blanco sin dibujar el "…" — confirmado con
+      el pedido real #8751, dirección de 210 caracteres). Truncar el string
+      es consistente en DOM vivo, impresión y PNG.
+    - lista de productos → máximo 3 líneas, resto resumido como
+      "+N producto(s) adicional(es) · M uds." (ver buildDisplayItems en
+      format-order-label.ts; bug real observado: pedido #9999 con 5 items)
+  Overflow:hidden en .label es un ÚLTIMO recurso de seguridad — no debería
+  activarse nunca dado que los dos bloques variables ya están acotados.
+*/
+
+.label {
+  width: 4in;
+  height: 6in;
+  overflow: hidden;
+  padding: 8px;
+  box-sizing: border-box;
+  border: 2px solid #000;
+  font-size: 11px;
+  line-height: 1.15;
+  font-family: Arial, Helvetica, sans-serif;
+  color: #000;
+  background: #fff;
+}
+
+.top {
+  display: grid;
+  grid-template-columns: 1fr 95px;
+  gap: 6px;
+  border-bottom: 1.5px solid #000;
+  padding-bottom: 6px;
+}
+
+.brandLogo {
+  text-align: right;
+}
+
+.brandLogo img {
+  max-width: 85px;
+  height: auto;
+  display: block;
+  margin-left: auto;
+  margin-bottom: 2px;
+}
+
+.brandLogo small {
+  display: block;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.section {
+  border-bottom: 1.5px solid #000;
+  padding: 6px 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 85px 1fr;
+  gap: 5px;
+  margin-bottom: 2px;
+}
+
+.title {
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.center {
+  text-align: center;
+}
+
+.orderNumber {
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+
+.codAmount {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.items {
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.itemsMore {
+  font-style: italic;
+}
+
+.barcode {
+  margin-top: 3px;
+  text-align: center;
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  letter-spacing: 2px;
+}
+
+.footer {
+  font-size: 9px;
+  line-height: 1.3;
+  padding-top: 5px;
+}
+
+.warning {
+  margin-top: 5px;
+  text-align: center;
+  font-weight: 900;
+  letter-spacing: 1px;
+}

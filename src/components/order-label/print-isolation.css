@@ -1,0 +1,39 @@
+/*
+  Aísla la impresión al Sticker COD reutilizando el mismo componente
+  <OrderCodLabel> en un portal montado como hijo directo de <body> (ver
+  createPortal en OrderCodLabelModal.tsx) — no se duplica el template, se
+  reutiliza la misma definición de componente en una segunda instancia.
+
+  v2: la técnica anterior (visibility:hidden sobre `body *`) NO elimina el
+  layout — los elementos invisibles siguen ocupando espacio en el documento,
+  así que el motor de paginación de impresión seguía viendo la altura
+  completa de la SPA (mucho mayor a 6in) y generaba una 2da página en blanco
+  (confirmado con page.pdf(): 2 páginas reales pese a que el contenido cabía
+  en la primera). Fix: ocultar con display:none (saca del flujo) a todos los
+  hermanos directos de <body> excepto el portal — así el documento impreso
+  mide exactamente lo que mide el portal (4x6in), una sola página.
+*/
+
+.cod-label-print-portal {
+  display: none;
+}
+
+@media print {
+  body {
+    margin: 0 !important;
+  }
+
+  body > *:not(.cod-label-print-portal) {
+    display: none !important;
+  }
+
+  .cod-label-print-portal {
+    display: block !important;
+    margin: 0 !important;
+  }
+}
+
+@page {
+  size: 4in 6in;
+  margin: 0;
+}

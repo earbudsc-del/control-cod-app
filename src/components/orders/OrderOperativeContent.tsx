@@ -23,6 +23,7 @@ import {
   MapPinOff, Navigation, HelpCircle, AlertCircle, CreditCard, ArrowUpCircle,
 } from 'lucide-react'
 import { checkCoverage, isTransferOrder } from '@/lib/alert-helpers'
+import { OrderCodLabelActions } from '@/components/order-label/OrderCodLabelActions'
 
 interface OrderDetail {
   order:       Order
@@ -396,6 +397,7 @@ export function OrderOperativeContent({ orderId, onBack, onMutated }: OrderOpera
           {escalating ? <Spinner className="w-4 h-4" /> : <ArrowUpCircle className="w-4 h-4" />}
           Escalar / Incidencia
         </button>
+        <OrderCodLabelActions order={order} />
         {escalateFeedback && (
           <span className={`text-sm font-medium
             ${escalateFeedback === 'success' ? 'text-green-600' : 'text-red-600'}`}>
