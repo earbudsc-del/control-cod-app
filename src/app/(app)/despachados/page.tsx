@@ -10,6 +10,11 @@ import {
   MapPin, ExternalLink, Search, ChevronLeft, ChevronRight,
   Package, ClipboardList, CheckCircle2, ListFilter, PackageCheck,
 } from 'lucide-react'
+import { SelectionProvider, SelectionSync } from '@/components/selection/SelectionProvider'
+import { SelectionCheckbox } from '@/components/selection/SelectionCheckbox'
+import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderCheckbox'
+import { SelectionBulkActionBar } from '@/components/selection/BulkActionBar'
+import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabelsBatchButton'
 
 const PAGE_SIZE = 50
 
@@ -138,6 +143,8 @@ export default function DespachadosPage() {
 
   return (
     <div className="space-y-5">
+      <SelectionProvider>
+      <SelectionSync knownIds={filteredOrders.map(o => o.id)} />
 
       {/* ── Banner ── */}
       <div className="relative overflow-hidden rounded-2xl
@@ -350,6 +357,9 @@ export default function DespachadosPage() {
               <table className="w-full text-sm">
                 <thead className="bg-blue-50/60 border-b border-blue-100">
                   <tr>
+                    <th className="px-4 py-3 w-8">
+                      <SelectionHeaderCheckbox visibleIds={pagedOrders.map(o => o.id)} />
+                    </th>
                     {['Cliente', 'Guía', 'Ciudad / Producto', 'Monto', 'Estado logístico', 'Último mvto.', 'Contactar', ''].map(h => (
                       <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-blue-800 whitespace-nowrap">{h}</th>
                     ))}
@@ -365,6 +375,9 @@ export default function DespachadosPage() {
 
                     return (
                       <tr key={order.id} className="hover:bg-blue-50/30 transition-colors">
+                        <td className="px-3 py-2.5">
+                          <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+                        </td>
 
                         {/* Cliente */}
                         <td className="px-3 py-2.5">
@@ -520,6 +533,11 @@ export default function DespachadosPage() {
           Los pedidos entregados pasan a <strong>En Reparto</strong> o <strong>Novedades</strong> según el resultado del courier.
         </p>
       </div>
+
+      <SelectionBulkActionBar>
+        <PrintCodLabelsBatchButton />
+      </SelectionBulkActionBar>
+      </SelectionProvider>
     </div>
   )
 }

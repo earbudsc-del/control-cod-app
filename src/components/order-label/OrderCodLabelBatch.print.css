@@ -1,0 +1,46 @@
+/*
+  Mismo mecanismo que print-isolation.css (impresión individual): ocultar todos
+  los hermanos directos de <body> excepto el portal batch, para que el motor de
+  paginación de impresión solo vea el contenido real de las etiquetas (nunca la
+  altura completa de la SPA). Ver print-isolation.css para el detalle de por qué
+  visibility:hidden no sirve (no saca el layout del flujo).
+
+  Diferencia con el portal individual: aquí el portal contiene N etiquetas
+  seguidas, cada una en un wrapper .cod-label-batch-item con
+  page-break-after:always — así cada Sticker COD queda en su propia página de
+  4x6in, en el mismo orden en que el agente las seleccionó.
+*/
+
+.cod-label-batch-print-portal {
+  display: none;
+}
+
+@media print {
+  body {
+    margin: 0 !important;
+  }
+
+  body > *:not(.cod-label-batch-print-portal) {
+    display: none !important;
+  }
+
+  .cod-label-batch-print-portal {
+    display: block !important;
+    margin: 0 !important;
+  }
+
+  .cod-label-batch-item {
+    page-break-after: always;
+    break-after: page;
+  }
+
+  .cod-label-batch-item:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+}
+
+@page {
+  size: 4in 6in;
+  margin: 0;
+}

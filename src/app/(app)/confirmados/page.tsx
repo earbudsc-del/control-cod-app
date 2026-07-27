@@ -14,6 +14,11 @@ import {
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 import { MarkPaidButton } from '@/components/orders/mark-paid-button'
+import { SelectionProvider, SelectionSync } from '@/components/selection/SelectionProvider'
+import { SelectionCheckbox } from '@/components/selection/SelectionCheckbox'
+import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderCheckbox'
+import { SelectionBulkActionBar } from '@/components/selection/BulkActionBar'
+import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabelsBatchButton'
 
 type FilterType  = 'todos' | 'hoy' | 'ayer' | 'rango' | 'recuperados'
 type AlertFilter = 'todos' | 'duplicados' | 'cobertura' | 'zona_desconocida' | 'santo_domingo'
@@ -519,7 +524,8 @@ export default function ConfirmadosPage() {
       )}
 
       {mainTab === 'confirmados' && (
-      <>
+      <SelectionProvider>
+      <SelectionSync knownIds={displayed.map(o => o.id)} />
       {/* ── Tarjetas de resumen ── */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <button
@@ -800,6 +806,9 @@ export default function ConfirmadosPage() {
             <table className="w-full text-sm">
               <thead className="bg-green-50/60 border-b border-green-100">
                 <tr>
+                  <th className="px-3 py-3 w-8">
+                    <SelectionHeaderCheckbox visibleIds={pagedDisplayed.map(o => o.id)} />
+                  </th>
                   {['# Pedido', 'Cliente', 'Ciudad', 'Producto', 'COD', 'Confirmado', 'Método', 'Acción'].map(h => (
                     <th key={h}
                         className="px-3 py-3 text-left text-xs font-semibold text-green-800 whitespace-nowrap">
@@ -832,6 +841,9 @@ export default function ConfirmadosPage() {
                               : 'hover:bg-green-50/40'
                         }`}
                     >
+                      <td className="px-3 py-2.5">
+                        <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+                      </td>
 
                       {/* # Pedido */}
                       <td className="px-3 py-2.5">
@@ -1015,7 +1027,11 @@ export default function ConfirmadosPage() {
           </div>
         )}
       </div>
-      </>
+
+      <SelectionBulkActionBar>
+        <PrintCodLabelsBatchButton />
+      </SelectionBulkActionBar>
+      </SelectionProvider>
       )}
 
     </div>

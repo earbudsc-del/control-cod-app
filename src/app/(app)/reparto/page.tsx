@@ -16,6 +16,11 @@ import {
 import { horasEnTransito } from '@/lib/transit-helpers'
 import { FlujoKpis } from '@/components/shared/flujo-kpis'
 import { OrderOperativeDrawer } from '@/components/orders/OrderOperativeDrawer'
+import { SelectionProvider, SelectionSync } from '@/components/selection/SelectionProvider'
+import { SelectionCheckbox } from '@/components/selection/SelectionCheckbox'
+import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderCheckbox'
+import { SelectionBulkActionBar } from '@/components/selection/BulkActionBar'
+import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabelsBatchButton'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
@@ -227,16 +232,21 @@ function RepartoCard({
     >
       {/* Tracking + criticidad */}
       <div className="flex items-start justify-between gap-2 mb-2">
-        <div className="min-w-0">
-          <p className="font-mono text-sm font-bold text-gray-900 truncate">
-            {order.tracking_number ?? '—'}
-          </p>
-          {order.order_number && (
-            <p className="font-mono text-[11px] text-gray-400 mt-0.5">{order.order_number}</p>
-          )}
-          {order.carrier && (
-            <p className="text-[11px] text-gray-400">{order.carrier}</p>
-          )}
+        <div className="flex items-start gap-2 min-w-0">
+          <div className="pt-0.5">
+            <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+          </div>
+          <div className="min-w-0">
+            <p className="font-mono text-sm font-bold text-gray-900 truncate">
+              {order.tracking_number ?? '—'}
+            </p>
+            {order.order_number && (
+              <p className="font-mono text-[11px] text-gray-400 mt-0.5">{order.order_number}</p>
+            )}
+            {order.carrier && (
+              <p className="text-[11px] text-gray-400">{order.carrier}</p>
+            )}
+          </div>
         </div>
         <span className={`inline-flex items-center gap-1 text-[10px] font-semibold
                           px-2 py-0.5 rounded-full border shrink-0 ${critStyle.badge}`}>
@@ -591,6 +601,8 @@ export default function RepartoPage() {
 
   return (
     <div className="space-y-4">
+      <SelectionProvider>
+      <SelectionSync knownIds={displayedOrders.map(o => o.id)} />
 
       {/* ── Banner ── */}
       <div className="relative overflow-hidden rounded-2xl
@@ -915,6 +927,10 @@ export default function RepartoPage() {
           {/* ── Cards móvil ── */}
           {!loading && displayedOrders.length > 0 && (
             <div className="md:hidden divide-y divide-amber-50">
+              <div className="flex items-center gap-2 px-4 py-2 bg-amber-50/40">
+                <SelectionHeaderCheckbox visibleIds={pagedOrders.map(o => o.id)} />
+                <span className="text-xs text-gray-500">Seleccionar todos los visibles</span>
+              </div>
               {pagedOrders.map(order => {
                 const accion          = actionMap[order.id]
                 const busy            = !!loadingRow[order.id]
@@ -949,6 +965,9 @@ export default function RepartoPage() {
             <table className="hidden md:table w-full text-sm">
               <thead className="bg-amber-50/60 border-b border-amber-100">
                 <tr>
+                  <th className="px-3 py-3 w-8">
+                    <SelectionHeaderCheckbox visibleIds={pagedOrders.map(o => o.id)} />
+                  </th>
                   {['Guía', 'Cliente', 'Ubicación', 'En reparto desde', 'Estado', 'Contactar', 'Acción', ''].map(h => (
                     <th key={h}
                         className="px-3 py-3 text-left text-xs font-semibold text-amber-800 whitespace-nowrap">
@@ -992,6 +1011,9 @@ export default function RepartoPage() {
                         ${isHighlighted ? 'ring-2 ring-inset ring-blue-500 bg-blue-50/60' : ''}
                         ${accion === 'escalado' ? 'ring-1 ring-inset ring-orange-300' : ''}`}
                     >
+                      <td className="px-3 py-2.5">
+                        <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+                      </td>
 
                       {/* Guía */}
                       <td className="px-3 py-2.5">
@@ -1263,11 +1285,16 @@ export default function RepartoPage() {
         </p>
       </div>
 
+      <SelectionBulkActionBar>
+        <PrintCodLabelsBatchButton />
+      </SelectionBulkActionBar>
+
       <OrderOperativeDrawer
         orderId={openOrderId}
         onClose={() => setOpenOrderId(null)}
         onMutated={fetchData}
       />
+      </SelectionProvider>
     </div>
   )
 }

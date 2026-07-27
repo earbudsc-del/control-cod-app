@@ -16,6 +16,11 @@ import {
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 import { MarkPaidButton } from '@/components/orders/mark-paid-button'
+import { SelectionProvider, SelectionSync } from '@/components/selection/SelectionProvider'
+import { SelectionCheckbox } from '@/components/selection/SelectionCheckbox'
+import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderCheckbox'
+import { SelectionBulkActionBar } from '@/components/selection/BulkActionBar'
+import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabelsBatchButton'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -255,19 +260,24 @@ function ConfirmacionCard({
         ? 'bg-blue-50/80 ring-2 ring-inset ring-blue-400'
         : hasAlert ? 'bg-amber-50/50' : 'bg-white'}`}>
 
-      {/* Fila 1: orden# + hora + delay badge + alertas */}
+      {/* Fila 1: selección + orden# + hora + delay badge + alertas */}
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="font-mono text-xs text-gray-400">
-            {order.order_number ?? '—'}
-            <span className="mx-1 text-gray-300">·</span>
-            {formatOrderTime(order.shopify_created_at ?? order.created_at)}
-          </p>
-          {delay && (
-            <span className={`inline-flex text-[10px] px-1.5 py-0.5 rounded-full mt-0.5 ${delay.cls}`}>
-              {delay.label}
-            </span>
-          )}
+        <div className="flex items-start gap-2 min-w-0">
+          <div className="pt-0.5">
+            <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+          </div>
+          <div className="min-w-0">
+            <p className="font-mono text-xs text-gray-400">
+              {order.order_number ?? '—'}
+              <span className="mx-1 text-gray-300">·</span>
+              {formatOrderTime(order.shopify_created_at ?? order.created_at)}
+            </p>
+            {delay && (
+              <span className={`inline-flex text-[10px] px-1.5 py-0.5 rounded-full mt-0.5 ${delay.cls}`}>
+                {delay.label}
+              </span>
+            )}
+          </div>
         </div>
         <AlertBadges duplicateAlert={order.duplicate_alert}
           customerAddress={order.customer_address} city={order.city} province={order.province}
@@ -401,19 +411,24 @@ function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCovera
 
   return (
     <div className="p-4 space-y-2.5 bg-white">
-      {/* Fecha + orden# */}
+      {/* Selección + Fecha + orden# */}
       <div className="flex items-start justify-between gap-2">
-        <div>
-          <p className="text-xs text-gray-500 font-mono">
-            {order.order_number ?? '—'}
-            <span className="mx-1 text-gray-300">·</span>
-            {formatOrderTime(order.shopify_created_at ?? order.created_at)}
-          </p>
-          {delay && (
-            <span className={`inline-flex text-[10px] px-1.5 py-0.5 rounded-full mt-0.5 ${delay.cls}`}>
-              {delay.label}
-            </span>
-          )}
+        <div className="flex items-start gap-2">
+          <div className="pt-0.5">
+            <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+          </div>
+          <div>
+            <p className="text-xs text-gray-500 font-mono">
+              {order.order_number ?? '—'}
+              <span className="mx-1 text-gray-300">·</span>
+              {formatOrderTime(order.shopify_created_at ?? order.created_at)}
+            </p>
+            {delay && (
+              <span className={`inline-flex text-[10px] px-1.5 py-0.5 rounded-full mt-0.5 ${delay.cls}`}>
+                {delay.label}
+              </span>
+            )}
+          </div>
         </div>
         <AlertBadges duplicateAlert={order.duplicate_alert}
           customerAddress={order.customer_address} city={order.city} province={order.province}
@@ -518,11 +533,16 @@ function ReadOnlyCard({ order }: { order: Order }) {
   return (
     <div className="p-4 space-y-2 bg-white">
       <div className="flex items-start justify-between gap-2">
-        <p className="text-xs font-mono text-gray-400">
-          {order.order_number ?? '—'}
-          <span className="mx-1 text-gray-300">·</span>
-          {formatOrderTime(order.shopify_created_at ?? order.created_at)}
-        </p>
+        <div className="flex items-start gap-2">
+          <div className="pt-0.5">
+            <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+          </div>
+          <p className="text-xs font-mono text-gray-400">
+            {order.order_number ?? '—'}
+            <span className="mx-1 text-gray-300">·</span>
+            {formatOrderTime(order.shopify_created_at ?? order.created_at)}
+          </p>
+        </div>
         <AlertBadges duplicateAlert={order.duplicate_alert}
           customerAddress={order.customer_address} city={order.city} province={order.province}
           productSummary={order.product_summary} />
@@ -1078,6 +1098,14 @@ export default function ConfirmacionPage() {
 
   return (
     <div className="space-y-5">
+      <SelectionProvider>
+      {/* Vistas server-paginadas (pedidos/santo_domingo/fuera_de_cobertura) solo
+          conocen la página actual — la selección en esas vistas se acota a la
+          página visible. Reintentar/Confirmados/Despachados cargan el listado
+          completo client-side, así que la selección persiste entre páginas. */}
+      <SelectionSync
+        knownIds={viewMode === 'reintentar' ? filteredOrders.map(o => o.id) : clientFilteredData.map(o => o.id)}
+      />
 
       {/* ── Toast ── */}
       {toast && (
@@ -1533,6 +1561,9 @@ export default function ConfirmacionPage() {
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 border-b border-gray-200">
                       <tr>
+                        <th className="px-3 py-3 w-8">
+                          <SelectionHeaderCheckbox visibleIds={displayData.map(o => o.id)} />
+                        </th>
                         {['Fecha / Orden', 'Cliente', 'Ciudad / Producto', 'Monto',
                           'Estado confirm.', 'Estado logística', 'Acción', ''].map(h => (
                           <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">
@@ -1560,6 +1591,9 @@ export default function ConfirmacionPage() {
                             ref={el => { if (el) rowRefs.current.set(order.id, el) }}
                             className={`transition-colors group
                               ${hasAlert ? 'bg-amber-50/30 hover:bg-amber-50/60' : 'hover:bg-gray-50/60'}`}>
+                            <td className="px-3 py-2.5">
+                              <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+                            </td>
 
                             {/* Fecha / Orden */}
                             <td className="px-3 py-2.5 whitespace-nowrap">
@@ -1720,6 +1754,9 @@ export default function ConfirmacionPage() {
                   <table className="w-full text-sm">
                     <thead className="bg-indigo-50/60 border-b border-indigo-100">
                       <tr>
+                        <th className="px-4 py-3 w-8">
+                          <SelectionHeaderCheckbox visibleIds={pagedOrders.map(o => o.id)} />
+                        </th>
                         {['Cliente','Ubicación','Monto','Estado','Intentos','Contactar','Acción',''].map(h => (
                           <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-indigo-800 whitespace-nowrap">{h}</th>
                         ))}
@@ -1749,6 +1786,9 @@ export default function ConfirmacionPage() {
                               ${isHighlighted ? 'ring-2 ring-inset ring-blue-500 bg-blue-50/60'
                                 : hasAlert ? 'bg-amber-50/40 hover:bg-amber-50/70'
                                   : 'hover:bg-indigo-50/30'}`}>
+                            <td className="px-3 py-2.5">
+                              <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+                            </td>
 
                             <td className="px-3 py-2.5">
                               <p className="font-medium text-gray-900 text-sm leading-tight truncate max-w-[160px]">
@@ -1865,6 +1905,9 @@ export default function ConfirmacionPage() {
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 border-b border-gray-200">
                       <tr>
+                        <th className="px-3 py-3 w-8">
+                          <SelectionHeaderCheckbox visibleIds={clientFilteredData.map(o => o.id)} />
+                        </th>
                         {['Fecha / Orden', 'Cliente', 'Ciudad', 'Monto',
                           'Estado confirm.', 'Estado logística',
                           ...(viewMode === 'despachados' ? ['Guía / Último mov.'] : []),
@@ -1884,6 +1927,9 @@ export default function ConfirmacionPage() {
                           <tr key={order.id}
                             className={`transition-colors hover:bg-gray-50/60
                               ${hasAlert ? 'bg-amber-50/20' : ''}`}>
+                            <td className="px-3 py-2.5">
+                              <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+                            </td>
                             <td className="px-3 py-2.5 whitespace-nowrap">
                               <p className="text-xs font-semibold text-gray-700">
                                 {formatOrderTime(order.shopify_created_at ?? order.created_at)}
@@ -2047,6 +2093,11 @@ export default function ConfirmacionPage() {
           </div>
         )}
       </div>
+
+      <SelectionBulkActionBar>
+        <PrintCodLabelsBatchButton />
+      </SelectionBulkActionBar>
+      </SelectionProvider>
     </div>
   )
 }

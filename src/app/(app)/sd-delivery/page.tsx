@@ -17,6 +17,11 @@ import {
   UserCheck, Clock, Route, DollarSign, ChevronDown, ChevronUp,
   MoreHorizontal, MapPinOff, Wallet, Target,
 } from 'lucide-react'
+import { SelectionProvider, SelectionSync } from '@/components/selection/SelectionProvider'
+import { SelectionCheckbox } from '@/components/selection/SelectionCheckbox'
+import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderCheckbox'
+import { SelectionBulkActionBar } from '@/components/selection/BulkActionBar'
+import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabelsBatchButton'
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 // Fase A (rediseño "Mi Ruta"): se elimina la navegación por tabs de micro-estado.
@@ -548,17 +553,22 @@ function SdCard({
         </div>
       )}
 
-      {/* Cabecera: identificador + badge de estado */}
+      {/* Cabecera: selección + identificador + badge de estado */}
       <div className="flex items-start justify-between gap-2 mb-2">
-        <div className="min-w-0">
-          <p className="font-mono text-sm font-bold text-gray-900 truncate">
-            {order.tracking_number ?? order.order_number ?? '—'}
-          </p>
-          {(() => { const { relative, absolute } = formatOrderDate(order, pool); return (
-            <p className="text-[10px] text-gray-400 mt-0.5" title={absolute}>
-              <span className="font-medium">{relative}</span>
+        <div className="flex items-start gap-2 min-w-0">
+          <div className="pt-0.5">
+            <SelectionCheckbox id={order.id} label={`Seleccionar pedido ${order.order_number ?? order.id}`} />
+          </div>
+          <div className="min-w-0">
+            <p className="font-mono text-sm font-bold text-gray-900 truncate">
+              {order.tracking_number ?? order.order_number ?? '—'}
             </p>
-          ); })()}
+            {(() => { const { relative, absolute } = formatOrderDate(order, pool); return (
+              <p className="text-[10px] text-gray-400 mt-0.5" title={absolute}>
+                <span className="font-medium">{relative}</span>
+              </p>
+            ); })()}
+          </div>
         </div>
         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1 whitespace-nowrap ${badge.cls}`}>
           <badge.Icon className="w-3 h-3" />{badge.text}
@@ -1351,6 +1361,8 @@ export default function SdDeliveryPage() {
 
   return (
     <div className="space-y-4 pb-[env(safe-area-inset-bottom,_0px)]">
+      <SelectionProvider>
+      <SelectionSync knownIds={searchedActiveList.map(({ order }) => order.id)} />
 
       {/* ── Toast flotante ── */}
       {toast && (
@@ -1599,6 +1611,10 @@ export default function SdDeliveryPage() {
           </div>
         ) : (
           <div className="space-y-3">
+            <div className="flex items-center gap-2 px-1">
+              <SelectionHeaderCheckbox visibleIds={searchedActiveList.map(({ order }) => order.id)} />
+              <span className="text-xs text-gray-500">Seleccionar todos los pedidos visibles</span>
+            </div>
             {zoneGroups.map(group => {
               const zc            = ZONE_COLORS[group.zone.id as ZoneId] ?? ZONE_COLORS['otro']
               const isCollapsed   = collapsedZones.has(group.zone.id)
@@ -1738,6 +1754,10 @@ export default function SdDeliveryPage() {
         </div>
       )}
 
+      <SelectionBulkActionBar>
+        <PrintCodLabelsBatchButton />
+      </SelectionBulkActionBar>
+      </SelectionProvider>
     </div>
   )
 }
