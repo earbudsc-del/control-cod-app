@@ -206,11 +206,33 @@ export async function GET(request: Request) {
         .lte('last_confirmation_attempt', ayer.end),
     ])
 
-    // Pedidos confirmados SIN guía asignada todavía.
-    // Excluye en_reparto: son pedidos SD local ya despachados que siguen sin tracking EFI.
-    let query = supabase
+    const CONFIRMADOS_SELECT_FIELDS =
+      'id, order_number, shopify_order_id, customer_name, customer_phone, customer_address, city, province, product_summary, cod_amount, confirmation_method, last_confirmation_attempt, created_at, duplicate_alert, duplicate_of_order_id, duplicate_reason'
+
+    // Pedidos confirmados SIN guía asignada todavía — vista del agente que
+    // despacha hacia OTRAS provincias por EFI/Gintracom. Los pedidos de
+    // Santo Domingo no deben aparecer acá: se trabajan por el flujo interno
+    // SD (Confirmación → Santo Domingo → Ruta COD), no por este módulo.
+    //
+    // Query A: cualquier estado no terminal salvo 'en_reparto' — el caso normal.
+    // Query B: 'en_reparto' pero geográficamente NO Santo Domingo — pedidos
+    // provinciales que quedaron marcados como despacho local por error (ver
+    // auditoría 2026-07-28, pedidos #10798/#10800: dispatch-local los puso
+    // en 'en_reparto' sin guía y quedaron invisibles en todo el módulo).
+    //
+    // No se puede resolver esto con un solo filtro SQL sobre
+    // normalized_status: mostrar TODO 'en_reparto' mezclaría en esta vista
+    // el backlog SD real (~250 pedidos hoy, ver /sd-delivery) con el trabajo
+    // del agente provincial; excluir TODO 'en_reparto' es el bug original
+    // (un pedido provincial atrapado ahí por error desaparece sin dejar
+    // rastro). Se separa en dos queries para poder aplicar
+    // isSantoDomingoOrder() —fuente única de verdad geográfica, sin
+    // duplicar su lista de zonas en SQL— y para que el LIMIT de la query
+    // principal no descarte los pedidos provinciales legítimos detrás de
+    // los ~250 pedidos SD en_reparto reales.
+    let queryA = supabase
       .from('orders')
-      .select('id, order_number, shopify_order_id, customer_name, customer_phone, customer_address, city, province, product_summary, cod_amount, confirmation_method, last_confirmation_attempt, created_at, duplicate_alert, duplicate_of_order_id, duplicate_reason')
+      .select(CONFIRMADOS_SELECT_FIELDS)
       .eq('confirmation_status', 'confirmed')
       .is('tracking_number', null)
       .neq('normalized_status', 'delivered')
@@ -218,6 +240,15 @@ export async function GET(request: Request) {
       .neq('normalized_status', 'en_reparto')
       .order('last_confirmation_attempt', { ascending: false, nullsFirst: false })
       .limit(200)
+
+    let queryB = supabase
+      .from('orders')
+      .select(CONFIRMADOS_SELECT_FIELDS)
+      .eq('confirmation_status', 'confirmed')
+      .is('tracking_number', null)
+      .eq('normalized_status', 'en_reparto')
+      .order('last_confirmation_attempt', { ascending: false, nullsFirst: false })
+      .limit(1000)
 
     // Para el filtro 'recuperados' obtenemos primero los shopify_order_ids recuperados
     if (filter === 'recuperados') {
@@ -244,19 +275,43 @@ export async function GET(request: Request) {
         })
       }
 
-      query = query.in('shopify_order_id', recoveredIds)
+      queryA = queryA.in('shopify_order_id', recoveredIds)
+      queryB = queryB.in('shopify_order_id', recoveredIds)
     } else if (filter === 'hoy') {
-      query = query.gte('last_confirmation_attempt', hoy.start).lte('last_confirmation_attempt', hoy.end)
+      queryA = queryA.gte('last_confirmation_attempt', hoy.start).lte('last_confirmation_attempt', hoy.end)
+      queryB = queryB.gte('last_confirmation_attempt', hoy.start).lte('last_confirmation_attempt', hoy.end)
     } else if (filter === 'ayer') {
-      query = query.gte('last_confirmation_attempt', ayer.start).lte('last_confirmation_attempt', ayer.end)
+      queryA = queryA.gte('last_confirmation_attempt', ayer.start).lte('last_confirmation_attempt', ayer.end)
+      queryB = queryB.gte('last_confirmation_attempt', ayer.start).lte('last_confirmation_attempt', ayer.end)
     } else if (from && to) {
-      query = query.gte('last_confirmation_attempt', from).lte('last_confirmation_attempt', to)
+      queryA = queryA.gte('last_confirmation_attempt', from).lte('last_confirmation_attempt', to)
+      queryB = queryB.gte('last_confirmation_attempt', from).lte('last_confirmation_attempt', to)
     }
 
-    const { data, error } = await query
-    if (error) throw error
+    const [{ data: dataA, error: errorA }, { data: dataB, error: errorB }] = await Promise.all([queryA, queryB])
+    if (errorA) throw errorA
+    if (errorB) throw errorB
 
-    const orders = data ?? []
+    // De query B solo nos interesan los pedidos que NO son geográficamente
+    // Santo Domingo — si isSantoDomingoOrder() los acepta, es backlog SD
+    // real (se trabaja desde /sd-delivery), no una excepción provincial.
+    const provincialOrphans = (dataB ?? []).filter(
+      o => !isSantoDomingoOrder(o.city, o.province, o.customer_address),
+    )
+
+    // Sin slice/limit adicional aquí a propósito: queryA ya viene acotada a
+    // 200 por su propio .limit(), y los huérfanos de queryB deben ser
+    // SIEMPRE aditivos, nunca competir por esos 200 cupos. Si se recortara
+    // el total combinado, un huérfano viejo (el caso típico — un pedido
+    // "olvidado" en en_reparto suele llevar más tiempo ahí que los 200 más
+    // recientes de queryA) podría quedar fuera del sort-desc-then-slice,
+    // repitiendo exactamente el bug que esta vista existe para atrapar.
+    const orders = [...(dataA ?? []), ...provincialOrphans]
+      .sort((a, b) => {
+        const at = a.last_confirmation_attempt ? new Date(a.last_confirmation_attempt).getTime() : 0
+        const bt = b.last_confirmation_attempt ? new Date(b.last_confirmation_attempt).getTime() : 0
+        return bt - at
+      })
 
     // Enriquecer con info de carrito abandonado recuperado
     let enriched = orders as (typeof orders[0] & {

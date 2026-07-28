@@ -94,6 +94,25 @@ const ZONA_OTRO: SdZone = {
   terms:      [],
 }
 
+// Términos "genéricos" — el pedido dice la ciudad/provincia en general (ej.
+// city="Santo Domingo" sin Este/Norte/Oeste), sin apuntar a un sector
+// puntual de las zonas de arriba.
+// Exportado: alert-helpers.ts lo reutiliza como señal fuerte de SD/DN cuando
+// `province` no confirma la zona (ver isSantoDomingoOrder) — evita mantener
+// una segunda copia de estos dos términos en otro archivo.
+export const SD_GENERIC_TERMS = ['santo domingo', 'distrito nacional']
+
+// Fuente ÚNICA de cobertura del Gran Santo Domingo — usada tanto para
+// detectar zona/tarifa (detectSdZone, abajo) como para decidir si un pedido
+// es SD interno en absoluto (isSantoDomingoOrder, en alert-helpers.ts).
+// No debe existir una segunda lista de zonas cubiertas en ningún otro
+// archivo — si falta un municipio/sector, se agrega aquí, en la zona que
+// corresponda, y ambas funciones lo heredan automáticamente.
+export const SD_COVERAGE_TERMS: string[] = [
+  ...SD_GENERIC_TERMS,
+  ...SD_ZONES.flatMap(z => z.terms),
+]
+
 function norm(s: string): string {
   return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
 }

@@ -1,3 +1,5 @@
+import { SD_COVERAGE_TERMS, SD_GENERIC_TERMS } from './sd-zones'
+
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
 export interface ZoneEntry {
@@ -346,15 +348,51 @@ const SD_PROTECTED_ZONE_NAMES = new Set(['Luperón'])
 // ── Santo Domingo / Transporte local ─────────────────────────────────────────
 
 // Pedidos a SD/DN se despachan por transporte local, no por EFI.
-const SD_PATTERN = /santo domingo|distrito nacional|\bdn\b/
+//
+// Fuente única de términos: SD_COVERAGE_TERMS (src/lib/sd-zones.ts) — la
+// misma lista que usa detectSdZone() para asignar zona/tarifa. No mantener
+// una segunda lista de zonas cubiertas aquí; si falta un municipio/sector,
+// se agrega en sd-zones.ts y ambas funciones lo heredan automáticamente.
+//
+// "DN" se valida aparte con límite de palabra (\bdn\b): al ser de 2 letras,
+// un match por substring produciría falsos positivos dentro de otras
+// palabras.
+const DN_ABBREVIATION = /\bdn\b/
+
+function isSdContext(haystack: string): boolean {
+  if (DN_ABBREVIATION.test(haystack)) return true
+  return SD_COVERAGE_TERMS.some(term => haystack.includes(term))
+}
 
 export function isSantoDomingoOrder(
   city:     string | null | undefined,
   province: string | null | undefined,
   address:  string | null | undefined,
 ): boolean {
+  // Guardia de provincia (2026-07-28): algunos términos de sector/zona SD
+  // (ej. "Villa Hermosa" — barrio real de SD Este) coinciden por nombre con
+  // localidades de OTRAS provincias (ej. Villa Hermosa, La Romana). Cuando
+  // `province` viene informada y por sí sola NO indica Santo Domingo/DN, es
+  // la señal más confiable de que el pedido es de otra provincia —incluso si
+  // `city`/`address` matchean un término de sector— así que se suprimen los
+  // términos de zona (SD_ZONES) y solo se acepta un match explícito y
+  // genérico de "santo domingo"/"distrito nacional"/"dn" en el propio texto
+  // de ciudad o dirección. Provincia vacía no descarta nada (no hay señal
+  // para desambiguar): se mantiene el comportamiento histórico.
+  // Caso real que motivó este guard: pedidos #10798/#10800 (La Romana)
+  // quedaron marcados como despacho local SD por error — ver auditoría
+  // 2026-07-28 y docs/ARCHITECTURE_RUTA_COD_V1.md.
+  const provinceNorm       = normalize(province ?? '')
+  const provinceIsElsewhere = provinceNorm.trim() !== '' && !isSdContext(provinceNorm)
+
+  if (provinceIsElsewhere) {
+    const cityAddressHaystack = normalize(`${city ?? ''} ${address ?? ''}`)
+    if (DN_ABBREVIATION.test(cityAddressHaystack)) return true
+    return SD_GENERIC_TERMS.some(term => cityAddressHaystack.includes(term))
+  }
+
   const haystack = normalize(`${city ?? ''} ${province ?? ''} ${address ?? ''}`)
-  return SD_PATTERN.test(haystack)
+  return isSdContext(haystack)
 }
 
 export function isTransferOrder(productSummary: string | null | undefined): boolean {
@@ -386,7 +424,7 @@ export function checkCoverage(
 
   // Suprimir zonas OOC que son también referencias urbanas en SD/DN para evitar falsos positivos
   // Ejemplo: "Av. Luperón" en Santo Domingo no es la ciudad Luperón (Puerto Plata, OOC)
-  const sdContext   = SD_PATTERN.test(haystack)
+  const sdContext   = isSdContext(haystack)
   const filteredOoc = sdContext
     ? matchedOoc.filter(m => !SD_PROTECTED_ZONE_NAMES.has(m.entry.name))
     : matchedOoc

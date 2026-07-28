@@ -1,5 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
+import { isSantoDomingoOrder } from '@/lib/alert-helpers'
+import { dispatchOrderLocally, type DispatchLocalRole } from '@/lib/deliveries/dispatch-local'
 
 export async function POST(
   _request: Request,
@@ -29,7 +31,7 @@ export async function POST(
 
     const { data: order } = await supabase
       .from('orders')
-      .select('id, store_id, confirmation_status, tracking_number, normalized_status')
+      .select('id, store_id, confirmation_status, tracking_number, normalized_status, city, province, customer_address')
       .eq('id', id)
       .single()
 
@@ -52,45 +54,33 @@ export async function POST(
       }, { status: 422 })
     }
 
+    // Cobertura geográfica: "Despachar local" es exclusivo de Santo
+    // Domingo/DN. Pedidos de otras provincias deben salir por EFI/Gintracom
+    // — nunca por este flujo. Reutiliza el motor geográfico central
+    // (isSantoDomingoOrder) en vez de duplicar una lista de zonas aquí. Ver
+    // auditoría 2026-07-28: los pedidos #10798/#10800 (La Romana) quedaron
+    // marcados como despacho local por error, sin guía, invisibles en
+    // /confirmados hasta que se les asignó guía EFI manualmente.
+    if (!isSantoDomingoOrder(order.city, order.province, order.customer_address)) {
+      return NextResponse.json({
+        error: 'Este pedido no pertenece a la cobertura local de Santo Domingo y debe despacharse mediante EFI/Gintracom.',
+      }, { status: 422 })
+    }
+
     if (order.normalized_status === 'en_reparto') {
       return NextResponse.json({ error: 'El pedido ya está despachado' }, { status: 409 })
     }
 
-    const now = new Date().toISOString()
+    const result = await dispatchOrderLocally(supabase, id, profile.id, profile.role as DispatchLocalRole)
 
-    const [updateResult, actionResult] = await Promise.all([
-      supabase
-        .from('orders')
-        .update({ normalized_status: 'en_reparto', status_since: now })
-        .eq('id', id)
-        .select('id'),
-
-      supabase
-        .from('agent_actions')
-        .insert({
-          order_id:    id,
-          agent_id:    profile.id,
-          action_type: 'local_dispatched',
-          notes:       profile.role === 'admin'
-            ? 'Despachado por admin — transporte SD sin guía EFI'
-            : profile.role === 'dispatch_agent'
-              ? 'Despachado por agente de despacho — transporte SD sin guía EFI'
-              : 'Despachado por mensajero SD — transporte local sin guía EFI',
-        }),
-    ])
-
-    if (updateResult.error) throw updateResult.error
-    if (actionResult.error) throw actionResult.error
-
-    // Detectar actualización silenciosa (0 filas afectadas)
-    if (!updateResult.data || updateResult.data.length === 0) {
-      console.error(`[dispatch-local] UPDATE returned 0 rows — order=${id}`)
+    if (!result.ok) {
+      console.error(`[dispatch-local] order=${id} error=${result.error}`)
       return NextResponse.json({ error: 'No se pudo actualizar el pedido' }, { status: 500 })
     }
 
     console.log(`[dispatch-local] order=${id} by=${profile.id} role=${profile.role} → en_reparto`)
 
-    return NextResponse.json({ success: true, dispatched_at: now })
+    return NextResponse.json({ success: true, dispatched_at: result.dispatchedAt })
   } catch (err) {
     console.error('[POST /api/orders/[id]/dispatch-local]', err)
     return NextResponse.json({ error: 'Error interno al despachar' }, { status: 500 })
