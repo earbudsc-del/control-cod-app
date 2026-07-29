@@ -308,22 +308,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
       case 'delivered': {
         // Entregado NO implica pagado — son dos hechos distintos que el
-        // mensajero confirma por separado (regla aprobada). autoMarkPaid:
-        // false — el cobro se registra únicamente vía la acción 'paid'.
-        // Reutiliza el mismo helper que el endpoint histórico de SD Delivery
-        // (mark-delivered), así que conserva exactamente las mismas
-        // consecuencias de "marcar entregado" (UPDATE de orders +
-        // agent_actions) salvo el auto-pago. Ver src/lib/deliveries/mark-delivered.ts.
+        // mensajero confirma por separado (regla aprobada). El cobro se
+        // registra únicamente vía la acción 'paid' (case aparte, más abajo).
+        // markSdOrderDelivered ya no toca pagos en absoluto — ver
+        // src/lib/deliveries/mark-delivered.ts.
         actionType = 'delivered'
         notes = 'Entregado por mensajero SD (Ruta COD)'
-        await markSdOrderDelivered(supabase, orderId, profile.id, {
-          notes,
-          autoMarkPaid: false,
-          shopifyOrderId: order.shopify_order_id,
-          source: order.source,
-          triggeredBy: profile.id,
-          triggeredAction: 'delivered',
-        })
+        await markSdOrderDelivered(supabase, orderId, profile.id, { notes })
         break
       }
 

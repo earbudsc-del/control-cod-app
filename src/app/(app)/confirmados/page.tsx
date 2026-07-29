@@ -24,22 +24,9 @@ type FilterType  = 'todos' | 'hoy' | 'ayer' | 'rango' | 'recuperados'
 type AlertFilter = 'todos' | 'duplicados' | 'cobertura' | 'zona_desconocida' | 'santo_domingo'
 type MainTab     = 'confirmados' | 'sd_por_cobrar' | 'entregados'
 
-interface SdPorCobrarOrder {
-  id:                string
-  order_number:      string | null
-  customer_name:     string | null
-  customer_phone:    string | null
-  customer_address:  string | null
-  city:              string | null
-  province:          string | null
-  product_summary:   string | null
-  cod_amount:        number | null
-  normalized_status: string
-  status_since:      string | null
-  created_at:        string
-}
-
-interface EntregadoOrder {
+// Fila unificada de GET /api/confirmados?tab=sd_cobros&payment=all|pending|paid
+// — una sola consulta backend para las 3 selecciones (ver route.ts).
+interface SdCobroOrder {
   id:                 string
   order_number:       string | null
   customer_name:      string | null
@@ -49,11 +36,14 @@ interface EntregadoOrder {
   province:           string | null
   product_summary:    string | null
   cod_amount:         number | null
+  normalized_status:  string
+  payment_status:     string
   paid_at:            string | null
   paid_by:            string | null
   paid_by_name:       string | null
   delivered_at:       string | null
   delivered_by_name:  string | null
+  status_since:       string | null
   created_at:         string
 }
 
@@ -138,45 +128,6 @@ export default function ConfirmadosPage() {
   const [dispatching, setDispatching]       = useState<Record<string, boolean>>({})
   const [dispatchErrors, setDispatchErrors] = useState<Record<string, string>>({})
   const [toast, setToast]                   = useState<{ msg: string; ok: boolean } | null>(null)
-
-  // ── SD · Por cobrar / Entregados ──────────────────────────────────────────
-  const [sdPorCobrarData, setSdPorCobrarData]       = useState<SdPorCobrarOrder[]>([])
-  const [sdPorCobrarLoading, setSdPorCobrarLoading] = useState(true)
-  const [entregadosData, setEntregadosData]         = useState<EntregadoOrder[]>([])
-  const [entregadosLoading, setEntregadosLoading]   = useState(true)
-
-  const fetchSdPorCobrar = useCallback(async () => {
-    setSdPorCobrarLoading(true)
-    try {
-      const res = await fetch('/api/confirmados?tab=sd_por_cobrar')
-        .then(r => r.json() as Promise<{ data: SdPorCobrarOrder[] }>)
-      setSdPorCobrarData(res.data ?? [])
-    } catch (err) {
-      console.error('[confirmados/fetchSdPorCobrar]', err)
-    } finally {
-      setSdPorCobrarLoading(false)
-    }
-  }, [])
-
-  const fetchEntregados = useCallback(async () => {
-    setEntregadosLoading(true)
-    try {
-      const res = await fetch('/api/confirmados?tab=entregados')
-        .then(r => r.json() as Promise<{ data: EntregadoOrder[] }>)
-      setEntregadosData(res.data ?? [])
-    } catch (err) {
-      console.error('[confirmados/fetchEntregados]', err)
-    } finally {
-      setEntregadosLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchSdPorCobrar()
-    fetchEntregados()
-    const interval = setInterval(() => { fetchSdPorCobrar(); fetchEntregados() }, 3 * 60 * 1000)
-    return () => clearInterval(interval)
-  }, [fetchSdPorCobrar, fetchEntregados])
 
   function showToast(msg: string, ok: boolean) {
     setToast({ msg, ok })
@@ -479,12 +430,13 @@ export default function ConfirmadosPage() {
 
       {/* ── Tabs del módulo ── */}
       <div className="flex items-center gap-2 flex-wrap">
-        {/* El conteo del tab usa el largo real de la lista ya cargada (no un
-            COUNT aparte) — así nunca puede divergir de las filas mostradas. */}
+        {/* Conteos de las pestañas SD via pipelineCounts (ya fetcheado en
+            fetchData, un solo count por tipo) — no requieren cargar las filas
+            completas solo para mostrar un número en el botón. */}
         {([
-          { key: 'confirmados',   label: 'Confirmados',                                                      cls: 'green'   },
-          { key: 'sd_por_cobrar', label: `SD · Por cobrar (${sdPorCobrarLoading ? '…' : sdPorCobrarData.length})`, cls: 'amber'   },
-          { key: 'entregados',    label: `Entregados (${entregadosLoading ? '…' : entregadosData.length})`,       cls: 'emerald' },
+          { key: 'confirmados',   label: 'Confirmados', cls: 'green' },
+          { key: 'sd_por_cobrar', label: `SD · Por cobrar (${pipelineCounts ? pipelineCounts.sdPorCobrar : '…'})`, cls: 'amber' },
+          { key: 'entregados',    label: `Entregados (${pipelineCounts ? pipelineCounts.entregadosSd : '…'})`,      cls: 'emerald' },
         ] as { key: MainTab; label: string; cls: string }[]).map(({ key, label, cls }) => (
           <button
             key={key}
@@ -501,26 +453,14 @@ export default function ConfirmadosPage() {
         ))}
       </div>
 
-      {mainTab === 'sd_por_cobrar' && (
-        <SdPorCobrarTab
-          data={sdPorCobrarData}
-          loading={sdPorCobrarLoading}
-          onPaidSuccess={(orderId) => {
+      {(mainTab === 'sd_por_cobrar' || mainTab === 'entregados') && (
+        <SdCobrosTab
+          initialFilter={mainTab === 'entregados' ? 'pagado' : 'pendiente'}
+          onPaidSuccess={() => {
             showToast('✓ Pedido marcado como pagado', true)
-            // Quita la fila de inmediato (sin esperar el refetch) — así
-            // desaparece de "SD · Por cobrar" al instante. El refetch de abajo
-            // reconcilia el estado real y trae la fila nueva a "Entregados"
-            // con mensajero/fecha de pago resueltos desde el servidor.
-            setSdPorCobrarData(prev => prev.filter(o => o.id !== orderId))
-            fetchEntregados()
-            fetchSdPorCobrar()
             fetchData()
           }}
         />
-      )}
-
-      {mainTab === 'entregados' && (
-        <EntregadosTab data={entregadosData} loading={entregadosLoading} />
       )}
 
       {mainTab === 'confirmados' && (
@@ -1038,56 +978,115 @@ export default function ConfirmadosPage() {
   )
 }
 
-// ── Tab: SD · Por cobrar ─────────────────────────────────────────────────────
+// ── Tab: SD · Cobros (Todos / Pendientes / Pagados) ──────────────────────────
+//
+// Una única consulta backend por selección — GET /api/confirmados?tab=
+// sd_cobros&payment=all|pending|paid (ver route.ts). El componente refetchea
+// al cambiar de filtro; nunca mantiene dos conjuntos de 500 filas en memoria
+// para mezclarlos en el navegador. payment_status es la fuente de verdad
+// (migración 046); el estado logístico (normalized_status) se muestra en
+// columna aparte, sin mezclarlo con el estado financiero.
 
-type SdSubFilter = 'todos' | 'pendiente_entrega' | 'entregado_pendiente_pago'
+type PaymentFilter = 'todos' | 'pendiente' | 'pagado'
 
-function SdPorCobrarTab({
-  data, loading, onPaidSuccess,
+function paymentQueryParam(f: PaymentFilter): 'all' | 'pending' | 'paid' {
+  return f === 'pendiente' ? 'pending' : f === 'pagado' ? 'paid' : 'all'
+}
+
+function PaymentBadge({ row }: { row: SdCobroOrder }) {
+  if (row.payment_status === 'paid') {
+    return (
+      <div className="flex flex-col gap-0.5">
+        <span className="inline-flex w-fit items-center text-xs font-semibold px-2 py-0.5 rounded-full bg-green-600 text-white">
+          Pagado
+        </span>
+        <span className="text-[11px] text-gray-500 whitespace-nowrap">
+          {row.paid_at ? formatEventDate(row.paid_at) : '—'}
+        </span>
+        <span className="text-[11px] text-gray-500 whitespace-nowrap">
+          Por: {row.paid_by_name ?? 'Usuario no disponible'}
+        </span>
+      </div>
+    )
+  }
+  return (
+    <span className="inline-flex w-fit items-center text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+      Pendiente de pago
+    </span>
+  )
+}
+
+function SdCobrosTab({
+  initialFilter, onPaidSuccess,
 }: {
-  data: SdPorCobrarOrder[]
-  loading: boolean
-  onPaidSuccess: (orderId: string) => void
+  initialFilter: PaymentFilter
+  onPaidSuccess: () => void
 }) {
+  const [filter, setFilter]   = useState<PaymentFilter>(initialFilter)
+  const [rows, setRows]       = useState<SdCobroOrder[]>([])
+  const [loading, setLoading] = useState(true)
+
+  // Si el usuario entra desde un botón distinto (ej. "Paso 4 · Entregados"
+  // del pipeline tras venir de "SD · Por cobrar"), el filtro por defecto
+  // debe reflejar el punto de entrada.
+  useEffect(() => { setFilter(initialFilter) }, [initialFilter])
+
+  const fetchRows = useCallback(async (pf: PaymentFilter) => {
+    setLoading(true)
+    try {
+      const res = await fetch(`/api/confirmados?tab=sd_cobros&payment=${paymentQueryParam(pf)}`)
+        .then(r => r.json() as Promise<{ data: SdCobroOrder[] }>)
+      setRows(res.data ?? [])
+    } catch (err) {
+      console.error('[confirmados/SdCobrosTab fetchRows]', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchRows(filter) }, [filter, fetchRows])
+
+  // Auto-refresh cada 3 min mientras esta pestaña está montada (solo cuando
+  // el admin la tiene abierta — no compite con el fetch de la pestaña
+  // "Confirmados" provincial).
+  useEffect(() => {
+    const interval = setInterval(() => fetchRows(filter), 3 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [filter, fetchRows])
+
   const LOGISTIC_LABEL: Record<string, { label: string; cls: string }> = {
     en_reparto: { label: 'En reparto', cls: 'bg-orange-100 text-orange-700' },
-    delivered:  { label: 'Entregado',  cls: 'bg-green-100 text-green-700'   },
+    delivered:  { label: 'Entregado',  cls: 'bg-blue-100 text-blue-700'     },
   }
 
-  // Clasificación pedida: "Confirmados pendientes de entrega" (en_reparto,
-  // aún no delivered) vs "Entregados pendientes de pago" (delivered). Ambos
-  // ya excluyen pagados porque esta pestaña solo recibe payment_status='pending'
-  // desde el servidor — nunca hay que filtrar eso aquí.
-  const [subFilter, setSubFilter] = useState<SdSubFilter>('todos')
-
-  const pendienteEntrega       = useMemo(() => data.filter(o => o.normalized_status !== 'delivered'), [data])
-  const entregadoPendientePago = useMemo(() => data.filter(o => o.normalized_status === 'delivered'), [data])
-
-  const displayed =
-    subFilter === 'pendiente_entrega'         ? pendienteEntrega :
-    subFilter === 'entregado_pendiente_pago'  ? entregadoPendientePago :
-    data
+  function handlePaidSuccess(orderId: string) {
+    // Quita la fila de inmediato (sin esperar el refetch) si el filtro actual
+    // ya no debería incluirla (pasó de pendiente a pagado).
+    if (filter === 'pendiente') setRows(prev => prev.filter(o => o.id !== orderId))
+    fetchRows(filter)
+    onPaidSuccess()
+  }
 
   return (
     <div className="bg-white rounded-xl border-2 border-amber-200 overflow-hidden shadow-sm">
       <div className="px-4 py-3 border-b border-amber-100 bg-amber-50/50">
-        <p className="text-sm font-semibold text-amber-800">Santo Domingo — pendientes de cobro</p>
+        <p className="text-sm font-semibold text-amber-800">Santo Domingo — cobros</p>
         <p className="text-xs text-amber-700 mt-0.5">
-          Pedidos locales ya despachados o entregados por el mensajero cuyo pago todavía no se ha registrado.
+          Estado financiero de pedidos SD locales, separado del estado de entrega. La fecha de pago proviene únicamente del momento real en que se registró el cobro.
         </p>
       </div>
 
       <div className="px-4 py-2.5 border-b border-amber-100 flex items-center gap-2 flex-wrap">
         {([
-          { key: 'todos',                     label: `Todos (${data.length})` },
-          { key: 'pendiente_entrega',         label: `Confirmados · pendientes de entrega (${pendienteEntrega.length})` },
-          { key: 'entregado_pendiente_pago',  label: `Entregados · pendientes de pago (${entregadoPendientePago.length})` },
-        ] as { key: SdSubFilter; label: string }[]).map(({ key, label }) => (
+          { key: 'todos',     label: 'Todos' },
+          { key: 'pendiente', label: 'Pendientes' },
+          { key: 'pagado',    label: 'Pagados' },
+        ] as { key: PaymentFilter; label: string }[]).map(({ key, label }) => (
           <button
             key={key}
-            onClick={() => setSubFilter(key)}
+            onClick={() => setFilter(key)}
             className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors
-              ${subFilter === key
+              ${filter === key
                 ? 'bg-amber-600 text-white'
                 : 'bg-white text-amber-700 border border-amber-200 hover:bg-amber-100'}`}
           >
@@ -1102,18 +1101,18 @@ function SdPorCobrarTab({
         </div>
       )}
 
-      {!loading && displayed.length === 0 && (
+      {!loading && rows.length === 0 && (
         <div className="px-5 py-12 text-center text-gray-500 font-medium">
-          {subFilter === 'todos' ? 'No hay pedidos SD pendientes de cobro' : 'Sin pedidos en este filtro'}
+          {filter === 'todos' ? 'No hay pedidos SD en esta vista' : 'Sin pedidos en este filtro'}
         </div>
       )}
 
-      {!loading && displayed.length > 0 && (
+      {!loading && rows.length > 0 && (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-amber-50/60 border-b border-amber-100">
               <tr>
-                {['# Pedido', 'Cliente', 'Sector', 'Producto', 'Monto', 'Estado', 'Desde', 'Acciones'].map(h => (
+                {['# Pedido', 'Cliente', 'Sector', 'Producto', 'Monto', 'Entrega', 'Pago', 'Acciones'].map(h => (
                   <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-amber-800 whitespace-nowrap">
                     {h}
                   </th>
@@ -1121,7 +1120,7 @@ function SdPorCobrarTab({
               </tr>
             </thead>
             <tbody className="divide-y divide-amber-50">
-              {displayed.map(order => {
+              {rows.map(order => {
                 const waUrl  = whatsAppUrl(order.customer_phone)
                 const telUrl = callUrl(order.customer_phone)
                 const logo   = LOGISTIC_LABEL[order.normalized_status] ?? { label: order.normalized_status, cls: 'bg-gray-100 text-gray-600' }
@@ -1158,15 +1157,25 @@ function SdPorCobrarTab({
                       <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full ${logo.cls}`}>
                         {logo.label}
                       </span>
+                      {order.delivered_at && (
+                        <p className="text-[11px] text-gray-500 mt-0.5 whitespace-nowrap">
+                          {formatEventDate(order.delivered_at)}
+                        </p>
+                      )}
+                      {order.delivered_by_name && (
+                        <p className="text-[11px] text-gray-500 whitespace-nowrap">
+                          Mensajero: {order.delivered_by_name}
+                        </p>
+                      )}
                     </td>
                     <td className="px-3 py-2.5">
-                      <span className="text-xs text-gray-600 whitespace-nowrap">
-                        {formatEventDate(order.status_since ?? order.created_at)}
-                      </span>
+                      <PaymentBadge row={order} />
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        <MarkPaidButton orderId={order.id} onSuccess={() => onPaidSuccess(order.id)} />
+                        {order.payment_status === 'pending' && (
+                          <MarkPaidButton orderId={order.id} onSuccess={() => handlePaidSuccess(order.id)} />
+                        )}
                         {waUrl && (
                           <a href={waUrl} target="_blank" rel="noopener noreferrer"
                              className="flex items-center gap-1 bg-green-500 hover:bg-green-600
@@ -1191,115 +1200,6 @@ function SdPorCobrarTab({
                   </tr>
                 )
               })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Tab: Entregados ───────────────────────────────────────────────────────────
-
-function EntregadosTab({ data, loading }: { data: EntregadoOrder[]; loading: boolean }) {
-  return (
-    <div className="bg-white rounded-xl border-2 border-emerald-200 overflow-hidden shadow-sm">
-      <div className="px-4 py-3 border-b border-emerald-100 bg-emerald-50/50">
-        <p className="text-sm font-semibold text-emerald-800">Santo Domingo — entregados y pagados</p>
-        <p className="text-xs text-emerald-700 mt-0.5">
-          Pedidos locales cerrados por completo: entrega confirmada y cobro registrado.
-        </p>
-      </div>
-
-      {loading && (
-        <div className="flex items-center justify-center py-16">
-          <Spinner className="w-6 h-6 text-emerald-500" />
-        </div>
-      )}
-
-      {!loading && data.length === 0 && (
-        <div className="px-5 py-12 text-center text-gray-500 font-medium">
-          Todavía no hay pedidos SD entregados y pagados
-        </div>
-      )}
-
-      {!loading && data.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-emerald-50/60 border-b border-emerald-100">
-              <tr>
-                {['# Pedido', 'Estado', 'Cliente', 'Sector', 'Producto', 'Monto', 'Mensajero',
-                  'Fecha entrega', 'Fecha pago', 'Confirmó pago', ''].map(h => (
-                  <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-emerald-800 whitespace-nowrap">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-emerald-50">
-              {data.map(order => (
-                <tr key={order.id} className="hover:bg-emerald-50/40 transition-colors">
-                  <td className="px-3 py-2.5">
-                    <p className="font-mono text-xs font-semibold text-gray-900 whitespace-nowrap">
-                      {order.order_number ?? '—'}
-                    </p>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-600 text-white whitespace-nowrap">
-                      Pagado
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <p className="font-medium text-gray-900 text-sm leading-tight truncate max-w-[140px]">
-                      {order.customer_name ?? '—'}
-                    </p>
-                    <p className="font-mono text-xs text-gray-500 mt-0.5">{order.customer_phone ?? '—'}</p>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <div className="flex items-center gap-1 text-gray-600">
-                      <MapPin className="w-3 h-3 text-gray-400 shrink-0" />
-                      <span className="text-xs truncate max-w-[100px]">{order.city ?? '—'}</span>
-                    </div>
-                  </td>
-                  <td className="px-3 py-2.5 max-w-[150px]">
-                    <p className="text-xs text-gray-600 truncate" title={order.product_summary ?? ''}>
-                      {order.product_summary ?? '—'}
-                    </p>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="text-sm font-semibold text-gray-900 whitespace-nowrap tabular-nums">
-                      {formatCurrency(order.cod_amount)}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="text-xs text-gray-700 whitespace-nowrap">
-                      {order.delivered_by_name ?? <span className="text-gray-300 italic">—</span>}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="text-xs text-gray-600 whitespace-nowrap">
-                      {order.delivered_at ? formatEventDate(order.delivered_at) : '—'}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="text-xs text-gray-600 whitespace-nowrap">
-                      {order.paid_at ? formatEventDate(order.paid_at) : '—'}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="text-xs text-gray-700 whitespace-nowrap">
-                      {order.paid_by_name ?? <span className="text-gray-300 italic">—</span>}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <Link href={`/orders/${order.id}`}
-                      className="flex items-center gap-1 text-xs font-medium text-indigo-600
-                                 hover:text-indigo-800 whitespace-nowrap hover:underline">
-                      <ExternalLink className="w-3 h-3" />Ver
-                    </Link>
-                  </td>
-                </tr>
-              ))}
             </tbody>
           </table>
         </div>

@@ -19,30 +19,23 @@ export interface MarkDeliveredResult {
 
 export interface MarkDeliveredOptions {
   notes?: string
-  // El endpoint histórico de SD Delivery (web) no tiene un paso de "marcar
-  // pagado" separado — su único mecanismo para sincronizar el cobro con
-  // Shopify siempre fue marcar pagado automáticamente al entregar. Cambiar
-  // eso ahora dejaría esos pedidos sin ninguna forma de quedar 'paid' en
-  // Shopify, porque la web no tiene todavía un botón "Marcar pagado"
-  // equivalente al de Ruta COD. Por eso ese endpoint sigue pasando
-  // autoMarkPaid=true — comportamiento sin cambios para el flujo ya
-  // shippeado. La API v1 de Ruta COD SIEMPRE pasa autoMarkPaid=false:
-  // entregado y pagado son dos confirmaciones explícitas y separadas del
-  // mensajero (regla aprobada). Si se agrega un botón "Marcar pagado" a la
-  // web de SD Delivery más adelante, este flag debería pasar a false ahí
-  // también y usar exclusivamente el paso de pago explícito.
-  autoMarkPaid?: boolean
-  shopifyOrderId?: string | null
-  source?: string | null
-  triggeredBy: string
-  triggeredAction: string
 }
 
+// Responsabilidad deliberadamente acotada a la ENTREGA — no toca
+// payment_status ni sincroniza Shopify. Antes esta función tenía un flag
+// autoMarkPaid que llamaba a recordMarkPaidSideEffect() directamente, lo que
+// solo sincronizaba Shopify sin escribir orders.payment_status/paid_at/paid_by
+// en DB local — causaba divergencia (pedido "pagado" en Shopify pero
+// 'pending' localmente). Fix: quien necesite marcar entregado Y pagado en el
+// mismo flujo (ver POST /api/sd-delivery/orders/[id]/mark-delivered) debe
+// llamar a esta función y luego, por separado, al motor único markOrderPaid()
+// (src/lib/orders/mark-paid.ts) — el mismo que ya usan Confirmación/Confirmados
+// y Ruta COD. Así no se duplica lógica de pago en dos sitios.
 export async function markSdOrderDelivered(
   supabase: SupabaseClient,
   orderId: string,
   agentId: string,
-  options: MarkDeliveredOptions,
+  options: MarkDeliveredOptions = {},
 ): Promise<MarkDeliveredResult> {
   const now = new Date().toISOString()
 
@@ -63,15 +56,6 @@ export async function markSdOrderDelivered(
 
   if (updateError) throw updateError
   if (actionError) throw actionError
-
-  if (options.autoMarkPaid && options.shopifyOrderId && options.source === 'shopify_webhook') {
-    await recordMarkPaidSideEffect(supabase, {
-      orderId,
-      shopifyOrderId: options.shopifyOrderId,
-      triggeredBy: options.triggeredBy,
-      triggeredAction: options.triggeredAction,
-    })
-  }
 
   return { actionId: action!.id, reportedAt: action!.created_at }
 }

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { Spinner } from '@/components/ui/spinner'
-import { whatsAppUrl, callUrl, formatCurrency } from '@/lib/utils'
+import { whatsAppUrl, callUrl, formatCurrency, formatEventDate } from '@/lib/utils'
 import type { Order } from '@/types'
 import {
   ClipboardList, RefreshCw, MessageCircle, Phone,
@@ -35,6 +35,9 @@ type ViewMode           = 'pedidos' | 'reintentar' | 'confirmados_sin_guia' | 'd
 type ContactMethod      = 'call' | 'whatsapp' | 'other'
 type DateFilter         = 'hoy' | 'ayer' | '7dias' | '30dias' | 'personalizado'
 type ConfirmStatusFilter = '' | 'pending' | 'reintentar' | 'confirmed' | 'cancelled' | 'no_coverage' | 'unreachable'
+// Filtro de pago — solo aplica a la vista Santo Domingo (única superficie con
+// payment_status/paid_at/paid_by). 'todos' = sin filtro de pago.
+type SdPaymentFilter = 'todos' | 'pendiente' | 'pagado'
 
 interface ConfirmStats {
   nuevos:             number
@@ -460,6 +463,15 @@ function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCovera
         </span>
       </div>
 
+      {/* Fecha de pago + quién lo marcó — solo cuando el badge financiero es "Pagado" */}
+      {confBadge.label === 'Pagado' && (
+        <p className="text-[11px] text-gray-500">
+          {order.paid_at ? formatEventDate(order.paid_at) : '—'}
+          <span className="mx-1 text-gray-300">·</span>
+          Por: {order.paid_by_name ?? 'Usuario no disponible'}
+        </p>
+      )}
+
       {/* Pagado (pedido SD ya despachado/entregado, pago pendiente) */}
       {isPagoPendiente(order) && onPaidSuccess && (
         <MarkPaidButton orderId={order.id} onSuccess={onPaidSuccess} className="w-full flex items-center justify-center gap-1.5 min-h-[40px] bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-xl shadow-sm" />
@@ -635,6 +647,7 @@ export default function ConfirmacionPage() {
   const [sdPage, setSdPage]       = useState(1)
   const [sdPages, setSdPages]     = useState(0)
   const [sdLoading, setSdLoading] = useState(false)
+  const [sdPaymentFilter, setSdPaymentFilter] = useState<SdPaymentFilter>('todos')
 
   // ── Fuera de cobertura (server-paginated) ────────────────────────────────────
   const [fcdData, setFcdData]       = useState<Order[]>([])
@@ -717,12 +730,13 @@ export default function ConfirmacionPage() {
   }, [])
 
   // ── Fetch: Santo Domingo (server-paginated) ─────────────────────────────────
-  const fetchSD = useCallback(async (page: number, sq: string, sf: ConfirmStatusFilter = '') => {
+  const fetchSD = useCallback(async (page: number, sq: string, sf: ConfirmStatusFilter = '', pf: SdPaymentFilter = 'todos') => {
     setSdLoading(true)
     try {
-      const searchQs = sq ? `&search=${encodeURIComponent(sq)}` : ''
-      const statusQs = sf ? `&status=${encodeURIComponent(sf)}` : ''
-      const res = await fetch(`/api/confirmacion/pedidos?filter=santo_domingo&page=${page}&limit=50${searchQs}${statusQs}`)
+      const searchQs  = sq ? `&search=${encodeURIComponent(sq)}` : ''
+      const statusQs  = sf ? `&status=${encodeURIComponent(sf)}` : ''
+      const paymentQs = pf === 'pendiente' ? '&payment=pending' : pf === 'pagado' ? '&payment=paid' : ''
+      const res = await fetch(`/api/confirmacion/pedidos?filter=santo_domingo&page=${page}&limit=50${searchQs}${statusQs}${paymentQs}`)
         .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
       setSdData(res.data   ?? [])
       setSdTotal(res.total ?? 0)
@@ -759,10 +773,10 @@ export default function ConfirmacionPage() {
     if (viewMode === 'reintentar')           fetchQueue()
     if (viewMode === 'confirmados_sin_guia') fetchConfirmados()
     if (viewMode === 'despachados')          fetchDespachados()
-    if (viewMode === 'santo_domingo')        fetchSD(sdPage, searchQuery, statusFilter)
+    if (viewMode === 'santo_domingo')        fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter)
     if (viewMode === 'fuera_de_cobertura')   fetchFCD(fcdPage, searchQuery, statusFilter)
   }, [viewMode, pedidosPage, sdPage, fcdPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter,
-      fetchStats, fetchPedidos, fetchQueue, fetchConfirmados, fetchDespachados, fetchSD, fetchFCD])
+      sdPaymentFilter, fetchStats, fetchPedidos, fetchQueue, fetchConfirmados, fetchDespachados, fetchSD, fetchFCD])
 
   // ── Mount: pre-cargar todo ──────────────────────────────────────────────────
   useEffect(() => {
@@ -786,7 +800,7 @@ export default function ConfirmacionPage() {
     if (viewMode === 'reintentar')                          fetchQueue()
     if (viewMode === 'confirmados_sin_guia' && !confirmadosLoaded) fetchConfirmados()
     if (viewMode === 'despachados'          && !despachadosLoaded) fetchDespachados()
-    if (viewMode === 'santo_domingo')      { setSdPage(1);  fetchSD(1, searchQuery, statusFilter)  }
+    if (viewMode === 'santo_domingo')      { setSdPage(1);  fetchSD(1, searchQuery, statusFilter, sdPaymentFilter)  }
     if (viewMode === 'fuera_de_cobertura') { setFcdPage(1); fetchFCD(1, searchQuery, statusFilter) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode])
@@ -806,17 +820,17 @@ export default function ConfirmacionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pedidosPage])
 
-  // ── Búsqueda/estado en tab Santo Domingo ────────────────────────────────────
+  // ── Búsqueda/estado/pago en tab Santo Domingo ───────────────────────────────
   useEffect(() => {
     if (viewMode !== 'santo_domingo') return
     setSdPage(1)
-    fetchSD(1, searchQuery, statusFilter)
+    fetchSD(1, searchQuery, statusFilter, sdPaymentFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, statusFilter])
+  }, [searchQuery, statusFilter, sdPaymentFilter])
 
   // ── Cambio de página en Santo Domingo ────────────────────────────────────────
   useEffect(() => {
-    if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery, statusFilter)
+    if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sdPage])
 
@@ -1472,6 +1486,28 @@ export default function ConfirmacionPage() {
           )}
         </div>
 
+        {/* ── Filtro de pago (solo Santo Domingo — única vista con payment_status) ── */}
+        {viewMode === 'santo_domingo' && (
+          <div className="px-3 py-2 border-b border-indigo-100 flex items-center gap-1.5 flex-wrap bg-teal-50/40">
+            <span className="text-[11px] font-semibold text-teal-800 mr-0.5">Pago:</span>
+            {([
+              { key: 'todos',     label: 'Todos' },
+              { key: 'pendiente', label: 'Pendientes' },
+              { key: 'pagado',    label: 'Pagados' },
+            ] as { key: SdPaymentFilter; label: string }[]).map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setSdPaymentFilter(key)}
+                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors
+                  ${sdPaymentFilter === key
+                    ? 'bg-teal-600 text-white border-teal-600'
+                    : 'text-teal-700 border-teal-200 bg-white hover:border-teal-400'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* ── Tab bar (5 vistas) ── */}
         <>
           {/* Mobile: select */}
@@ -1548,7 +1584,7 @@ export default function ConfirmacionPage() {
                             o.id === order.id ? { ...o, payment_status: 'paid', normalized_status: 'delivered' } : o
                           setSdData(prev => prev.map(patch))
                           setPedidosData(prev => prev.map(patch))
-                          if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery, statusFilter)
+                          if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter)
                           else fetchPedidos(pedidosPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
                           fetchStats()
                         }}
@@ -1646,6 +1682,12 @@ export default function ConfirmacionPage() {
                               <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full ${confBadge.cls}`}>
                                 {confBadge.label}
                               </span>
+                              {confBadge.label === 'Pagado' && (
+                                <p className="text-[10px] text-gray-500 mt-0.5 whitespace-nowrap">
+                                  {order.paid_at ? formatEventDate(order.paid_at) : '—'}
+                                  <br />Por: {order.paid_by_name ?? 'Usuario no disponible'}
+                                </p>
+                              )}
                             </td>
 
                             {/* Estado logística */}
@@ -1669,7 +1711,7 @@ export default function ConfirmacionPage() {
                                     showToast('✓ Pedido marcado como pagado', 'success')
                                     setSdData(prev => prev.map(o =>
                                       o.id === order.id ? { ...o, payment_status: 'paid', normalized_status: 'delivered' } : o))
-                                    fetchSD(sdPage, searchQuery, statusFilter)
+                                    fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter)
                                     fetchStats()
                                   }}
                                 />

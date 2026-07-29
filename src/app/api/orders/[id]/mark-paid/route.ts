@@ -88,11 +88,6 @@ export async function POST(
     if (order.normalized_status !== 'delivered') {
       await markSdOrderDelivered(supabase, id, profile.id, {
         notes: `Entregado — confirmado desde /confirmados por ${profile.role}`,
-        autoMarkPaid: false,
-        shopifyOrderId: order.shopify_order_id,
-        source: order.source,
-        triggeredBy: profile.id,
-        triggeredAction: 'mark_paid_confirmados',
       })
       deliveredNow = true
     }

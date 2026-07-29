@@ -15,6 +15,11 @@ import { NextResponse } from 'next/server'
  *   ?to=ISO                      — filtro hasta fecha (shopify_created_at < to)   — ignorado si filter != ''
  *   ?filter=santo_domingo        — solo pedidos de SD/DN/Zona local (todas las fechas)
  *   ?filter=fuera_de_cobertura   — solo pedidos con confirmation_status='no_coverage' (todas las fechas)
+ *   ?payment=pending|paid        — solo junto a filter=santo_domingo: filtra por
+ *                                  orders.payment_status (migración 046). Sin este
+ *                                  param (o payment=all) no se aplica ningún filtro
+ *                                  de pago — es la superficie SD, la única donde
+ *                                  aplica hoy este filtro.
  *
  * Respuesta: { data: Order[], total, page, pages }
  */
@@ -43,8 +48,9 @@ export async function GET(request: Request) {
     const search = searchParams.get('search')?.trim() ?? ''
     const from   = searchParams.get('from') ?? ''
     const to     = searchParams.get('to')   ?? ''
-    const filter = searchParams.get('filter') ?? ''  // 'santo_domingo' | 'fuera_de_cobertura' | ''
-    const status = searchParams.get('status') ?? ''  // 'pending' | 'reintentar' | 'confirmed' | 'cancelled' | 'no_coverage' | 'unreachable' | ''
+    const filter  = searchParams.get('filter')  ?? ''  // 'santo_domingo' | 'fuera_de_cobertura' | ''
+    const status  = searchParams.get('status')  ?? ''  // 'pending' | 'reintentar' | 'confirmed' | 'cancelled' | 'no_coverage' | 'unreachable' | ''
+    const payment = searchParams.get('payment') ?? ''  // 'pending' | 'paid' | 'all' | '' — solo aplica con filter=santo_domingo
 
     const rangeFrom = (page - 1) * limit
     const rangeTo   = rangeFrom + limit - 1
@@ -75,6 +81,9 @@ export async function GET(request: Request) {
     if (filter === 'santo_domingo') {
       // Todos los pedidos de zona SD/DN — sin restricción de fecha
       query = query.or(SD_FILTER)
+      // Filtro de pago — únicamente disponible en esta superficie SD.
+      if (payment === 'pending') query = query.or('payment_status.eq.pending,payment_status.is.null')
+      if (payment === 'paid')    query = query.eq('payment_status', 'paid')
     }
 
     if (filter === 'fuera_de_cobertura') {
@@ -109,7 +118,29 @@ export async function GET(request: Request) {
     const total = count ?? 0
     const pages = Math.ceil(total / limit)
 
-    return NextResponse.json({ data: data ?? [], total, page, pages })
+    // Resolver paid_by → nombre. Solo en la superficie SD, que es la única
+    // donde el badge "Pagado" muestra "quién lo marcó" (payment_status/paid_at
+    // /paid_by, migración 046). Un solo query adicional para toda la página
+    // (máx. 50/100 filas) — sin N+1.
+    let rows = data ?? []
+    if (filter === 'santo_domingo' && rows.length > 0) {
+      const paidByIds = [...new Set(
+        rows.map(o => (o as { paid_by?: string | null }).paid_by).filter((id): id is string => !!id),
+      )]
+      if (paidByIds.length > 0) {
+        const { data: profilesData } = await supabase
+          .from('profiles').select('id, full_name').in('id', paidByIds)
+        const nameById = new Map((profilesData ?? []).map(p => [p.id, p.full_name]))
+        rows = rows.map(o => ({
+          ...o,
+          paid_by_name: (o as { paid_by?: string | null }).paid_by
+            ? (nameById.get((o as { paid_by?: string | null }).paid_by as string) ?? null)
+            : null,
+        }))
+      }
+    }
+
+    return NextResponse.json({ data: rows, total, page, pages })
   } catch (err) {
     console.error('[GET /api/confirmacion/pedidos]', err)
     return NextResponse.json({ error: 'Error interno' }, { status: 500 })

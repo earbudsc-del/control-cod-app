@@ -16,37 +16,12 @@ function rdDayBounds(daysAgo = 0): { start: string; end: string } {
   return { start: startUTC.toISOString(), end: endUTC.toISOString() }
 }
 
-const SD_POR_COBRAR_FIELDS =
+const SD_COBROS_FIELDS =
   'id, order_number, shopify_order_id, customer_name, customer_phone, customer_address, ' +
   'city, province, product_summary, cod_amount, normalized_status, payment_status, ' +
-  'tracking_number, status_since, created_at, is_test, archived_at'
+  'paid_at, paid_by, tracking_number, status_since, created_at, is_test, archived_at'
 
-const ENTREGADOS_FIELDS =
-  'id, order_number, shopify_order_id, customer_name, customer_phone, customer_address, ' +
-  'city, province, product_summary, cod_amount, normalized_status, payment_status, ' +
-  'paid_at, paid_by, tracking_number, created_at, is_test, archived_at'
-
-interface SdPorCobrarRow {
-  id: string
-  order_number: string | null
-  shopify_order_id: string | null
-  customer_name: string | null
-  customer_phone: string | null
-  customer_address: string | null
-  city: string | null
-  province: string | null
-  product_summary: string | null
-  cod_amount: number | null
-  normalized_status: string
-  payment_status: string
-  tracking_number: string | null
-  status_since: string | null
-  created_at: string
-  is_test: boolean
-  archived_at: string | null
-}
-
-interface EntregadoRow {
+interface SdCobroRow {
   id: string
   order_number: string | null
   shopify_order_id: string | null
@@ -62,68 +37,62 @@ interface EntregadoRow {
   paid_at: string | null
   paid_by: string | null
   tracking_number: string | null
+  status_since: string | null
   created_at: string
   is_test: boolean
   archived_at: string | null
 }
 
-// GET /api/confirmados?tab=sd_por_cobrar
-// Pedidos SD local ya despachados/entregados con el cobro aún pendiente.
-// Único origen de datos del botón "Pagado" en este módulo.
-async function handleSdPorCobrar(supabase: Awaited<ReturnType<typeof createClient>>) {
-  const { data, error } = await supabase
+// GET /api/confirmados?tab=sd_cobros&payment=all|pending|paid
+//
+// Única consulta backend para las 3 selecciones de pago (Todos/Pendientes/
+// Pagados) — mismo límite (500), misma base de filtro y mismo orden sin
+// importar cuál se pida. 'payment' solo agrega/quita un .eq() sobre la misma
+// query; nunca se ejecutan dos consultas de 500 para mezclarlas en memoria.
+// "Mensajero"/"fecha de entrega" se derivan de agent_actions (action_type=
+// 'delivered') — no existen delivered_at/delivered_by como columnas (ver
+// 046_orders_payment_status.sql). "Fecha de pago" y "quién pagó" sí son
+// columnas directas (paid_at/paid_by). 3 queries totales sin importar
+// cuántas filas — sin N+1.
+async function handleSdCobros(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  payment: 'all' | 'pending' | 'paid',
+) {
+  let query = supabase
     .from('orders')
-    .select(SD_POR_COBRAR_FIELDS)
+    .select(SD_COBROS_FIELDS)
     .is('tracking_number', null)
     .in('normalized_status', ['en_reparto', 'delivered'])
-    .eq('payment_status', 'pending')
     .is('archived_at', null)
     .eq('is_test', false)
-    .order('status_since', { ascending: true, nullsFirst: false })
+    // Mismo orden para las 3 selecciones: pagados recientes primero, luego
+    // pendientes por antigüedad (paid_at es NULL en pendientes, así que caen
+    // al final del primer criterio y se ordenan por status_since).
+    .order('paid_at', { ascending: false, nullsFirst: false })
+    .order('status_since', { ascending: false, nullsFirst: false })
     .limit(500)
 
+  if (payment === 'pending') query = query.eq('payment_status', 'pending')
+  if (payment === 'paid')    query = query.eq('payment_status', 'paid')
+
+  const { data, error } = await query
   if (error) throw error
 
-  const orders = (data ?? []) as unknown as SdPorCobrarRow[]
+  const orders = (data ?? []) as unknown as SdCobroRow[]
 
   // Doble-guarda cliente-side — en_reparto+sin tracking ya es SD por invariante
   // del sistema, pero se re-verifica por si algún dato queda inconsistente.
   const rows = orders.filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address))
 
-  return NextResponse.json({ data: rows, count: rows.length })
-}
-
-// GET /api/confirmados?tab=entregados
-// Pedidos SD local ya entregados Y pagados. "Mensajero" y "fecha de entrega"
-// se derivan de agent_actions (action_type='delivered') — NO existen
-// delivered_at/delivered_by como columnas (ver 046_orders_payment_status.sql).
-// "Fecha de pago" y "usuario que confirmó el pago" sí son columnas directas
-// (paid_at/paid_by). 3 queries totales sin importar cuántas filas — sin N+1.
-async function handleEntregados(supabase: Awaited<ReturnType<typeof createClient>>) {
-  const { data, error } = await supabase
-    .from('orders')
-    .select(ENTREGADOS_FIELDS)
-    .is('tracking_number', null)
-    .eq('normalized_status', 'delivered')
-    .eq('payment_status', 'paid')
-    .is('archived_at', null)
-    .eq('is_test', false)
-    .order('paid_at', { ascending: false, nullsFirst: false })
-    .limit(500)
-
-  if (error) throw error
-
-  const orders = (data ?? []) as unknown as EntregadoRow[]
-  const rows = orders.filter(o => isSantoDomingoOrder(o.city, o.province, o.customer_address))
-  const orderIds = rows.map(o => o.id)
+  const deliveredIds = rows.filter(o => o.normalized_status === 'delivered').map(o => o.id)
 
   // Query 2: último evento 'delivered' por pedido (agente + fecha de entrega).
-  const { data: deliveredActions } = orderIds.length > 0
+  const { data: deliveredActions } = deliveredIds.length > 0
     ? await supabase
         .from('agent_actions')
         .select('order_id, agent_id, created_at')
         .eq('action_type', 'delivered')
-        .in('order_id', orderIds)
+        .in('order_id', deliveredIds)
         .order('created_at', { ascending: false })
     : { data: [] as { order_id: string; agent_id: string | null; created_at: string }[] }
 
@@ -176,10 +145,23 @@ export async function GET(request: Request) {
     if (!canView) return NextResponse.json({ error: 'Sin permisos para ver confirmados' }, { status: 403 })
 
     const { searchParams } = new URL(request.url)
-    const tab = searchParams.get('tab') // 'sd_por_cobrar' | 'entregados' | null (vista default)
+    const tab = searchParams.get('tab') // 'sd_cobros' | 'sd_por_cobrar' | 'entregados' | null (vista default)
 
-    if (tab === 'sd_por_cobrar') return await handleSdPorCobrar(supabase)
-    if (tab === 'entregados')    return await handleEntregados(supabase)
+    // SD · Cobros — visible para cualquier rol que ya pasó el gate de página
+    // (admin/dispatch_agent), igual que el resto de este endpoint. El modelo
+    // de permisos de esta superficie todavía no está rediseñado — no se
+    // endurece por ahora (ver discusión 2026-07-28).
+    if (tab === 'sd_cobros' || tab === 'sd_por_cobrar' || tab === 'entregados') {
+      // 'sd_por_cobrar'/'entregados' se conservan como alias de compatibilidad
+      // — los enlaces existentes en /confirmacion y /despachados apuntan a
+      // '?tab=entregados'. El parámetro payment explícito es la forma nueva.
+      const paymentParam = searchParams.get('payment')
+      const payment: 'all' | 'pending' | 'paid' =
+        tab === 'sd_por_cobrar' || paymentParam === 'pending' ? 'pending' :
+        tab === 'entregados'    || paymentParam === 'paid'    ? 'paid'    :
+        'all'
+      return await handleSdCobros(supabase, payment)
+    }
 
     const filter = searchParams.get('filter') // 'hoy' | 'ayer' | 'recuperados'
     const from   = searchParams.get('from')

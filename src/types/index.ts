@@ -210,6 +210,9 @@ export interface Order {
   payment_status?: PaymentStatus
   paid_at?: string | null
   paid_by?: string | null
+  // Resuelto server-side (join a profiles) solo en superficies que lo piden
+  // explícitamente — ej. GET /api/confirmacion/pedidos?filter=santo_domingo.
+  paid_by_name?: string | null
   // Motor de Novedades — clasificación comunicacional (migración 037)
   novelty_type?: NoveltyType | null
   delivery_resolution?: DeliveryResolution | null

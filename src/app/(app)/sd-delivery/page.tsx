@@ -1279,10 +1279,26 @@ export default function SdDeliveryPage() {
   async function markDelivered(orderId: string) {
     setLoadingRow(prev => ({ ...prev, [orderId]: true }))
     try {
-      const res = await fetch(`/api/sd-delivery/orders/${orderId}/mark-delivered`, { method: 'POST' })
+      const res  = await fetch(`/api/sd-delivery/orders/${orderId}/mark-delivered`, { method: 'POST' })
+      const body = await res.json().catch(() => null) as { payment_error?: string | null } | null
       if (!res.ok) { showToast('Error al marcar entregado', false); return }
       setActionMap(prev => ({ ...prev, [orderId]: 'delivered' }))
-      showToast('✓ Pedido entregado registrado', true)
+      // La entrega SIEMPRE queda registrada aquí — el pago se intenta en el
+      // mismo request (ver mark-delivered/route.ts) pero puede fallar por
+      // separado. No ocultar esa divergencia: si payment_error viene con
+      // valor, la entrega es real pero el pago local no se registró.
+      if (body?.payment_error) {
+        // El pedido ya queda en estado "Entregado" en esta pantalla (sin
+        // botones de acción — ver computeDisplayState/isDelivered), así que
+        // NO se puede reintentar el pago desde aquí. El pedido sigue visible
+        // en /confirmados → "SD · Cobros" → Pendientes (payment_status sigue
+        // 'pending'), donde un admin puede completar el pago con el mismo
+        // botón "Pagado" — mark-paid/route.ts detecta que ya está entregado
+        // y solo reintenta el paso de pago, sin duplicar el registro de entrega.
+        showToast('✓ Entregado registrado — el pago no se registró. Un admin puede completarlo desde Confirmados → SD · Cobros.', false)
+      } else {
+        showToast('✓ Pedido entregado y pagado registrado', true)
+      }
       fetch('/api/sd-delivery/performance').then(r => r.json()).then(setPerf).catch(() => null)
     } catch {
       showToast('Error de red', false)
