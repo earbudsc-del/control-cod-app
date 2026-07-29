@@ -466,7 +466,7 @@ function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCovera
       {/* Fecha de pago + quién lo marcó — solo cuando el badge financiero es "Pagado" */}
       {confBadge.label === 'Pagado' && (
         <p className="text-[11px] text-gray-500">
-          {order.paid_at ? formatEventDate(order.paid_at) : '—'}
+          {order.paid_at ? formatEventDate(order.paid_at) : 'Fecha de pago no disponible'}
           <span className="mx-1 text-gray-300">·</span>
           Por: {order.paid_by_name ?? 'Usuario no disponible'}
         </p>
@@ -1684,7 +1684,7 @@ export default function ConfirmacionPage() {
                               </span>
                               {confBadge.label === 'Pagado' && (
                                 <p className="text-[10px] text-gray-500 mt-0.5 whitespace-nowrap">
-                                  {order.paid_at ? formatEventDate(order.paid_at) : '—'}
+                                  {order.paid_at ? formatEventDate(order.paid_at) : 'Fecha de pago no disponible'}
                                   <br />Por: {order.paid_by_name ?? 'Usuario no disponible'}
                                 </p>
                               )}

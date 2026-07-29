@@ -9,7 +9,7 @@ import {
   CheckCircle2, RefreshCw, Package, Search,
   Calendar, Truck, MapPin, AlertTriangle,
   ChevronLeft, ChevronRight, ClipboardList, ShoppingCart,
-  Navigation, MessageCircle, Phone, ExternalLink, PackageCheck,
+  Navigation, MessageCircle, Phone, ExternalLink, PackageCheck, Clock,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
@@ -128,6 +128,10 @@ export default function ConfirmadosPage() {
   const [dispatching, setDispatching]       = useState<Record<string, boolean>>({})
   const [dispatchErrors, setDispatchErrors] = useState<Record<string, string>>({})
   const [toast, setToast]                   = useState<{ msg: string; ok: boolean } | null>(null)
+  // Incrementar fuerza a SdCobrosSummary a refetchear (ver onPaidSuccess de
+  // SdCobrosTab) — el resumen es independiente del listado y no se entera
+  // solo, así que se le avisa explícitamente tras un pago exitoso.
+  const [summaryRefreshKey, setSummaryRefreshKey] = useState(0)
 
   function showToast(msg: string, ok: boolean) {
     setToast({ msg, ok })
@@ -454,13 +458,17 @@ export default function ConfirmadosPage() {
       </div>
 
       {(mainTab === 'sd_por_cobrar' || mainTab === 'entregados') && (
-        <SdCobrosTab
-          initialFilter={mainTab === 'entregados' ? 'pagado' : 'pendiente'}
-          onPaidSuccess={() => {
-            showToast('✓ Pedido marcado como pagado', true)
-            fetchData()
-          }}
-        />
+        <>
+          <SdCobrosSummary refreshKey={summaryRefreshKey} />
+          <SdCobrosTab
+            initialFilter={mainTab === 'entregados' ? 'pagado' : 'pendiente'}
+            onPaidSuccess={() => {
+              showToast('✓ Pedido marcado como pagado', true)
+              fetchData()
+              setSummaryRefreshKey(k => k + 1)
+            }}
+          />
+        </>
       )}
 
       {mainTab === 'confirmados' && (
@@ -978,6 +986,112 @@ export default function ConfirmadosPage() {
   )
 }
 
+// ── Resumen: Pendientes / Pagados hoy / Pagados este mes ─────────────────────
+//
+// GET /api/confirmados?tab=sd_cobros_summary — endpoint agregado, separado
+// del listado (nunca usa sus 500 filas ni sus datos ya cargados para sumar).
+// Las tarjetas son fijas: NO cambian con los chips Todos/Pendientes/Pagados
+// del listado de abajo — representan el resumen global del área SD, según
+// lo pedido explícitamente. Se refetchea sola cada 3 min (mismo cadence que
+// el listado) y cuando `refreshKey` cambia (tras un pago exitoso).
+
+interface SdCobrosSummaryBucket {
+  count:  number
+  amount: number
+}
+
+interface SdCobrosSummaryData {
+  pending:    SdCobrosSummaryBucket
+  paid_today: SdCobrosSummaryBucket
+  paid_month: SdCobrosSummaryBucket
+}
+
+function SdCobrosSummary({ refreshKey }: { refreshKey: number }) {
+  const [summary, setSummary] = useState<SdCobrosSummaryData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError]     = useState(false)
+
+  const fetchSummary = useCallback(async () => {
+    setLoading(true)
+    setError(false)
+    try {
+      const res = await fetch('/api/confirmados?tab=sd_cobros_summary')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = await res.json() as SdCobrosSummaryData
+      setSummary(json)
+    } catch (err) {
+      console.error('[confirmados/SdCobrosSummary fetch]', err)
+      setError(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchSummary() }, [fetchSummary, refreshKey])
+
+  useEffect(() => {
+    const interval = setInterval(fetchSummary, 3 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [fetchSummary])
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-between gap-3 p-4 rounded-xl border-2 border-red-200 bg-red-50 text-red-700">
+        <div className="flex items-center gap-2">
+          <AlertTriangle className="w-5 h-5 shrink-0" />
+          <p className="text-sm font-semibold">No se pudo cargar el resumen de cobros.</p>
+        </div>
+        <button
+          onClick={fetchSummary}
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg
+                     bg-red-600 hover:bg-red-700 text-white shrink-0"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />Reintentar
+        </button>
+      </div>
+    )
+  }
+
+  const CARDS: {
+    key: keyof SdCobrosSummaryData
+    label: string
+    Icon: typeof Clock
+    cls: string
+  }[] = [
+    { key: 'pending',    label: 'Pendientes por cobrar', Icon: Clock,        cls: 'border-amber-200 bg-amber-50 text-amber-700' },
+    { key: 'paid_today', label: 'Pagados hoy',           Icon: CheckCircle2, cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
+    { key: 'paid_month', label: 'Pagados este mes',      Icon: Calendar,     cls: 'border-blue-200 bg-blue-50 text-blue-700' },
+  ]
+
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      {CARDS.map(({ key, label, Icon, cls }) => {
+        const bucket = summary?.[key]
+        return (
+          <div key={key} className={`flex items-center gap-3 p-4 rounded-xl border-2 ${cls}`}>
+            <Icon className="w-7 h-7 opacity-30 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold">{label}</p>
+              {loading ? (
+                <p className="text-xs font-medium opacity-70 mt-1">Cargando…</p>
+              ) : (
+                <>
+                  <p className="text-2xl font-black tabular-nums leading-tight mt-0.5">
+                    {formatCurrency(bucket?.amount ?? 0)}
+                  </p>
+                  <p className="text-xs font-semibold opacity-80">
+                    {bucket?.count ?? 0} pedido{(bucket?.count ?? 0) === 1 ? '' : 's'}
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Tab: SD · Cobros (Todos / Pendientes / Pagados) ──────────────────────────
 //
 // Una única consulta backend por selección — GET /api/confirmados?tab=
@@ -1001,7 +1115,7 @@ function PaymentBadge({ row }: { row: SdCobroOrder }) {
           Pagado
         </span>
         <span className="text-[11px] text-gray-500 whitespace-nowrap">
-          {row.paid_at ? formatEventDate(row.paid_at) : '—'}
+          {row.paid_at ? formatEventDate(row.paid_at) : 'Fecha de pago no disponible'}
         </span>
         <span className="text-[11px] text-gray-500 whitespace-nowrap">
           Por: {row.paid_by_name ?? 'Usuario no disponible'}

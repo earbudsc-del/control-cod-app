@@ -16,6 +16,16 @@ function rdDayBounds(daysAgo = 0): { start: string; end: string } {
   return { start: startUTC.toISOString(), end: endUTC.toISOString() }
 }
 
+// Medianoche RD del día 1 del mes actual, expresada en UTC (04:00 UTC ese día).
+function rdMonthStartISO(): string {
+  const dateStrRD = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Santo_Domingo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date())
+  const [y, m] = dateStrRD.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, 1, 4, 0, 0, 0)).toISOString()
+}
+
 const SD_COBROS_FIELDS =
   'id, order_number, shopify_order_id, customer_name, customer_phone, customer_address, ' +
   'city, province, product_summary, cod_amount, normalized_status, payment_status, ' +
@@ -129,6 +139,121 @@ async function handleSdCobros(
   return NextResponse.json({ data: enriched, count: enriched.length })
 }
 
+interface SdCobroIdCandidateRow {
+  id:               string
+  payment_status:   string
+  city:             string | null
+  province:         string | null
+  customer_address: string | null
+}
+
+const SD_COBROS_SUMMARY_PAGE_SIZE = 1000
+
+// Clasifica el universo SD de "por cobrar" (pending, todo el histórico
+// activo) y "pagado este mes" (paid, acotado a paid_at >= inicio de mes —
+// es lo único que necesitan las 3 tarjetas) en dos listas de IDs, usando
+// SIEMPRE isSantoDomingoOrder() — la única fuente de verdad geográfica del
+// proyecto (src/lib/alert-helpers.ts) — nunca una aproximación SQL.
+//
+// Paginación completa vía .range(), SIN límite artificial: sigue pidiendo
+// páginas hasta que una devuelve menos filas que SD_COBROS_SUMMARY_PAGE_SIZE.
+// Solo se traen id + payment_status + los 3 campos de texto que
+// isSantoDomingoOrder() necesita — nunca cod_amount ni el resto del pedido:
+// la suma/conteo real ocurre en Postgres vía el RPC get_sd_cobros_summary
+// (migración 050), no aquí.
+async function fetchSdCandidateIds(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  monthStartRD: string,
+): Promise<{ pendingIds: string[]; paidIds: string[] }> {
+  const pendingIds: string[] = []
+  const paidIds: string[] = []
+
+  let from = 0
+  for (;;) {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('id, payment_status, city, province, customer_address')
+      .is('tracking_number', null)
+      .in('normalized_status', ['en_reparto', 'delivered'])
+      .is('archived_at', null)
+      .eq('is_test', false)
+      // pending: todo el histórico activo. paid: solo necesitamos desde el
+      // inicio del mes (es lo único que alimenta las tarjetas hoy/mes) —
+      // evita que este fetch crezca sin límite con los años de operación.
+      .or(`payment_status.eq.pending,and(payment_status.eq.paid,paid_at.gte.${monthStartRD})`)
+      .range(from, from + SD_COBROS_SUMMARY_PAGE_SIZE - 1)
+
+    if (error) throw error
+    const page = (data ?? []) as unknown as SdCobroIdCandidateRow[]
+
+    for (const o of page) {
+      if (!isSantoDomingoOrder(o.city, o.province, o.customer_address)) continue
+      if (o.payment_status === 'pending') pendingIds.push(o.id)
+      else if (o.payment_status === 'paid') paidIds.push(o.id)
+    }
+
+    if (page.length < SD_COBROS_SUMMARY_PAGE_SIZE) break
+    from += SD_COBROS_SUMMARY_PAGE_SIZE
+  }
+
+  return { pendingIds, paidIds }
+}
+
+// GET /api/confirmados?tab=sd_cobros_summary
+//
+// Resumen agregado de cobros SD (pendientes / pagados hoy / pagados este
+// mes) — endpoint separado del listado paginado (handleSdCobros), como pide
+// la arquitectura: el listado nunca se usa para calcular totales.
+//
+// Diseño híbrido, justificado en el comentario de la migración 050
+// (supabase/migrations/050_get_sd_cobros_summary_rpc.sql):
+//   1. TypeScript clasifica qué pedidos son SD — vía isSantoDomingoOrder(),
+//      la única fuente de verdad geográfica del proyecto. Esa lógica tiene
+//      una rama de desambiguación por provincia (fix real 2026-07-28 para
+//      el caso Villa Hermosa/La Romana) que NO se duplica en SQL — hacerlo
+//      arriesgaría una segunda copia de una regla de negocio que ya
+//      demostró producir falsos positivos si se simplifica.
+//   2. Postgres hace la agregación real — COUNT/SUM/COALESCE vía el RPC
+//      get_sd_cobros_summary, sobre los IDs ya clasificados. Sin límite de
+//      filas en el COUNT/SUM: el RPC agrega sobre TODO lo que se le pase.
+//
+// Universo IDÉNTICO al de handleSdCobros (mismo filtro base) para que estas
+// cifras JAMÁS diverjan de lo que el usuario ve al aplicar los chips
+// Todos/Pendientes/Pagados en el listado de abajo.
+//
+// Fuente de verdad de fecha de pago: EXCLUSIVAMENTE orders.paid_at. Un
+// pedido payment_status='paid' con paid_at NULL nunca entra a paidIds (el
+// fetch de candidatos ya exige paid_at >= inicio de mes) — no se atribuye
+// falsamente a "hoy" ni a "este mes", aunque sí sigue apareciendo en el
+// filtro "Pagados" del listado (handleSdCobros no filtra por fecha).
+async function handleSdCobrosSummary(supabase: Awaited<ReturnType<typeof createClient>>) {
+  const monthStartRD = rdMonthStartISO()
+  const todayStartRD = rdDayBounds(0).start
+
+  const { pendingIds, paidIds } = await fetchSdCandidateIds(supabase, monthStartRD)
+
+  const { data, error } = await supabase.rpc('get_sd_cobros_summary', {
+    p_pending_ids: pendingIds,
+    p_paid_ids:    paidIds,
+    p_today_start: todayStartRD,
+    p_month_start: monthStartRD,
+  }).single()
+
+  if (error) throw error
+
+  const row = data as {
+    pending_count: number; pending_amount: number
+    paid_today_count: number; paid_today_amount: number
+    paid_month_count: number; paid_month_amount: number
+  }
+
+  return NextResponse.json({
+    pending:    { count: row.pending_count,    amount: row.pending_amount },
+    paid_today: { count: row.paid_today_count, amount: row.paid_today_amount },
+    paid_month: { count: row.paid_month_count, amount: row.paid_month_amount },
+  })
+}
+
 export async function GET(request: Request) {
   try {
     const supabase = await createClient()
@@ -145,7 +270,12 @@ export async function GET(request: Request) {
     if (!canView) return NextResponse.json({ error: 'Sin permisos para ver confirmados' }, { status: 403 })
 
     const { searchParams } = new URL(request.url)
-    const tab = searchParams.get('tab') // 'sd_cobros' | 'sd_por_cobrar' | 'entregados' | null (vista default)
+    const tab = searchParams.get('tab') // 'sd_cobros' | 'sd_cobros_summary' | 'sd_por_cobrar' | 'entregados' | null (vista default)
+
+    // Resumen agregado — endpoint separado del listado (ver handleSdCobrosSummary).
+    if (tab === 'sd_cobros_summary') {
+      return await handleSdCobrosSummary(supabase)
+    }
 
     // SD · Cobros — visible para cualquier rol que ya pasó el gate de página
     // (admin/dispatch_agent), igual que el resto de este endpoint. El modelo
