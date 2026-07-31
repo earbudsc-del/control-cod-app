@@ -11,10 +11,13 @@ import { NextResponse } from 'next/server'
  *   ?page=N                      — página (default 1)
  *   ?limit=N                     — registros por página (default 50, max 100)
  *   ?search=X                    — búsqueda por nombre, teléfono, #orden, tracking
- *   ?from=ISO                    — filtro desde fecha (shopify_created_at >= from) — ignorado si filter != ''
- *   ?to=ISO                      — filtro hasta fecha (shopify_created_at < to)   — ignorado si filter != ''
- *   ?filter=santo_domingo        — solo pedidos de SD/DN/Zona local (todas las fechas)
- *   ?filter=fuera_de_cobertura   — solo pedidos con confirmation_status='no_coverage' (todas las fechas)
+ *   ?from=ISO                    — filtro desde fecha, se combina (AND) con cualquier filter/status/
+ *                                  payment activo, incluyendo santo_domingo. Columna: shopify_created_at,
+ *                                  EXCEPTO con filter=santo_domingo&payment=paid, donde es paid_at
+ *                                  (fecha real del cobro — nunca la fecha de creación del pedido)
+ *   ?to=ISO                      — filtro hasta fecha — misma regla de columna que from
+ *   ?filter=santo_domingo        — solo pedidos de SD/DN/Zona local
+ *   ?filter=fuera_de_cobertura   — solo pedidos con confirmation_status='no_coverage'
  *   ?payment=pending|paid        — solo junto a filter=santo_domingo: filtra por
  *                                  orders.payment_status (migración 046). Sin este
  *                                  param (o payment=all) no se aplica ningún filtro
@@ -71,11 +74,18 @@ export async function GET(request: Request) {
       )
     }
 
-    // ── Filtro de fecha (solo aplica a la vista general, no a SD/FCD) ─────────
-    if (!filter) {
-      if (from) query = query.gte('shopify_created_at', from)
-      if (to)   query = query.lt('shopify_created_at', to)
-    }
+    // ── Filtro de fecha — se aplica siempre que venga, sin importar filter/
+    // status/payment. Todos los filtros activos deben intersectarse (AND),
+    // nunca reemplazarse entre sí.
+    //
+    // Columna: con payment=paid (única superficie con payment_status/paid_at,
+    // ver SD_FILTER más abajo), el período debe reflejar CUÁNDO SE COBRÓ, no
+    // cuándo se creó el pedido — un pedido creado hace semanas y cobrado hoy
+    // debe aparecer en Pagados + Hoy. Cualquier otro caso (pending/all/sin
+    // filtro/fuera_de_cobertura) sigue usando shopify_created_at, sin cambios.
+    const dateColumn = (filter === 'santo_domingo' && payment === 'paid') ? 'paid_at' : 'shopify_created_at'
+    if (from) query = query.gte(dateColumn, from)
+    if (to)   query = query.lt(dateColumn, to)
 
     // ── Filtros especiales ────────────────────────────────────────────────────
     if (filter === 'santo_domingo') {

@@ -730,13 +730,17 @@ export default function ConfirmacionPage() {
   }, [])
 
   // ── Fetch: Santo Domingo (server-paginated) ─────────────────────────────────
-  const fetchSD = useCallback(async (page: number, sq: string, sf: ConfirmStatusFilter = '', pf: SdPaymentFilter = 'todos') => {
+  const fetchSD = useCallback(async (
+    page: number, sq: string, sf: ConfirmStatusFilter = '', pf: SdPaymentFilter = 'todos',
+    df: DateFilter | null = null, dFrom = '', dTo = '', dApplied = false,
+  ) => {
     setSdLoading(true)
     try {
       const searchQs  = sq ? `&search=${encodeURIComponent(sq)}` : ''
       const statusQs  = sf ? `&status=${encodeURIComponent(sf)}` : ''
       const paymentQs = pf === 'pendiente' ? '&payment=pending' : pf === 'pagado' ? '&payment=paid' : ''
-      const res = await fetch(`/api/confirmacion/pedidos?filter=santo_domingo&page=${page}&limit=50${searchQs}${statusQs}${paymentQs}`)
+      const dateQs    = buildDateParams(df, dFrom, dTo, dApplied)
+      const res = await fetch(`/api/confirmacion/pedidos?filter=santo_domingo&page=${page}&limit=50${searchQs}${statusQs}${paymentQs}${dateQs}`)
         .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
       setSdData(res.data   ?? [])
       setSdTotal(res.total ?? 0)
@@ -748,12 +752,16 @@ export default function ConfirmacionPage() {
   }, [])
 
   // ── Fetch: Fuera de cobertura (server-paginated) ─────────────────────────────
-  const fetchFCD = useCallback(async (page: number, sq: string, sf: ConfirmStatusFilter = '') => {
+  const fetchFCD = useCallback(async (
+    page: number, sq: string, sf: ConfirmStatusFilter = '',
+    df: DateFilter | null = null, dFrom = '', dTo = '', dApplied = false,
+  ) => {
     setFcdLoading(true)
     try {
       const searchQs = sq ? `&search=${encodeURIComponent(sq)}` : ''
       const statusQs = sf ? `&status=${encodeURIComponent(sf)}` : ''
-      const res = await fetch(`/api/confirmacion/pedidos?filter=fuera_de_cobertura&page=${page}&limit=50${searchQs}${statusQs}`)
+      const dateQs   = buildDateParams(df, dFrom, dTo, dApplied)
+      const res = await fetch(`/api/confirmacion/pedidos?filter=fuera_de_cobertura&page=${page}&limit=50${searchQs}${statusQs}${dateQs}`)
         .then(r => r.json() as Promise<{ data: Order[]; total: number; page: number; pages: number }>)
       setFcdData(res.data   ?? [])
       setFcdTotal(res.total ?? 0)
@@ -773,8 +781,10 @@ export default function ConfirmacionPage() {
     if (viewMode === 'reintentar')           fetchQueue()
     if (viewMode === 'confirmados_sin_guia') fetchConfirmados()
     if (viewMode === 'despachados')          fetchDespachados()
-    if (viewMode === 'santo_domingo')        fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter)
-    if (viewMode === 'fuera_de_cobertura')   fetchFCD(fcdPage, searchQuery, statusFilter)
+    if (viewMode === 'santo_domingo')
+      fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter, dateFilter, dateFrom, dateTo, dateApplied)
+    if (viewMode === 'fuera_de_cobertura')
+      fetchFCD(fcdPage, searchQuery, statusFilter, dateFilter, dateFrom, dateTo, dateApplied)
   }, [viewMode, pedidosPage, sdPage, fcdPage, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter,
       sdPaymentFilter, fetchStats, fetchPedidos, fetchQueue, fetchConfirmados, fetchDespachados, fetchSD, fetchFCD])
 
@@ -800,8 +810,14 @@ export default function ConfirmacionPage() {
     if (viewMode === 'reintentar')                          fetchQueue()
     if (viewMode === 'confirmados_sin_guia' && !confirmadosLoaded) fetchConfirmados()
     if (viewMode === 'despachados'          && !despachadosLoaded) fetchDespachados()
-    if (viewMode === 'santo_domingo')      { setSdPage(1);  fetchSD(1, searchQuery, statusFilter, sdPaymentFilter)  }
-    if (viewMode === 'fuera_de_cobertura') { setFcdPage(1); fetchFCD(1, searchQuery, statusFilter) }
+    if (viewMode === 'santo_domingo') {
+      setSdPage(1)
+      fetchSD(1, searchQuery, statusFilter, sdPaymentFilter, dateFilter, dateFrom, dateTo, dateApplied)
+    }
+    if (viewMode === 'fuera_de_cobertura') {
+      setFcdPage(1)
+      fetchFCD(1, searchQuery, statusFilter, dateFilter, dateFrom, dateTo, dateApplied)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode])
 
@@ -820,31 +836,36 @@ export default function ConfirmacionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pedidosPage])
 
-  // ── Búsqueda/estado/pago en tab Santo Domingo ───────────────────────────────
+  // ── Búsqueda/estado/pago/fecha en tab Santo Domingo — todos los filtros    ──
+  // activos deben combinarse (AND), no reemplazarse: cualquier cambio de
+  // búsqueda, estado, pago o período dispara un refetch con TODOS los
+  // filtros vigentes (ver buildDateParams + fetchSD).
   useEffect(() => {
     if (viewMode !== 'santo_domingo') return
     setSdPage(1)
-    fetchSD(1, searchQuery, statusFilter, sdPaymentFilter)
+    fetchSD(1, searchQuery, statusFilter, sdPaymentFilter, dateFilter, dateFrom, dateTo, dateApplied)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, statusFilter, sdPaymentFilter])
+  }, [searchQuery, statusFilter, sdPaymentFilter, dateFilter, dateApplied])
 
   // ── Cambio de página en Santo Domingo ────────────────────────────────────────
   useEffect(() => {
-    if (viewMode === 'santo_domingo') fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter)
+    if (viewMode === 'santo_domingo')
+      fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter, dateFilter, dateFrom, dateTo, dateApplied)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sdPage])
 
-  // ── Búsqueda/estado en tab Fuera de cobertura ────────────────────────────────
+  // ── Búsqueda/estado/fecha en tab Fuera de cobertura ─────────────────────────
   useEffect(() => {
     if (viewMode !== 'fuera_de_cobertura') return
     setFcdPage(1)
-    fetchFCD(1, searchQuery, statusFilter)
+    fetchFCD(1, searchQuery, statusFilter, dateFilter, dateFrom, dateTo, dateApplied)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, statusFilter])
+  }, [searchQuery, statusFilter, dateFilter, dateApplied])
 
   // ── Cambio de página en Fuera de cobertura ───────────────────────────────────
   useEffect(() => {
-    if (viewMode === 'fuera_de_cobertura') fetchFCD(fcdPage, searchQuery, statusFilter)
+    if (viewMode === 'fuera_de_cobertura')
+      fetchFCD(fcdPage, searchQuery, statusFilter, dateFilter, dateFrom, dateTo, dateApplied)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fcdPage])
 
@@ -1395,9 +1416,9 @@ export default function ConfirmacionPage() {
                 : viewMode === 'confirmados_sin_guia'
                   ? 'Confirmados sin guía · Pendiente de despacho (solo lectura)'
                   : viewMode === 'santo_domingo'
-                    ? 'Santo Domingo · Zona SD/DN · Todas las fechas · 50 por página'
+                    ? `Santo Domingo · Zona SD/DN${dateFilter ? '' : ' · Todas las fechas'} · 50 por página`
                     : viewMode === 'fuera_de_cobertura'
-                      ? 'Fuera de cobertura · Sin cobertura · Todas las fechas · 50 por página'
+                      ? `Fuera de cobertura · Sin cobertura${dateFilter ? '' : ' · Todas las fechas'} · 50 por página`
                       : 'Despachados · Con guía en logística (solo lectura)'}
           </p>
         </div>
