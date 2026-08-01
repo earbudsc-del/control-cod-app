@@ -47,6 +47,7 @@ export type ActionType =
   | 'customer_declined'
   | 'local_dispatched'
   | 'paid'
+  | 'reopened'
 export type NoveltyType         = 'no_contact' | 'contacted'
 export type DeliveryResolution  = 'pending' | 'rescheduled' | 'delivered' | 'returned'
 export type InvalidReason =
@@ -391,6 +392,7 @@ export const ACTION_LABELS: Record<ActionType, string> = {
   customer_declined:  'Cliente no desea el pedido',
   local_dispatched:   'Despachado localmente por mensajero SD',
   paid:               'Registró pago (COD cobrado)',
+  reopened:           'Reabrió el pedido (confirmación revertida)',
 }
 
 export type TaskType = 'follow_up' | 'novedad' | 'confirmation' | 'recovery'

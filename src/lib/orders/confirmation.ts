@@ -11,7 +11,7 @@ import { isSantoDomingoOrder } from '@/lib/alert-helpers'
 // sin importar qué canal confirmó (agente, mensajero, webhook o, a futuro,
 // Génesis) — todos pasan por esta función.
 
-export type ConfirmAction = 'confirmed' | 'no_answer' | 'wrong_number' | 'cancelled' | 'no_coverage' | 'rescheduled'
+export type ConfirmAction = 'confirmed' | 'no_answer' | 'wrong_number' | 'cancelled' | 'no_coverage' | 'rescheduled' | 'reopened'
 export type ConfirmMethod = 'call' | 'whatsapp' | 'other'
 
 type SupabaseClient = Awaited<ReturnType<typeof createClient>>
@@ -45,6 +45,8 @@ export interface ApplyConfirmationActionParams {
   // y bloquea pedidos ya delivered/returned. false (default) preserva el
   // comportamiento histórico del endpoint manual — el agente puede sobreescribir.
   guardAutomated?: boolean
+  // Motivo obligatorio — solo se usa (y se exige) para action='reopened'.
+  reason?: string
 }
 
 export type ApplyConfirmationActionResult =
@@ -55,7 +57,16 @@ export type ApplyConfirmationActionResult =
       confirmation_confidence: string
       auto_dispatched:         boolean
     }
-  | { ok: false; reason: 'not_found' | 'not_pending' | 'terminal_status' | 'db_error' }
+  | {
+      ok: false
+      reason:
+        | 'not_found' | 'not_pending' | 'terminal_status' | 'db_error'
+        // Guardas específicas de action='reopened' (ver applyReopen más abajo).
+        // 'forbidden' y 'reason_too_long' se revalidan dentro del RPC — no
+        // solo aquí — ver reopen_confirmed_order() en la migración 052.
+        | 'reason_required' | 'reason_too_long' | 'forbidden'
+        | 'not_confirmed' | 'has_tracking' | 'already_paid' | 'dispatched' | 'conflict'
+    }
 
 export async function applyConfirmationAction({
   supabase,
@@ -64,6 +75,7 @@ export async function applyConfirmationAction({
   method,
   userId = null,
   guardAutomated = false,
+  reason,
 }: ApplyConfirmationActionParams): Promise<ApplyConfirmationActionResult> {
   const { data: order } = await supabase
     .from('orders')
@@ -72,6 +84,28 @@ export async function applyConfirmationAction({
     .single()
 
   if (!order) return { ok: false, reason: 'not_found' }
+
+  // 'reopened' es una reversión administrativa, no un intento de contacto —
+  // vive en su propia rama, ANTES de la lógica genérica de intentos/confianza
+  // de abajo (que sí aplica a los 6 flujos de "intento de confirmación").
+  // Nunca debe incrementar confirmation_attempts ni tocar
+  // confirmation_method/confidence: no es un intento, es deshacer uno previo.
+  //
+  // Toda la lógica de guardas + el UPDATE de orders + el INSERT de
+  // agent_actions ocurren dentro de reopen_confirmed_order() (migración 052)
+  // como una única transacción de Postgres — nunca como dos escrituras
+  // HTTP/PostgREST separadas. Ver esa migración para el detalle de
+  // concurrencia (SELECT ... FOR UPDATE), la distinción auto-despacho vs
+  // despacho local manual, y la revalidación de identidad/rol/tienda.
+  //
+  // userId NO se reenvía al RPC: la identidad del actor se deriva
+  // exclusivamente de auth.uid() dentro de la función — nunca de un
+  // parámetro del cliente (ver migración 052, sección "Seguridad de
+  // identidad y RBAC"). Pasarlo aquí sería exactamente el tipo de
+  // confianza ciega que esa revisión eliminó.
+  if (action === 'reopened') {
+    return applyReopen(supabase, orderId, reason)
+  }
 
   if (guardAutomated) {
     if (order.confirmation_status !== 'pending') return { ok: false, reason: 'not_pending' }
@@ -161,4 +195,87 @@ export async function applyConfirmationAction({
     confirmation_confidence: confidence,
     auto_dispatched:         isSdAutoDispatch,
   }
+}
+
+// Únicos outcomes que el RPC puede devolver además de 'ok' — deben
+// mantenerse en sincronía exacta con los RETURN de
+// supabase/migrations/052_reopen_confirmed_order_rpc.sql.
+function isKnownReopenFailure(
+  value: string,
+): value is
+  | 'not_found' | 'not_confirmed' | 'has_tracking' | 'already_paid' | 'terminal_status' | 'dispatched'
+  | 'forbidden' | 'reason_required' | 'reason_too_long' {
+  return (
+    value === 'not_found' || value === 'not_confirmed' || value === 'has_tracking' ||
+    value === 'already_paid' || value === 'terminal_status' || value === 'dispatched' ||
+    value === 'forbidden' || value === 'reason_required' || value === 'reason_too_long'
+  )
+}
+
+// "Reabrir pedido" — Fase 1 de la auditoría de deshacer-confirmación
+// (2026-07-31). Reversión administrativa de una confirmación hecha por
+// error: el pedido vuelve al flujo comercial (confirmation_status='pending'),
+// nunca se borra su historial. Vive dentro de este archivo — no es un motor
+// nuevo — para respetar el Principio 4 de docs/ARCHITECTURE_RUTA_COD_V1.md:
+// applyConfirmationAction() sigue siendo el único punto de entrada de la
+// aplicación autorizado a mover confirmation_status.
+//
+// La escritura real (revalidar guardas + UPDATE orders + INSERT
+// agent_actions) ocurre dentro de reopen_confirmed_order() — una sola
+// invocación de función de Postgres, es decir una única transacción real.
+// Esto es deliberado, no un capricho: dos llamadas HTTP/PostgREST separadas
+// (UPDATE y luego INSERT) permitían un fallo parcial real — el UPDATE podía
+// tener éxito y el INSERT fallar después, dejando el pedido reabierto sin
+// ningún registro de auditoría. Con el RPC, si el INSERT falla, Postgres
+// revierte también el UPDATE de la misma invocación — no hay estado
+// intermedio posible.
+async function applyReopen(
+  supabase: SupabaseClient,
+  orderId: string,
+  reason: string | undefined,
+): Promise<ApplyConfirmationActionResult> {
+  const trimmedReason = reason?.trim() ?? ''
+  // Atajo de UX: evita un round-trip de red para el caso más común (textarea
+  // vacío). No es la validación que realmente protege la integridad de los
+  // datos — el RPC vuelve a exigir esto mismo (motivo no vacío + longitud
+  // máxima) de forma autoritativa, sin confiar en que esta rama se haya
+  // ejecutado (ver migración 052). Tampoco se valida userId aquí: la
+  // identidad y el rol del actor se derivan de auth.uid() DENTRO del RPC,
+  // nunca de un parámetro — no hay nada que este archivo pueda "confiar"
+  // sobre quién llama más allá de invocar el RPC y dejar que él decida.
+  if (!trimmedReason) return { ok: false, reason: 'reason_required' }
+
+  const { data, error } = await supabase.rpc('reopen_confirmed_order', {
+    p_order_id: orderId,
+    p_reason:   trimmedReason,
+  })
+
+  if (error) {
+    console.error('[confirmation] reopen RPC error — order:', orderId, '| code:', error.code, '| message:', error.message)
+    return { ok: false, reason: 'db_error' }
+  }
+
+  const outcome = data as string
+
+  if (outcome === 'ok') {
+    return {
+      ok: true,
+      // 'reopened' nunca incrementa confirmation_attempts (no es un
+      // intento de contacto) — no hay un valor significativo que devolver
+      // aquí más allá de un placeholder; el caller (route.ts) no depende
+      // de este campo para 'reopened'.
+      confirmation_attempts:   0,
+      confirmation_status:     'pending',
+      confirmation_confidence: 'n/a',
+      auto_dispatched:         false,
+    }
+  }
+
+  if (isKnownReopenFailure(outcome)) return { ok: false, reason: outcome }
+
+  // Cualquier valor no reconocido del RPC (nunca debería ocurrir si esta
+  // función y la migración 052 están sincronizadas) se trata como conflicto
+  // defensivo — nunca como éxito silencioso.
+  console.error('[confirmation] reopen RPC devolvió un outcome inesperado:', outcome, '— order:', orderId)
+  return { ok: false, reason: 'conflict' }
 }

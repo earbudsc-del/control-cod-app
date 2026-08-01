@@ -14,8 +14,10 @@ import {
   CalendarDays, ShoppingBag, Package, ListFilter, PackageCheck,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
+import { ConfirmActionModal } from '@/components/shared/confirm-action-modal'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 import { MarkPaidButton } from '@/components/orders/mark-paid-button'
+import { createClient as createBrowserClient } from '@/lib/supabase/client'
 import { SelectionProvider, SelectionSync } from '@/components/selection/SelectionProvider'
 import { SelectionCheckbox } from '@/components/selection/SelectionCheckbox'
 import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderCheckbox'
@@ -539,7 +541,7 @@ function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCovera
 
 // ── ReadOnlyCard (mobile — Confirmados sin guía / Despachados) ─────────────────
 
-function ReadOnlyCard({ order }: { order: Order }) {
+function ReadOnlyCard({ order, onReopen }: { order: Order; onReopen?: (order: Order) => void }) {
   const confBadge = getConfirmBadge(order)
   const logBadge  = getLogisticsBadge(order)
   return (
@@ -579,6 +581,15 @@ function ReadOnlyCard({ order }: { order: Order }) {
           {logBadge.label}
         </span>
       </div>
+      {onReopen && (
+        <button
+          onClick={() => onReopen(order)}
+          className="flex items-center justify-center gap-1.5 w-full min-h-[34px]
+                     text-xs font-semibold text-amber-700 border border-amber-200
+                     rounded-lg hover:bg-amber-50 transition-colors">
+          <RotateCcw className="w-3.5 h-3.5" />Reabrir pedido
+        </button>
+      )}
       <Link href={`/orders/${order.id}`}
         className="flex items-center justify-center gap-1.5 w-full min-h-[34px]
                    text-xs font-medium text-indigo-600 hover:text-indigo-800
@@ -604,6 +615,51 @@ export default function ConfirmacionPage() {
   const [perf, setPerf]               = useState<AgentPerf | null>(null)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const [toast, setToast]             = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
+
+  // ── Rol del usuario actual — gate de "Reabrir pedido" (solo admin/confirmation_agent) ──
+  const [currentUserRole, setCurrentUserRole] = useState<string | null>(null)
+  useEffect(() => {
+    const supabase = createBrowserClient()
+    supabase.auth.getUser().then(async ({ data }) => {
+      const uid = data.user?.id ?? null
+      if (!uid) return
+      const { data: profile } = await supabase
+        .from('profiles').select('role').eq('id', uid).maybeSingle()
+      setCurrentUserRole(profile?.role ?? null)
+    })
+  }, [])
+  const canReopen = currentUserRole === 'admin' || currentUserRole === 'confirmation_agent'
+
+  // ── Reabrir pedido (modal) ───────────────────────────────────────────────────
+  const [reopenTarget, setReopenTarget] = useState<Order | null>(null)
+  const [reopenBusy, setReopenBusy]     = useState(false)
+  const [reopenError, setReopenError]   = useState<string | null>(null)
+
+  async function submitReopen(reason: string) {
+    if (!reopenTarget) return
+    setReopenBusy(true)
+    setReopenError(null)
+    try {
+      const res = await fetch(`/api/orders/${reopenTarget.id}/confirmation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reopened', reason }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setReopenError(data.error ?? 'No se pudo reabrir el pedido')
+        return
+      }
+      setConfirmadosData(prev => prev.filter(o => o.id !== reopenTarget.id))
+      setReopenTarget(null)
+      showToast('✓ Pedido reabierto — vuelve a la cola de confirmación', 'success')
+      fetchStats()
+    } catch {
+      setReopenError('Error de red al reabrir el pedido')
+    } finally {
+      setReopenBusy(false)
+    }
+  }
 
   // ── Search + date + status (shared) ────────────────────────────────────────
   const [searchQuery, setSearchQuery]     = useState('')
@@ -1153,6 +1209,32 @@ export default function ConfirmacionPage() {
           {toast.msg}
         </div>
       )}
+
+      {/* ── Modal: Reabrir pedido ── */}
+      <ConfirmActionModal
+        open={!!reopenTarget}
+        title="Reabrir pedido"
+        warning="El pedido volverá a la cola de confirmación (pendiente). Esta acción no borra el historial — queda registrada con tu usuario y el motivo que indiques."
+        order={{
+          orderNumber:  reopenTarget?.order_number ?? null,
+          customerName: reopenTarget?.customer_name ?? null,
+          // Hardcoded, no getConfirmBadge(reopenTarget) aquí a propósito:
+          // GET /api/confirmados (fuente de confirmadosData) no selecciona
+          // confirmation_status — getConfirmBadge() caería a su default
+          // 'pending' y mostraría "Pendiente" para TODO pedido, sin importar
+          // su estado real (bug verificado en vivo durante la validación de
+          // esta fase). El botón "Reabrir pedido" solo se muestra en esta
+          // vista ("Confirmados sin guía"), cuyo filtro de servidor ya
+          // garantiza confirmation_status='confirmed' para cada fila — el
+          // literal es exacto, no una suposición.
+          statusLabel: 'Confirmado',
+        }}
+        confirmLabel="Reabrir pedido"
+        busy={reopenBusy}
+        error={reopenError}
+        onConfirm={submitReopen}
+        onClose={() => { setReopenTarget(null); setReopenError(null) }}
+      />
 
       {/* ── Banner ── */}
       <div className="relative overflow-hidden rounded-2xl
@@ -1960,7 +2042,12 @@ export default function ConfirmacionPage() {
                 {/* Mobile cards */}
                 <div className="md:hidden divide-y divide-gray-100">
                   {clientFilteredData.map(order => (
-                    <div key={order.id}><ReadOnlyCard order={order} /></div>
+                    <div key={order.id}>
+                      <ReadOnlyCard
+                        order={order}
+                        onReopen={viewMode === 'confirmados_sin_guia' && canReopen ? setReopenTarget : undefined}
+                      />
+                    </div>
                   ))}
                 </div>
                 {/* Desktop table */}
@@ -1974,6 +2061,7 @@ export default function ConfirmacionPage() {
                         {['Fecha / Orden', 'Cliente', 'Ciudad', 'Monto',
                           'Estado confirm.', 'Estado logística',
                           ...(viewMode === 'despachados' ? ['Guía / Último mov.'] : []),
+                          ...(viewMode === 'confirmados_sin_guia' && canReopen ? ['Acción'] : []),
                           ''].map(h => (
                           <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">{h}</th>
                         ))}
@@ -2037,6 +2125,17 @@ export default function ConfirmacionPage() {
                                     {formatOrderTime(order.last_tracking_update)}
                                   </p>
                                 )}
+                              </td>
+                            )}
+                            {viewMode === 'confirmados_sin_guia' && canReopen && (
+                              <td className="px-3 py-2.5">
+                                <button
+                                  onClick={() => setReopenTarget(order)}
+                                  className="inline-flex items-center gap-1 text-xs font-semibold
+                                             text-amber-700 border border-amber-200 rounded-lg px-2 py-1
+                                             hover:bg-amber-50 whitespace-nowrap">
+                                  <RotateCcw className="w-3 h-3" />Reabrir
+                                </button>
                               </td>
                             )}
                             <td className="px-3 py-2.5">
