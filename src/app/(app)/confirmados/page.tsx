@@ -10,10 +10,13 @@ import {
   Calendar, Truck, MapPin, AlertTriangle,
   ChevronLeft, ChevronRight, ClipboardList, ShoppingCart,
   Navigation, MessageCircle, Phone, ExternalLink, PackageCheck, Clock,
+  RotateCcw,
 } from 'lucide-react'
 import { AlertBadges } from '@/components/shared/alert-badges'
 import { checkCoverage, isSantoDomingoOrder } from '@/lib/alert-helpers'
 import { MarkPaidButton } from '@/components/orders/mark-paid-button'
+import { ConfirmActionModal } from '@/components/shared/confirm-action-modal'
+import { createClient as createBrowserClient } from '@/lib/supabase/client'
 import { SelectionProvider, SelectionSync } from '@/components/selection/SelectionProvider'
 import { SelectionCheckbox } from '@/components/selection/SelectionCheckbox'
 import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderCheckbox'
@@ -128,6 +131,29 @@ export default function ConfirmadosPage() {
   const [dispatching, setDispatching]       = useState<Record<string, boolean>>({})
   const [dispatchErrors, setDispatchErrors] = useState<Record<string, string>>({})
   const [toast, setToast]                   = useState<{ msg: string; ok: boolean } | null>(null)
+
+  // ── Rol del usuario actual — gate de "Reabrir pedido" (solo admin/confirmation_agent) ──
+  // Mismo patrón que src/app/(app)/confirmacion/page.tsx. Nota: dispatch_agent
+  // sí puede llegar a esta ruta (ver middleware.ts canSeeConfirmados) pero no
+  // debe ver este botón — la RPC reopen_confirmed_order también lo rechaza
+  // server-side, este gate es solo UX.
+  const [currentUserRole, setCurrentUserRole] = useState<string | null>(null)
+  useEffect(() => {
+    const supabase = createBrowserClient()
+    supabase.auth.getUser().then(async ({ data }) => {
+      const uid = data.user?.id ?? null
+      if (!uid) return
+      const { data: profile } = await supabase
+        .from('profiles').select('role').eq('id', uid).maybeSingle()
+      setCurrentUserRole(profile?.role ?? null)
+    })
+  }, [])
+  const canReopen = currentUserRole === 'admin' || currentUserRole === 'confirmation_agent'
+
+  // ── Reabrir pedido (modal) ───────────────────────────────────────────────────
+  const [reopenTarget, setReopenTarget] = useState<ConfirmadoOrder | null>(null)
+  const [reopenBusy, setReopenBusy]     = useState(false)
+  const [reopenError, setReopenError]   = useState<string | null>(null)
   // Incrementar fuerza a SdCobrosSummary a refetchear (ver onPaidSuccess de
   // SdCobrosTab) — el resumen es independiente del listado y no se entera
   // solo, así que se le avisa explícitamente tras un pago exitoso.
@@ -289,6 +315,32 @@ export default function ConfirmadosPage() {
     }
   }
 
+  async function submitReopen(reason: string) {
+    if (!reopenTarget) return
+    setReopenBusy(true)
+    setReopenError(null)
+    try {
+      const res = await fetch(`/api/orders/${reopenTarget.id}/confirmation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reopened', reason }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setReopenError(data.error ?? 'No se pudo reabrir el pedido')
+        return
+      }
+      setOrders(prev => prev.filter(o => o.id !== reopenTarget.id))
+      setReopenTarget(null)
+      showToast('✓ Pedido reabierto — vuelve a la cola de confirmación', true)
+      fetchData()
+    } catch {
+      setReopenError('Error de red al reabrir el pedido')
+    } finally {
+      setReopenBusy(false)
+    }
+  }
+
   // Count de recuperados en el filtro actual (para mostrar en el banner cuando aplica)
   const recuperadosInView = activeFilter === 'recuperados'
     ? orders.length
@@ -305,6 +357,28 @@ export default function ConfirmadosPage() {
           {toast.msg}
         </div>
       )}
+
+      {/* ── Modal: Reabrir pedido ── */}
+      <ConfirmActionModal
+        open={!!reopenTarget}
+        title="Reabrir pedido"
+        warning="El pedido volverá a la cola de confirmación (pendiente). Esta acción no borra el historial — queda registrada con tu usuario y el motivo que indiques."
+        order={{
+          orderNumber:  reopenTarget?.order_number ?? null,
+          customerName: reopenTarget?.customer_name ?? null,
+          // Hardcoded, no calculado de reopenTarget a propósito: GET
+          // /api/confirmados filtra confirmation_status='confirmed' en el
+          // servidor (route.ts) para toda fila que llega a esta lista — el
+          // literal es exacto, no una suposición (mismo criterio que en
+          // src/app/(app)/confirmacion/page.tsx).
+          statusLabel: 'Confirmado',
+        }}
+        confirmLabel="Reabrir pedido"
+        busy={reopenBusy}
+        error={reopenError}
+        onConfirm={submitReopen}
+        onClose={() => { setReopenTarget(null); setReopenError(null) }}
+      />
 
       {/* ── Banner ── */}
       <div className="relative overflow-hidden rounded-2xl
@@ -933,6 +1007,23 @@ export default function ConfirmadosPage() {
                             )}
                           </div>
                         )}
+                        <div className="flex items-center gap-2 flex-wrap mt-1.5">
+                          {canReopen && (
+                            <button
+                              onClick={() => setReopenTarget(order)}
+                              className="inline-flex items-center gap-1 text-xs font-semibold
+                                         text-amber-700 border border-amber-200 rounded-lg px-2 py-1
+                                         hover:bg-amber-50 whitespace-nowrap"
+                            >
+                              <RotateCcw className="w-3 h-3" />Reabrir
+                            </button>
+                          )}
+                          <Link href={`/orders/${order.id}`}
+                            className="inline-flex items-center gap-1 text-xs font-medium
+                                       text-indigo-600 hover:text-indigo-800 whitespace-nowrap hover:underline">
+                            <ExternalLink className="w-3 h-3" />Ver
+                          </Link>
+                        </div>
                       </td>
 
                     </tr>
