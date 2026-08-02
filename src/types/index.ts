@@ -456,3 +456,40 @@ export const CONTACT_RESULT_LABELS: Record<ContactResult, string> = {
   wrong_number:         'Número incorrecto',
   unreachable:          'Fuera de servicio',
 }
+
+// ============================================================
+// Customer Intelligence Engine — Fase 1 (identidad)
+// Ver docs/CUSTOMER_INTELLIGENCE_ARCHITECTURE_V1.md.
+// Sin conexión todavía a orders/wa_contacts/Shopify/WhatsApp — solo el
+// modelo de identidad (customers, customer_identifiers).
+// ============================================================
+
+export type CustomerIdentifierType   = 'phone' | 'email' | 'shopify_customer_id'
+export type CustomerIdentifierSource = 'shopify_webhook' | 'whatsapp_webhook' | 'manual'
+
+export interface Customer {
+  id: string
+  store_id: string
+  phone_primary: string
+  full_name: string | null
+  email: string | null
+  shopify_customer_id: string | null
+  first_seen_at: string
+  last_seen_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CustomerIdentifier {
+  id: string
+  customer_id: string
+  store_id: string
+  identifier_type: CustomerIdentifierType
+  value_normalized: string
+  is_primary: boolean
+  active: boolean
+  confidence: number
+  source: CustomerIdentifierSource
+  replaced_by: string | null
+  detected_at: string
+}
