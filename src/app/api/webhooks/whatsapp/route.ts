@@ -554,15 +554,18 @@ async function processInboundMessage(
     '— wa_msg_id:', msg.id,
   )
 
-  // ── 6. Respuesta automática de Génesis (Fase 7B.2) ────────────────────────
-  // Solo dispara si la conversación cumple todas las condiciones (ai_enabled,
-  // sin assigned_to, config activa en modo 'auto'). Nunca lanza — cualquier
-  // error queda contenido y logueado dentro de maybeGenesisRespond.
+  // ── 6. Respuesta automática de Génesis (Fase 7B.2 / Fase 1B) ──────────────
+  // Solo dispara si la conversación cumple todas las condiciones — ahora
+  // verificadas atómicamente por claim_genesis_run() dentro de
+  // maybeGenesisRespond, no por chequeos sueltos aquí. Nunca lanza —
+  // cualquier error queda contenido y logueado dentro de maybeGenesisRespond.
   // No se ejecuta para wa_msg_id duplicados (Meta retry) porque ese caso
   // retorna antes, en el bloque insertMsgErr?.code === '23505' de arriba.
+  // newMsg.id (el id del propio mensaje inbound recién insertado) es
+  // obligatorio para claim_genesis_run — antes no se pasaba.
   // TEMPORAL — diagnóstico FASE 7B.2.
   console.log('[wa-webhook] llamando maybeGenesisRespond')
-  await maybeGenesisRespond(supabase, storeId, conversation.id)
+  await maybeGenesisRespond(supabase, storeId, conversation.id, newMsg.id)
 }
 
 // ── Helper: resolver order_id desde el último template outbound (Fase 6C) ─────
