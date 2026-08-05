@@ -12,7 +12,9 @@
     "test:customer-identity-rpc": "tsx scripts/test-customer-identity-rpc.ts",
     "test:genesis-run-rpcs": "tsx scripts/test-genesis-run-rpcs.ts",
     "test:genesis-escalation-rpcs": "tsx scripts/test-genesis-escalation-rpcs.ts",
-    "test:genesis-respond-orchestrator": "tsx scripts/test-genesis-respond-orchestrator.ts"
+    "test:genesis-respond-orchestrator": "tsx scripts/test-genesis-respond-orchestrator.ts",
+    "test:genesis-commercial-luma": "tsx scripts/test-genesis-commercial-luma.ts",
+    "sync:genesis-luma-knowledge": "tsx scripts/sync-genesis-luma-knowledge.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.0",
