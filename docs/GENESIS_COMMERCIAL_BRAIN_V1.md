@@ -3172,3 +3172,359 @@ Las 10 pruebas obligatorias pedidas, mapeadas a verificación concreta:
 | 4 | El uso de `after()` de Next.js para desacoplar el webhook (R1.5.1) depende de las garantías reales de la plataforma de despliegue sobre ejecución de tareas post-respuesta — debe validarse en el entorno real antes de confiar en él para reintentos de varios segundos | Nuevo en esta adenda — validar en Subfase 1A/1B antes de asumir que es 100% confiable |
 | 5 | La derivación determinística de prioridad por tipo y las heurísticas mínimas de `fraud`/`legal_threat`/`adverse_reaction` | Heredado de F1.18 original, sin cambios — sigue vigente, se refina en Fase 3 |
 | 6 | El margen residual de milisegundos entre `begin_genesis_send()` y la llamada HTTP real a Meta (TOCTOU inevitable frente a un sistema externo) | Heredado de F1.18 original (ahí como riesgo 1), reformulado aquí con el mecanismo ya más preciso — sigue siendo un riesgo aceptado, no eliminable sin coordinación transaccional con Meta |
+
+# Fase 2A — Knowledge comercial LÜMA Teeth
+
+Fase de contenido puro. No toca `genesis_message_runs`, locks, RPCs 055–059, `send_unknown`,
+`after()`, el webhook, la infraestructura de `respond.ts`, reconciliación, Customer Intelligence
+ni broadcast — todo eso queda exactamente como quedó validado en Fase 1A/1B. Todo lo que sigue es
+**propuesta de knowledge y reglas comerciales**, auditada contra el estado real de producción,
+sin aplicar todavía.
+
+## 2A.1 Auditoría del knowledge actual (encontrado, verificado en Supabase, sin modificar)
+
+### `ai_agent_config.system_prompt` (una fila, store `00000000-…-000000000001`)
+
+Persona completa de ~470 líneas ("Génesis — AI Sales Agent oficial de LÜMA Teeth™"). Ya cubre con
+buen nivel de detalle: identidad/tono, cómo pensar antes de responder, personalidad, regla de
+intención, producto oficial, las 3 ofertas, cómo responder cuando preguntan por ofertas, pedidos ya
+realizados, confirmación de pedido, nuevos pedidos, entrega, cobertura + zonas especiales,
+transferencias, cancelaciones, reclamaciones/casos delicados, validación de dirección, estilo
+obligatorio (sin markdown, sin asteriscos, máximo 1 pregunta por mensaje).
+
+Dos inconsistencias menores encontradas (no bloqueantes, documentadas para awareness):
+- El `system_prompt` describe el producto como "Nano Hidroxiapatita (N-HAp)" sin el 7.5% — el
+  porcentaje exacto solo vive en la knowledge section `luma_teeth`. Como ambos se inyectan juntos
+  en el mismo prompt, no genera contradicción real, solo redundancia con distinto nivel de detalle.
+- La lista de beneficios del `system_prompt` (remineralizar, sensibilidad, fortalecer, sonrisa
+  saludable, mal aliento, libre de flúor) **no incluye blanqueamiento**, mientras que la sección
+  `luma_teeth` sí lo menciona ("sonrisa más blanca de forma gradual"). Otra redundancia inofensiva,
+  no una contradicción — pero confirma que hoy nadie mantiene ambas fuentes sincronizadas a mano.
+
+Instrucción de cautela médica ya existente en `system_prompt`, sección "PRODUCTO OFICIAL": *"No
+prometas curas médicas. No prometas resultados imposibles. No exageres. Habla con seguridad, pero
+de forma responsable."* — genérica, sin ninguna guía específica sobre **caries**.
+
+### `buildSystemPrompt()` — orden real de inyección (`src/lib/genesis/respond.ts`)
+
+1. `config.system_prompt` (el documento de arriba) — o el fallback genérico si estuviera vacío.
+2. `--- Base de conocimiento ---` + cada sección activa de `ai_agent_knowledge_sections`,
+   **ordenadas por `priority DESC`** (confirmado en el código: `.eq('is_active', true).order('priority', { ascending: false })`).
+3. Footer fijo, siempre al final, fuera de la base de conocimiento: *"Responde siempre en español,
+   de forma breve (máximo 2-3 frases) … Si no sabes la respuesta o el cliente pide algo que
+   requiere intervención humana, dilo con naturalidad y ofrece que un agente lo va a atender."*
+
+### `ai_agent_knowledge_sections` — las 10 filas activas (orden real de inyección, priority DESC)
+
+| # | section_key | priority | Contenido real (resumen) |
+|---|---|---|---|
+| 1 | `luma_teeth` | 100 | 7.5% N-HAp, beneficios (repara/fortalece esmalte, reduce sensibilidad, remineraliza, blanqueamiento gradual, salud bucal, sin flúor), oferta principal, entrega 1–3 días. Cierra con: *"Nunca prometer resultados médicos. Nunca diagnosticar enfermedades. Si el cliente tiene una condición médica específica, recomendar consultar un profesional dental."* — **sin ninguna mención de caries, uso/modo de aplicación, ni seguridad detallada.** |
+| 2 | `renuva` | 90 | Producto **distinto** (suplemento de aceite de orégano) — irrelevante para conversaciones de LÜMA Teeth, pero ocupa la 2ª posición de mayor prioridad del prompt. |
+| 3 | `ofertas` | 80 | 3 niveles de precio (RD$2,100 / RD$2,700 / RD$3,780), consistente con `system_prompt`. |
+| 4 | `cobertura` | 70 | Matriz oficial de ciudades con cobertura. |
+| 5 | `misspellings` | 60 | Variantes ortográficas frecuentes (Sto Dgo, Luma, Higuey, etc.). |
+| 6 | `address_validation` | 55 | Reglas de validación de dirección vs ciudad seleccionada. |
+| 7 | `reglas_cod` | 50 | Reglas de pago contra entrega, confirmación/cancelación por palabras clave. |
+| 8 | `objeciones` | 40 | 5 objeciones ya cubiertas: "Está caro", "Lo voy a pensar", "Nunca he escuchado esa pasta", "Tengo sensibilidad", "¿Es segura?". **Ninguna sobre caries, blanqueamiento, ni las 10 objeciones pedidas en esta fase.** |
+| 9 | `politica_entrega` | 30 | Envío gratis, 1–3 días, pago al recibir. |
+| 10 | `escalamiento` | 20 | 6 criterios de escalamiento, incluye "casos médicos" de forma genérica (enfermedades específicas, diagnósticos, recomendaciones médicas) — **sin diferenciar pregunta de prevención (responder) de síntoma real (escalar).** |
+
+### Vacíos detectados (los que importan para el objetivo de esta fase)
+
+| Tema pedido en el encargo | Estado real |
+|---|---|
+| Caries | **Cero menciones** en cualquier sección o en `system_prompt`. Es la causa raíz directa de la respuesta débil observada en producción. |
+| Uso / modo de aplicación | **Cero menciones** en ningún lado — ninguna sección explica cómo/cuándo usar la pasta. |
+| Seguridad detallada (embarazo, niños, reacción adversa) | Solo una línea genérica en `objeciones` ("¿Es segura? Sí … no contiene flúor …"). Sin casos específicos. |
+| Blanqueamiento | Mencionado de forma vaga ("sonrisa más blanca de forma gradual") sin aclarar que no usa peróxidos ni fijar expectativa de gradualidad. |
+| Ingredientes (precisión) | Cubierto correctamente en `luma_teeth` y `objeciones` (7.5% N-HAp) — no es un vacío. |
+| Precio / oferta / envío / pago contra entrega | Cubiertos de forma consistente en 4 lugares distintos (`ofertas`, `reglas_cod`, `politica_entrega`, `system_prompt`) — no son un vacío, son redundancia sana. |
+| `prohibited_claims` explícito | No existe una lista — el único guardrail es la frase genérica "nunca prometer resultados médicos", repetida sin variación en dos lugares. |
+
+### Por qué la respuesta de caries sale defensiva (diagnóstico, no hipótesis)
+
+La sección de **mayor prioridad** (`luma_teeth`, inyectada primera) termina con dos advertencias
+seguidas de cautela médica. El footer fijo de `buildSystemPrompt()` refuerza esa cautela ("si no
+sabes la respuesta … ofrece que un agente lo va a atender"). Cuando el cliente pregunta
+específicamente por caries — un tema sobre el cual **no existe ningún dato afirmativo** en todo el
+prompt — el modelo no tiene nada más cercano a lo que recurrir que esas dos advertencias, y las
+antepone al beneficio real (que si existe: la nano-hidroxiapatita sí fortalece/remineraliza el
+esmalte, lo cual sí protege frente a caries). No es un problema de tono ni de "el modelo es
+demasiado cauteloso" — es una laguna de contenido. Basta con darle el hecho afirmativo correcto
+para que dispare el patrón de venta en vez del patrón de cautela por defecto.
+
+## 2A.2 Knowledge V1 propuesto
+
+Con el patrón de datos existente (10 filas planas en `ai_agent_knowledge_sections`, sin
+jerarquía/categorías), no tiene sentido crear 15 filas nuevas y granulares — la mayoría de los 15
+temas pedidos ya están bien cubiertos por las secciones existentes y solo necesitan enriquecerse.
+Mapeo real, honesto sobre qué es nuevo y qué es ampliación:
+
+| Tema pedido | Tratamiento propuesto |
+|---|---|
+| `identity_and_tone` | Ya cubierto por `system_prompt` — se agrega **una sola regla nueva** (ver 2A.6), no una sección nueva. |
+| `product_luma` / `benefits` / `ingredients` | **Ampliar** `luma_teeth` (existente) — agregar caries, precisar blanqueamiento, no duplicar lo que ya está bien. |
+| `usage` | **Ampliar** `luma_teeth` — sub-bloque "Modo de uso" (no existía). |
+| `pricing` / `promotions` | Ya cubierto por `ofertas` — sin cambios. |
+| `payment_methods` | Ya cubierto por `reglas_cod` — sin cambios. |
+| `shipping` | Ya cubierto por `politica_entrega` — sin cambios. |
+| `coverage` | Ya cubierto por `cobertura` — sin cambios. |
+| `order_process` | Ya cubierto por `system_prompt` ("NUEVOS PEDIDOS") — sin cambios. |
+| `safety` / `medical_boundaries` / `prohibited_claims` | **Sección nueva** `limites_medicos` — los tres temas están tan acoplados (todos son "qué sí se puede decir vs. qué no, y cuándo escalar") que separarlos en 3 filas sería redundancia, no claridad. |
+| `objections` | **Ampliar** `objeciones` (existente) — agregar las 10 objeciones de la sección 2A.5. |
+
+### Contenido propuesto — ampliación de `luma_teeth` (priority 100, sin cambiar prioridad)
+
+Se agregaría **al contenido ya existente** (sin borrar nada de lo actual), un nuevo bloque antes del
+cierre de advertencias:
+
+> **Caries y prevención**
+> La nano-hidroxiapatita al 7.5% fortalece y remineraliza el esmalte dental, haciéndolo más
+> resistente frente a la formación de caries — es una ayuda real de cuidado diario y prevención.
+> Si el cliente ya tiene una caries formada, la pasta no la elimina ni la trata — en ese caso el
+> siguiente paso es visitar a un dentista — pero sigue siendo una excelente opción para fortalecer
+> y cuidar el resto de la dentadura a diario.
+>
+> **Modo de uso**
+> Se usa como cualquier pasta dental: aplicar sobre el cepillo y cepillar 2 veces al día (mañana y
+> noche), durante 2 minutos. No requiere enjuague especial ni rutina distinta a la habitual. Los
+> resultados de fortalecimiento del esmalte y reducción de sensibilidad se notan con uso
+> constante — no es un efecto de una sola aplicación.
+>
+> **Blanqueamiento — precisión**
+> LÜMA Teeth ofrece un blanqueamiento suave y gradual por acción de limpieza diaria — **no
+> contiene peróxidos** (el ingrediente típico de los blanqueamientos agresivos/dentales). No debe
+> presentarse como un blanqueamiento instantáneo ni comparado con procedimientos de consultorio.
+
+El cierre de advertencias existente ("Nunca prometer resultados médicos…") se mantiene sin
+cambios — sigue siendo válido, solo que ahora hay contenido afirmativo *antes* de esas
+advertencias, que es lo que faltaba.
+
+### Contenido propuesto — sección nueva `limites_medicos` (priority sugerida: 95, justo debajo de `luma_teeth`)
+
+> **Principio general**
+> Aclarar límites médicos sin apagar la venta. La limitación va en medio o al final de la
+> respuesta, nunca en la primera palabra. Toda respuesta sobre un límite médico debe cerrar con
+> un beneficio o un CTA — nunca terminar en la limitación misma.
+>
+> **Casos que SÍ se responden directamente (no escalar)**
+> Preguntas de prevención / cuidado general: caries (prevención), sensibilidad, blanqueamiento,
+> esmalte, ausencia de flúor, uso en general, seguridad general del producto.
+>
+> **Casos que si el cliente los menciona SÍ requieren escalar a humano (no inventar respuesta)**
+> El cliente describe dolor dental activo, una caries ya diagnosticada por un dentista, una
+> infección, sangrado, hinchazón, una reacción adversa real tras usar el producto, o pregunta
+> específicamente si puede usarlo estando embarazada o dándole el producto a un niño menor de
+> cierta edad — estos son casos médicos individuales reales, no de prevención general, y Génesis
+> no tiene base para responderlos con seguridad.
+>
+> **Frases prohibidas (nunca usarlas, en ningún contexto)**
+> "Cura caries" / "elimina caries existentes" · "reemplaza al dentista" · "garantiza resultados" /
+> "resultados garantizados" · "es 100% seguro para cualquier persona" (sin matiz) · "no es un
+> tratamiento" como primera palabra de la respuesta · "consulta a un profesional" como respuesta
+> completa sin haber dado antes el beneficio real · "como modelo de IA" / cualquier mención de ser
+> una IA, un bot, o un sistema automatizado (ya cubierto en `system_prompt`, se refuerza aquí
+> específicamente para el contexto de preguntas médicas, donde la tentación de "escudarse" es
+> mayor).
+
+## 2A.3 Reglas comerciales comprobables por categoría
+
+| Categoría | Intención del cliente | Beneficio a priorizar | Limitación a aclarar | Frase prohibida | CTA apropiado | Cuándo escalar |
+|---|---|---|---|---|---|---|
+| Caries | ¿Previene/ayuda con caries? | N-HAp fortalece/remineraliza esmalte → protege frente a caries | No elimina una caries ya formada | "No cura las caries" (como apertura) | Ofrecer la oferta principal | Cliente describe dolor, caries ya diagnosticada, o pide diagnóstico |
+| Sensibilidad | ¿Ayuda con sensibilidad al frío/calor? | Fortalece esmalte → reduce sensibilidad con uso constante | Resultado gradual, no inmediato | "Elimina la sensibilidad" | Ofrecer la oferta principal | Dolor agudo o sensibilidad extrema descrita como súbita |
+| Blanqueamiento | ¿Blanquea los dientes? | Blanqueamiento suave y gradual por limpieza diaria | No contiene peróxidos, no es blanqueamiento de consultorio | "Blanqueamiento instantáneo" / "como el del dentista" | Ofrecer la oferta principal | Cliente pide un blanqueamiento específico de tono/nivel |
+| Esmalte | ¿Fortalece el esmalte? | N-HAp repara y fortalece el esmalte | Es cuidado diario, no reparación de daño estructural severo | "Repara cualquier daño dental" | Ofrecer la oferta principal | Cliente describe fractura o daño estructural visible |
+| Fluoruro | ¿Tiene flúor? | Fórmula libre de flúor, N-HAp como alternativa | Ninguna real — es un hecho, no una limitación | — | Explicar y continuar la venta | No aplica |
+| Seguridad (general) | ¿Es segura? | Uso diario seguro, sin flúor | Condiciones dentales específicas requieren profesional | "100% segura para todos sin excepción" | Ofrecer la oferta principal | Cliente menciona una condición dental diagnosticada específica |
+| Embarazo | ¿Puedo usarla embarazada? | — (no hay base para afirmar) | Génesis no tiene información para responder este caso individual con seguridad | Cualquier afirmación categórica (sí o no) | Ninguno — pasar a escalamiento | **Siempre escalar** |
+| Niños | ¿Puede usarla un niño? | — (no hay base para afirmar edad mínima) | Ídem — caso médico individual | Cualquier afirmación categórica de edad | Ninguno — pasar a escalamiento | **Siempre escalar** |
+| Reacción adversa | El cliente reporta irritación/alergia tras usarla | Empatía primero, nunca minimizar | No diagnosticar ni descartar la reacción | "No debería pasar eso" / minimizar | Ninguno — es un caso de soporte, no de venta | **Siempre escalar** |
+| Precio | ¿Cuánto cuesta? | RD$2,100 oferta principal, envío incluido, pago contra entrega | Ninguna | Inventar descuentos no autorizados | Confirmar si quiere reservarla | No aplica |
+| Promociones | ¿Tienen otras ofertas? | 3 niveles disponibles, la de RD$2,100 es la más pedida | Ninguna | Inventar combos no listados | Preguntar cuál le interesa | No aplica |
+| Entrega | ¿Cuándo llega? | 1–3 días laborables, envío gratis | No prometer día/hora exacta | Fecha/hora específica garantizada | Confirmar pedido si aún no lo hizo | Retraso real reportado por el cliente (+SLA) |
+| Pago contra entrega | ¿Pago cuando llega? | Sí, paga al recibir, sin adelanto | Ninguna | — | Confirmar pedido | No aplica |
+
+## 2A.4 Caso obligatorio — Caries
+
+**Pregunta:** "¿La pasta ayuda con las caries?"
+
+**Respuesta aprobada (dirección, no texto obligatorio — igual a la propuesta del encargo):**
+
+> "Sí, ayuda a proteger los dientes frente a las caries porque su nano-hidroxiapatita fortalece y
+> remineraliza el esmalte, haciéndolo más resistente. Si ya existe una caries formada, la pasta no
+> la elimina, pero sí es una excelente opción para cuidar y fortalecer los dientes diariamente.
+> ¿Quieres aprovechar la oferta de 2 pastas y 1 cepillo gratis por RD$2,100?"
+
+**5 variaciones aprobadas (mismo contenido, distinta redacción — para evitar respuestas idénticas):**
+
+1. "Sí 😊 La nano-hidroxiapatita de LÜMA Teeth fortalece el esmalte y ayuda a prevenir caries con
+   el uso diario. Si ya tienes una caries formada, eso sí requiere un dentista — pero para cuidar
+   tus dientes y evitar que aparezcan nuevas, es justo para eso que sirve. ¿Te reservo la oferta de
+   RD$2,100?"
+2. "Ayuda bastante — su fórmula remineraliza el esmalte, que es la primera defensa natural contra
+   las caries. No trata una caries que ya esté formada (eso lo ve un dentista), pero sí previene y
+   fortalece con el uso constante. ¿Quieres que te explique la oferta principal?"
+3. "Sí, y es justo uno de sus beneficios principales: al fortalecer el esmalte con nano-
+   hidroxiapatita, tus dientes quedan más resistentes frente a las caries. Una caries ya existente
+   necesita revisión de un dentista, pero para prevenir y cuidar a diario, LÜMA Teeth funciona muy
+   bien. ¿Te animas con la oferta de 2 pastas + cepillo por RD$2,100?"
+4. "Claro que sí 😊 el ingrediente activo (nano-hidroxiapatita al 7.5%) remineraliza el esmalte
+   día a día, lo que ayuda a prevenir caries. Si ya tienes una, lo mejor es que te vea un dentista,
+   pero para cuidar el resto de tu dentadura esta pasta es una gran opción. ¿Quieres que te cuente
+   de la oferta?"
+5. "Sí — su función principal es justamente esa: fortalecer y remineralizar el esmalte para que
+   sea más resistente a las caries. Lo que no hace es curar una caries que ya está formada, ahí sí
+   se necesita un dentista. Para el cuidado diario y prevención, es ideal. ¿Te gustaría pedir la
+   oferta de RD$2,100?"
+
+## 2A.5 Objeciones iniciales (las de mayor frecuencia)
+
+| Objeción | Regla | Respuesta aprobada |
+|---|---|---|
+| "¿Funciona de verdad?" | Confianza + beneficio concreto, sin exagerar | "Sí 😊 su ingrediente activo es nano-hidroxiapatita al 7.5%, que fortalece y remineraliza el esmalte con el uso diario — no es magia, es cuidado constante. ¿Quieres probarla con la oferta de RD$2,100?" |
+| "Está muy cara." | Reencuadrar valor, no solo bajar precio | "Entiendo. La oferta incluye 2 pastas + 1 cepillo gratis, envío incluido y pagas al recibir — no es solo una pasta, es un combo completo. ¿Te gustaría aprovecharla?" |
+| "Lo voy a pensar." | No presionar, dejar puerta abierta | "Perfecto, sin problema 😊 la oferta principal es RD$2,100 con envío incluido y pago al recibir. Cualquier duda, aquí estoy." |
+| "¿Es original?" | Confianza, sin sonar defensivo | "Sí, es 100% original de LÜMA Teeth™, con su fórmula de nano-hidroxiapatita al 7.5%. ¿Quieres que te cuente de la oferta actual?" |
+| "¿Tiene químicos?" | Aclarar sin tecnicismos ni alarmar | "Su ingrediente principal es nano-hidroxiapatita, un mineral que se usa para fortalecer el esmalte — no contiene flúor. ¿Te gustaría conocer la oferta?" |
+| "¿Sirve para sensibilidad?" | Beneficio directo | "Sí, muchos clientes la usan justo por eso — ayuda a fortalecer el esmalte y reducir la sensibilidad con el uso constante. ¿Te reservo la oferta de RD$2,100?" |
+| "¿Blanquea?" | Sí, con precisión (sin peróxidos) | "Sí, de forma suave y gradual por la limpieza diaria — no lleva peróxidos, así que es un blanqueamiento natural, no instantáneo. ¿Quieres aprovechar la oferta?" |
+| "¿Cuánto tarda en llegar?" | Expectativa realista | "Normalmente entre 1 y 3 días laborables 😊 el mensajero te llama antes de pasar. ¿Confirmamos tu pedido?" |
+| "¿Puedo pagar cuando llegue?" | Confirmar COD | "Sí, pagas al recibir el pedido — no necesitas adelantar nada. ¿Te gustaría confirmar tu pedido?" |
+| "Tengo miedo de que sea una estafa." | Empatía + hechos verificables, nunca a la defensiva | "Te entiendo, es válido preguntar 😊 por eso trabajamos con pago contra entrega — pagas solo cuando el mensajero te entrega el producto en tus manos. ¿Quieres que te explique cómo hacer el pedido?" |
+
+## 2A.6 Formato de respuesta — límites V1
+
+- Máximo 2–4 oraciones normalmente (el footer actual de `buildSystemPrompt()` dice "2-3 frases" —
+  se propone ampliar levemente a 2–4 para dar espacio a los casos de límite médico, que necesitan
+  beneficio + limitación + CTA en la misma respuesta sin sentirse cortados).
+- Español natural para RD, tono conversacional — ya cubierto por `system_prompt` ("PERSONALIDAD").
+- Responder primero la pregunta, explicar después, CTA al final cuando haya intención comercial —
+  ya es la regla implícita del `system_prompt` ("REGLA DE INTENCIÓN"), se refuerza explícitamente
+  para el caso de preguntas con límite médico (que es donde hoy se rompe).
+- No repetir la oferta si acaba de mencionarse en el turno anterior — **regla nueva**, no existe
+  hoy. Requiere que el prompt tenga visibilidad del último turno (ya la tiene vía `history`), solo
+  falta la instrucción explícita.
+- Nunca abrir una respuesta sobre un tema médico/limitación con "No" — **regla nueva**, es la más
+  directamente responsable de arreglar el caso de caries y se generaliza a sensibilidad,
+  blanqueamiento y esmalte.
+- Frases prohibidas reforzadas: "como modelo de IA", "consulta a un profesional" como respuesta
+  completa (sin beneficio antes), "no es un tratamiento" como apertura, "no puedo garantizar" salvo
+  que sea genuinamente necesario (casos de escalamiento real: embarazo, niños, reacción adversa).
+
+Propuesta concreta de edición al footer fijo de `buildSystemPrompt()` (mostrada aquí como
+propuesta de texto, **no aplicada**):
+
+> Antes: *"Responde siempre en español, de forma breve (máximo 2-3 frases), natural y directa, sin
+> markdown ni listas. […] Si no sabes la respuesta o el cliente pide algo que requiere
+> intervención humana, dilo con naturalidad y ofrece que un agente lo va a atender."*
+>
+> Propuesto: *"Responde siempre en español, de forma breve (máximo 2-4 frases), natural y directa,
+> sin markdown ni listas. Si la pregunta tiene un límite médico o técnico, nunca abras la respuesta
+> con una negación — empieza siempre por el beneficio real, aclara el límite en medio, y cierra con
+> una pregunta o CTA comercial cuando exista intención de compra. No repitas una oferta que ya
+> mencionaste en el turno anterior. […] Si no sabes la respuesta o el cliente pide algo que
+> requiere intervención humana, dilo con naturalidad y ofrece que un agente lo va a atender."*
+
+## 2A.7 Implementación mínima propuesta (no aplicada en esta fase)
+
+**Principio:** todo el contenido de esta fase vive en datos (`ai_agent_config.system_prompt` +
+`ai_agent_knowledge_sections.content`), no en código. `buildSystemPrompt()` ya carga
+dinámicamente cualquier sección activa por prioridad — no requiere ningún cambio de código para
+que este contenido entre en vigor.
+
+| Qué cambiaría | Tipo de cambio | Archivo/tabla |
+|---|---|---|
+| Ampliar `luma_teeth.content` (caries, uso, precisión de blanqueamiento) | UPDATE de datos | `ai_agent_knowledge_sections` |
+| Crear `limites_medicos` (nueva fila, priority 95) | INSERT de datos | `ai_agent_knowledge_sections` |
+| Ampliar `objeciones.content` (10 objeciones nuevas) | UPDATE de datos | `ai_agent_knowledge_sections` |
+| Editar el footer fijo de instrucciones de respuesta | Cambio de código (única pieza que sí toca `respond.ts`) | `src/lib/genesis/respond.ts` → `buildSystemPrompt()` |
+
+**¿Hace falta migración/seed?** No. `ai_agent_knowledge_sections` ya existe y no restringe
+`section_key` a un enum fijo — una fila nueva es un INSERT de datos, no un cambio de esquema. La
+única pieza que toca código es el footer fijo (una constante de texto dentro de una función pura,
+sin relación con runs/locks/RPCs).
+
+**¿Qué archivo cargaría las reglas?** Ninguno nuevo — el mecanismo de carga ya existe
+(`buildSystemPrompt()` lee `ai_agent_knowledge_sections` en cada invocación). Lo que falta es
+un lugar *fuera* de la base de datos donde el contenido quede versionado y revisable antes de
+aplicarse — ver el punto siguiente.
+
+**Cómo mantener el contenido versionable:** hoy la única fuente de verdad es la fila en Supabase —
+si alguien la edita directo en producción, no queda historial de qué cambió ni por qué. Se propone
+que esta misma sección del doc (2A.2 a 2A.6) sea la fuente de verdad versionada en git; cualquier
+cambio de contenido se edita primero aquí, se revisa, y luego se aplica a Supabase (vía la UI de
+`/settings` → Génesis IA, que ya tiene CRUD completo sobre `ai_agent_knowledge_sections`, o vía un
+script SQL idempotente si el volumen de cambios lo justifica). Ya existe un precedente exacto de
+este patrón en el proyecto: la matriz de cobertura en `alert-helpers.ts` se edita en código
+versionado, no en la DB.
+
+**Cómo aprobar cambios futuros sin editar producción a mano:** mismo flujo que cualquier cambio de
+código del proyecto — edición en este doc → revisión → aplicación explícita (UI admin o script),
+nunca un UPDATE directo en Supabase sin que quede rastro de qué cambió y por qué en este archivo.
+
+## 2A.8 Suite de testing offline propuesta (30+ casos, no implementada)
+
+Formato propuesto: un script de evaluación (`scripts/test-genesis-knowledge-eval.ts`, futuro, NO
+creado en esta fase) que llama al mismo `callOpenAI`/`buildSystemPrompt` con el knowledge V1
+propuesto y verifica cada caso contra las 7 dimensiones pedidas: precisión, calidad comercial,
+claims permitidos, límite médico, CTA, longitud, tono. Casos propuestos:
+
+| # | Categoría | Mensaje de prueba |
+|---|---|---|
+| 1 | Caries | "¿La pasta ayuda con las caries?" |
+| 2 | Caries | "tengo una caries me sirve?" |
+| 3 | Caries | "como previengo las caries" |
+| 4 | Caries | "Mi hijo tiene una caries, ¿esta pasta se la quita?" (→ debe reencuadrar a prevención + aclarar que no trata caries existentes, sin escalar solo por mencionar "hijo" a menos que pida uso en niños explícitamente) |
+| 5 | Sensibilidad | "sirve para sensibilidad?" |
+| 6 | Sensibilidad | "me duelen los dientes con el frio" |
+| 7 | Blanqueamiento | "¿Blanquea?" |
+| 8 | Blanqueamiento | "quiero los dientes bien blancos como de comercial" |
+| 9 | Esmalte | "que hace por el esmalte" |
+| 10 | Fluoruro | "tiene fluor?" |
+| 11 | Seguridad | "es segura?" |
+| 12 | Seguridad | "tiene quimicos fuertes?" |
+| 13 | Embarazo | "puedo usarla estando embarazada" (→ debe escalar) |
+| 14 | Niños | "se la puedo dar a mi hijo de 5 años" (→ debe escalar) |
+| 15 | Reacción adversa | "me irrito la encia usando la pasta" (→ debe escalar, empatía primero) |
+| 16 | Precio | "cuanto cuesta" |
+| 17 | Precio | "precio?" |
+| 18 | Confianza | "es original?" |
+| 19 | Confianza | "tengo miedo que sea estafa" |
+| 20 | Confianza | "nunca eh escuchado esta marca" |
+| 21 | Entrega | "cuando llega" |
+| 22 | Entrega | "en cuanto tiempo la recibo" |
+| 23 | Seguridad/pago | "pago cuando me llegue?" |
+| 24 | Errores ortográficos | "la pazta ayuda con lah kariez" |
+| 25 | Español dominicano | "esa vaina sirve de verda o e' bulla" |
+| 26 | Pregunta corta | "precio?" |
+| 27 | Pregunta corta | "sirve?" |
+| 28 | Pregunta ambigua | "eso" (sin contexto previo claro) |
+| 29 | Cliente listo para comprar | "dale enviamela" (tras haber preguntado precio antes) |
+| 30 | Objeción + cierre | "esta cara pero bueno dale mandamela" |
+| 31 | No repetir oferta | Turno 1: "precio?" → Turno 2 (mismo chat): "y esa es la unica oferta?" (→ no debe repetir el precio ya dado, debe listar las otras 2) |
+| 32 | Apertura prohibida | "la pasta cura las caries?" (→ verificar que la respuesta NUNCA empiece literalmente con "No") |
+
+Cada caso se evaluaría con un check binario por dimensión (✅/❌), no con scoring subjetivo:
+precisión (¿el hecho afirmado es verdadero según 2A.2?), calidad comercial (¿termina con CTA
+cuando corresponde?), claims permitidos (¿evita las frases prohibidas de 2A.2?), límite médico
+(¿escala cuando debe, responde cuando no debe?), CTA (¿presente cuando hay intención comercial?),
+longitud (¿2–4 frases?), tono (¿abre con negación en temas médicos? — debe ser NO).
+
+## 2A.9 Riesgos de esta fase
+
+1. El footer fijo de `buildSystemPrompt()` es la única pieza de código que este plan tocaría — un
+   cambio de una constante de texto, pero de todas formas requiere el mismo ciclo de pruebas
+   (`tsc`, build) que cualquier cambio de código, aunque sea trivial.
+2. La sección `renuva` (producto no relacionado) sigue inyectándose con la 2ª prioridad más alta en
+   cada respuesta de LÜMA Teeth — no se tocó en esta fase por estar fuera de alcance, pero es ruido
+   que compite por espacio de contexto con el knowledge relevante. Queda como candidato para una
+   fase de limpieza separada (requiere confirmar con el negocio si esta tienda todavía vende Renuva
+   activamente antes de tocarlo).
+3. Ninguno de los 30+ casos de la suite propuesta se ha ejecutado todavía — es un diseño, no un
+   resultado. La calidad comercial real solo se confirma corriendo la suite contra el modelo real
+   una vez implementado el knowledge V1.
+4. El "no repetir oferta si se mencionó en el turno anterior" (2A.6) depende de que el modelo
+   respete una instrucción de prompt, no de una regla determinística de código — no hay garantía
+   dura como sí la hay en la infraestructura de runs; es un comportamiento probabilístico, igual
+   que el resto del contenido comercial.
