@@ -159,19 +159,18 @@ const RISK_META: { filter: RiskFilter; label: string }[] = [
 function buildWaMsg(nombre: string, producto: string | null | undefined): string {
   const n   = nombre.trim() || 'cliente'
   const raw = (producto ?? '').trim()
-  const p   = raw.length > 32 ? raw.slice(0, 30) + '...' : raw || 'tu pedido'
+  const p   = raw.length > 32 ? raw.slice(0, 30) + '...' : raw
+  const lineaPedido = p
+    ? '🚚 Tu pedido de *' + p + '* ya está siendo gestionado para entrega y deberías recibirlo en las próximas *24 horas*.'
+    : '🚚 Tu pedido ya está siendo gestionado para entrega y deberías recibirlo en las próximas *24 horas*.'
   return [
-    'Hola ' + n + ' 😊,',
+    '👋 ¡Hola, ' + n + '!',
     '',
-    'Tu pedido de ' + p + ' 📦 ya está en tu ciudad.',
-    'Hoy será entregado.',
+    lineaPedido,
     '',
-    'El mensajero te estará contactando durante el día.',
+    '📲 Si ya recibiste un mensaje de *Gintracom* desde el *809-643-1649*, respóndelo para coordinar la entrega. Si aún no, mantente atento a ese número o escríbeles directamente.',
     '',
-    'Por favor, asegúrate de estar disponible',
-    'o deja a alguien encargado con el pago listo.',
-    '',
-    'Gracias 🙏',
+    '✅ Así podremos asegurar la entrega de tu pedido lo antes posible.',
   ].join('\n')
 }
 

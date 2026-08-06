@@ -19,15 +19,22 @@ import { isCancelledGuide } from '@/lib/order-status-helpers'
 import { OrderOperativeDrawer } from '@/components/orders/OrderOperativeDrawer'
 
 function buildTransitoWaMsg(order: Order): string {
-  const nombre   = (order.customer_name ?? '').trim() || 'cliente'
-  const producto = (order.product_summary ?? '').trim()
-  const p        = producto.length > 32 ? producto.slice(0, 30) + '...' : producto || 'tu pedido'
+  const nombre      = (order.customer_name ?? '').trim() || 'cliente'
+  const productoRaw = (order.product_summary ?? '').trim()
+  const producto    = productoRaw.length > 32 ? productoRaw.slice(0, 30) + '...' : productoRaw
+  const lineaPedido = producto
+    ? `📦 Tu pedido de *${producto}* ya está en proceso de entrega.`
+    : '📦 Tu pedido ya está en proceso de entrega.'
   return [
-    `Hola ${nombre} 😊,`,
+    `👋 ¡Hola, ${nombre}!`,
     '',
-    `Tu pedido de ${p} 📦 está en camino.`,
+    lineaPedido,
     '',
-    '¿Podemos ayudarte con algo mientras llega?',
+    '🚚 Hoy el equipo de *Gintracom* se estará comunicando contigo por *WhatsApp* desde el *809-643-1649* para coordinar la entrega.',
+    '',
+    '📲 También puedes escribirles directamente a ese número para agilizar el proceso.',
+    '',
+    '✅ Responder a tiempo ayudará a que recibas tu pedido sin demoras.',
   ].join('\n')
 }
 
