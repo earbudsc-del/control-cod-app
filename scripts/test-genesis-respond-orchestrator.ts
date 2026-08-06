@@ -51,7 +51,7 @@ interface Fixtures {
   authUserIds:  Set<string>
 }
 
-const GLOBAL_TIMEOUT_MS = 120_000
+const GLOBAL_TIMEOUT_MS = 180_000
 class TestTimeoutError extends Error {}
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>
@@ -116,18 +116,82 @@ async function getRun(conversationId: string) {
   return data as { id: string; status: string; failure_code: string | null; outbound_message_id: string | null; meta_message_id: string | null; lock_token: string | null } | null
 }
 
+async function getLastOutboundBody(conversationId: string): Promise<string | null> {
+  const { data } = await svc
+    .from('wa_messages')
+    .select('body')
+    .eq('conversation_id', conversationId)
+    .eq('direction', 'outbound')
+    .order('sent_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  return (data as { body: string | null } | null)?.body ?? null
+}
+
+function planResultFor(plan: Record<string, unknown>): Awaited<ReturnType<CallOpenAIFn>> {
+  return { ok: true, text: JSON.stringify(plan) }
+}
+
 // Fábricas de dobles de prueba — nunca llaman a OpenAI/Meta reales.
+//
+// Decision Plan V1: maybeGenesisRespond ahora llama a openaiFn DOS veces por
+// turno (Planner con opts.jsonMode=true, luego Generator sin jsonMode). Este
+// doble distingue ambas llamadas por `opts?.jsonMode` — nunca por orden — y
+// responde: al Planner, un Decision Plan válido por defecto (o el que se
+// pase en `planResult`, para probar fallos del Planner); al Generator, el
+// `generatorResult` de siempre. `sideEffect` (usado por los escenarios de
+// take/escalate/lock-robado) se mantiene atado a la llamada del Generator —
+// es el punto donde el race condition original se probaba ("mientras OpenAI
+// está pensando", justo antes del checkpoint 2).
+const DEFAULT_PLAN_JSON = JSON.stringify({
+  stage: 'interesado', concept: 'ninguno', objection: null, goal: 'responder_duda', safety_signal: 'ninguna',
+})
+
 function fakeOpenAI(
-  result: Awaited<ReturnType<CallOpenAIFn>>,
-  sideEffect?: () => Promise<void>,
-): { fn: CallOpenAIFn; calls: number[] } {
+  generatorResult: Awaited<ReturnType<CallOpenAIFn>>,
+  opts?: {
+    sideEffect?: () => Promise<void>
+    planResult?: Awaited<ReturnType<CallOpenAIFn>>
+  },
+): {
+  fn: CallOpenAIFn
+  calls: number[]
+  plannerCalls: number[]
+  generatorCalls: number[]
+  lastGeneratorSystemMessage: () => string | null
+} {
   const calls: number[] = []
-  const fn: CallOpenAIFn = async () => {
+  const plannerCalls: number[] = []
+  const generatorCalls: number[] = []
+  let lastGeneratorSystemMessage: string | null = null
+  const fn: CallOpenAIFn = async (_apiKey, _model, messages, callOpts) => {
     calls.push(Date.now())
-    if (sideEffect) await sideEffect()
-    return result
+    if (callOpts?.jsonMode) {
+      plannerCalls.push(Date.now())
+      return opts?.planResult ?? { ok: true, text: DEFAULT_PLAN_JSON }
+    }
+    generatorCalls.push(Date.now())
+    lastGeneratorSystemMessage = messages.find(m => m.role === 'system')?.content ?? null
+    if (opts?.sideEffect) await opts.sideEffect()
+    return generatorResult
   }
-  return { fn, calls }
+  return { fn, calls, plannerCalls, generatorCalls, lastGeneratorSystemMessage: () => lastGeneratorSystemMessage }
+}
+
+// Helper para las pruebas del flag GENESIS_DECISION_PLAN_ENABLED — garantiza
+// que cada escenario deja la env var exactamente como la encontró, sin
+// filtrar estado entre escenarios (los tests corren en el mismo proceso
+// Node, secuenciales).
+async function withDecisionPlanFlag<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.GENESIS_DECISION_PLAN_ENABLED
+  if (value === undefined) delete process.env.GENESIS_DECISION_PLAN_ENABLED
+  else process.env.GENESIS_DECISION_PLAN_ENABLED = value
+  try {
+    return await fn()
+  } finally {
+    if (previous === undefined) delete process.env.GENESIS_DECISION_PLAN_ENABLED
+    else process.env.GENESIS_DECISION_PLAN_ENABLED = previous
+  }
 }
 
 function fakeSend(
@@ -230,29 +294,30 @@ async function runScenarios(fixtures: Fixtures) {
       run?.status === 'sent' && !!run.outbound_message_id && run.meta_message_id === wamid, run)
   }
 
-  // 2. OpenAI falla → failed_retryable, failure_code=openai_error
-  {
+  // 2. [flag=true] Planner ok, Generator falla → failed_retryable, failure_code=openai_error (DB enum no distingue Planner/Generator)
+  await withDecisionPlanFlag('true', async () => {
     const conv = await makeConversation(storeA, 'orch2')
     const msg = await makeMessage(storeA, conv, 'inbound', 'orch2')
     const openai = fakeOpenAI({ ok: false, kind: 'error' })
     const send = fakeSend({ ok: true, wamid: 'unused' })
     await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
     const run = await getRun(conv)
-    check('2. OpenAI falla → status=failed_retryable, failure_code=openai_error, Meta nunca llamado',
-      run?.status === 'failed_retryable' && run.failure_code === 'openai_error' && send.calls.length === 0, run)
-  }
+    check('2. Generator falla → status=failed_retryable, failure_code=openai_error (DB enum no distingue Planner/Generator), Planner sí corrió, Meta nunca llamado',
+      run?.status === 'failed_retryable' && run.failure_code === 'openai_error' &&
+      openai.plannerCalls.length === 1 && send.calls.length === 0, run)
+  })
 
-  // 3. OpenAI timeout → failed_retryable, failure_code=openai_timeout
-  {
+  // 3. [flag=true] Planner ok, Generator timeout → failed_retryable, failure_code=openai_timeout (DB enum no distingue Planner/Generator)
+  await withDecisionPlanFlag('true', async () => {
     const conv = await makeConversation(storeA, 'orch3')
     const msg = await makeMessage(storeA, conv, 'inbound', 'orch3')
     const openai = fakeOpenAI({ ok: false, kind: 'timeout' })
     const send = fakeSend({ ok: true, wamid: 'unused' })
     await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
     const run = await getRun(conv)
-    check('3. OpenAI timeout → status=failed_retryable, failure_code=openai_timeout, Meta nunca llamado',
+    check('3. Generator timeout → status=failed_retryable, failure_code=openai_timeout (DB enum no distingue Planner/Generator), Meta nunca llamado',
       run?.status === 'failed_retryable' && run.failure_code === 'openai_timeout' && send.calls.length === 0, run)
-  }
+  })
 
   // 4. Meta HTTP error → failed_retryable, failure_code=meta_http_error
   {
@@ -285,12 +350,12 @@ async function runScenarios(fixtures: Fixtures) {
     const conv = await makeConversation(storeA, 'orch6')
     const msg = await makeMessage(storeA, conv, 'inbound', 'orch6')
     const agentSession = await makeAuthedSession('admin', storeA, 'orch6agent', fixtures)
-    const openai = fakeOpenAI({ ok: true, text: 'Respuesta AUDIT_GENESIS_TEST' }, async () => {
-      // Efecto lateral dentro de la "generación" — simula que un humano
-      // toma la conversación mientras OpenAI está pensando.
+    const openai = fakeOpenAI({ ok: true, text: 'Respuesta AUDIT_GENESIS_TEST' }, { sideEffect: async () => {
+      // Efecto lateral durante la llamada al Generator — simula que un
+      // humano toma la conversación mientras OpenAI está redactando.
       const { error } = await agentSession.rpc('take_genesis_conversation', { p_conversation_id: conv })
       if (error) throw error
-    })
+    } })
     const send = fakeSend({ ok: true, wamid: 'unused' })
     await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
     const run = await getRun(conv)
@@ -302,12 +367,12 @@ async function runScenarios(fixtures: Fixtures) {
   {
     const conv = await makeConversation(storeA, 'orch7')
     const msg = await makeMessage(storeA, conv, 'inbound', 'orch7')
-    const openai = fakeOpenAI({ ok: true, text: 'Respuesta AUDIT_GENESIS_TEST' }, async () => {
+    const openai = fakeOpenAI({ ok: true, text: 'Respuesta AUDIT_GENESIS_TEST' }, { sideEffect: async () => {
       const { error } = await svc.rpc('escalate_genesis_conversation', {
         p_conversation_id: conv, p_run_id: null, p_reason: 'fraud', p_summary: 'AUDIT_GENESIS_TEST — escalamiento simulado durante generación',
       })
       if (error) throw error
-    })
+    } })
     const send = fakeSend({ ok: true, wamid: 'unused' })
     await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
     const run = await getRun(conv)
@@ -324,7 +389,7 @@ async function runScenarios(fixtures: Fixtures) {
   {
     const conv = await makeConversation(storeA, 'orch8')
     const msg = await makeMessage(storeA, conv, 'inbound', 'orch8')
-    const openai = fakeOpenAI({ ok: true, text: 'Respuesta AUDIT_GENESIS_TEST' }, async () => {
+    const openai = fakeOpenAI({ ok: true, text: 'Respuesta AUDIT_GENESIS_TEST' }, { sideEffect: async () => {
       const run = await getRun(conv)
       if (!run) throw new Error('orch8: run no encontrado antes del robo de lock')
       await svc.from('genesis_message_runs').update({ lock_expires_at: new Date(Date.now() - 5000).toISOString() }).eq('id', run.id)
@@ -332,7 +397,7 @@ async function runScenarios(fixtures: Fixtures) {
         p_conversation_id: conv, p_inbound_message_id: msg, p_lock_token: randomUUID(), p_ttl_seconds: 60,
       })
       if (error) throw error
-    })
+    } })
     const send = fakeSend({ ok: true, wamid: 'unused' })
     await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
     const run = await getRun(conv)
@@ -405,7 +470,7 @@ async function runScenarios(fixtures: Fixtures) {
 
     let releaseA: () => void = () => {}
     const gateA = new Promise<void>(resolve => { releaseA = resolve })
-    const openaiA = fakeOpenAI({ ok: true, text: 'Respuesta A AUDIT_GENESIS_TEST' }, async () => { await gateA })
+    const openaiA = fakeOpenAI({ ok: true, text: 'Respuesta A AUDIT_GENESIS_TEST' }, { sideEffect: async () => { await gateA } })
     const sendA = fakeSend({ ok: true, wamid: `AUDIT_GENESIS_TEST.wamid.${randomUUID()}` })
 
     const openaiB = fakeOpenAI({ ok: true, text: 'NO DEBERÍA LLEGAR A GENERARSE' })
@@ -435,6 +500,196 @@ async function runScenarios(fixtures: Fixtures) {
       .in('status', ['claimed', 'processing', 'generated', 'sending'])
     check('12c. Cero runs activos tras completar A (B nunca creó uno propio)', activeRunsConv12 === 0, { activeRunsConv12 })
   }
+
+  // ── Decision Plan V1 — Planner, Generator, Validator ──────────────────
+
+  // 13. [flag=true] Planner timeout → failed_retryable, failure_code=openai_timeout (mapeado — ver comentario en respond.ts),
+  //     el Generator NUNCA se llama (sin fallback a plan neutro).
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch13')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch13')
+    const openai = fakeOpenAI({ ok: true, text: 'NO DEBERÍA LLEGAR A GENERARSE' }, { planResult: { ok: false, kind: 'timeout' } })
+    const send = fakeSend({ ok: true, wamid: 'unused' })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('13. Planner timeout → status=failed_retryable, failure_code=openai_timeout (mapeado — ver comentario en respond.ts), Generator y Meta nunca llamados',
+      run?.status === 'failed_retryable' && run.failure_code === 'openai_timeout' &&
+      openai.generatorCalls.length === 0 && send.calls.length === 0, run)
+  })
+
+  // 14. [flag=true] Planner api_error → failed_retryable, failure_code=openai_error (mapeado — ver comentario en respond.ts)
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch14')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch14')
+    const openai = fakeOpenAI({ ok: true, text: 'NO DEBERÍA LLEGAR A GENERARSE' }, { planResult: { ok: false, kind: 'error' } })
+    const send = fakeSend({ ok: true, wamid: 'unused' })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('14. Planner api_error → status=failed_retryable, failure_code=openai_error (mapeado — ver comentario en respond.ts), Generator y Meta nunca llamados',
+      run?.status === 'failed_retryable' && run.failure_code === 'openai_error' &&
+      openai.generatorCalls.length === 0 && send.calls.length === 0, run)
+  })
+
+  // 15. [flag=true] Planner devuelve texto que no es JSON → failed_retryable,
+  //     failure_code=validation_rejected (mapeado — ver comentario en respond.ts)
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch15')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch15')
+    const openai = fakeOpenAI({ ok: true, text: 'NO DEBERÍA LLEGAR A GENERARSE' }, { planResult: { ok: true, text: 'esto no es JSON, es una explicación en prosa' } })
+    const send = fakeSend({ ok: true, wamid: 'unused' })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('15. Planner devuelve texto no-JSON → status=failed_retryable, failure_code=validation_rejected (mapeado — ver comentario en respond.ts), Generator y Meta nunca llamados',
+      run?.status === 'failed_retryable' && run.failure_code === 'validation_rejected' &&
+      openai.generatorCalls.length === 0 && send.calls.length === 0, run)
+  })
+
+  // 16. [flag=true] Planner devuelve JSON válido pero incoherente (regla cruzada:
+  //     goal=resolver_objecion con objection=null) → failed_retryable,
+  //     failure_code=validation_rejected (mapeado — ver comentario en respond.ts)
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch16')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch16')
+    const incoherentPlan = planResultFor({ stage: 'interesado', concept: 'ninguno', objection: null, goal: 'resolver_objecion', safety_signal: 'ninguna' })
+    const openai = fakeOpenAI({ ok: true, text: 'NO DEBERÍA LLEGAR A GENERARSE' }, { planResult: incoherentPlan })
+    const send = fakeSend({ ok: true, wamid: 'unused' })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('16. Planner devuelve plan incoherente (goal=resolver_objecion + objection=null) → status=failed_retryable, failure_code=validation_rejected (mapeado — ver comentario en respond.ts), Generator y Meta nunca llamados',
+      run?.status === 'failed_retryable' && run.failure_code === 'validation_rejected' &&
+      openai.generatorCalls.length === 0 && send.calls.length === 0, run)
+  })
+
+  // 17. [flag=true] Plan válido, Generator responde con una frase prohibida → violación
+  //     grave del validador → failed_terminal, failure_code=validation_rejected,
+  //     Meta NUNCA llamado (a diferencia de RG-2, donde el texto de OpenAI
+  //     viaja directo a Meta sin ningún chequeo).
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch17')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch17')
+    const openai = fakeOpenAI({ ok: true, text: 'Sí, esta pasta cura caries y es 100% seguro para cualquier persona.' })
+    const send = fakeSend({ ok: true, wamid: 'unused' })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('17. Generator responde con claim prohibido → status=failed_terminal, failure_code=validation_rejected, Meta nunca llamado',
+      run?.status === 'failed_terminal' && run.failure_code === 'validation_rejected' && send.calls.length === 0, run)
+  })
+
+  // 18. [flag=true] Auto-fix simple — conversación en curso (hay un mensaje previo antes
+  //     del inbound actual) y el Generator saluda de nuevo → el validador
+  //     debe quitar el saludo automáticamente y el turno SÍ se envía.
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch18')
+    // Mensaje previo real (outbound), para que history.length > 1 y
+    // greetingAllowed=false cuando llegue el inbound que dispara el test.
+    await makeMessage(storeA, conv, 'outbound', 'orch18-previo')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch18')
+    const openai = fakeOpenAI({ ok: true, text: '¡Hola! 😊 Sí, ayuda a fortalecer el esmalte con el uso diario.' })
+    const wamid = `AUDIT_GENESIS_TEST.wamid.${randomUUID()}`
+    const send = fakeSend({ ok: true, wamid })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    const outboundBody = await getLastOutboundBody(conv)
+    check('18. Saludo repetido en conversación en curso → auto-fix, status=sent, saludo removido del texto final',
+      run?.status === 'sent' && !!outboundBody && !/^\s*¡?\s*(hola|buenas)/i.test(outboundBody), { run, outboundBody })
+  })
+
+  // 19. [flag=true] Plan con safety_signal=reaccion_adversa pero el Generator no deriva
+  //     a un humano → violación grave (protocolo de escalamiento
+  //     incumplido) → failed_terminal, Meta nunca llamado. Distinto del
+  //     caso 17 (frase prohibida genérica): esto prueba específicamente que
+  //     el validador cruza el plan contra el texto, no solo el texto solo.
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch19')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch19')
+    const adversePlan = planResultFor({ stage: 'frustrado', concept: 'ninguno', objection: null, goal: 'tranquilizar', safety_signal: 'reaccion_adversa' })
+    const openai = fakeOpenAI({ ok: true, text: 'Lamento escuchar eso, esperamos que te mejores pronto.' }, { planResult: adversePlan })
+    const send = fakeSend({ ok: true, wamid: 'unused' })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('19. safety_signal=reaccion_adversa sin derivar a humano en el texto → status=failed_terminal, failure_code=validation_rejected, Meta nunca llamado',
+      run?.status === 'failed_terminal' && run.failure_code === 'validation_rejected' && send.calls.length === 0, run)
+  })
+
+  // ── GENESIS_DECISION_PLAN_ENABLED — flag de seguridad (cierre de fase) ──
+
+  // 20 (A). Flag ausente → una sola llamada OpenAI, Planner nunca invocado,
+  //     respuesta RG-2 normal.
+  await withDecisionPlanFlag(undefined, async () => {
+    const conv = await makeConversation(storeA, 'orch20')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch20')
+    const openai = fakeOpenAI({ ok: true, text: 'Respuesta RG-2 AUDIT_GENESIS_TEST' })
+    const wamid = `AUDIT_GENESIS_TEST.wamid.${randomUUID()}`
+    const send = fakeSend({ ok: true, wamid })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('20 (A). Flag ausente → 1 llamada OpenAI total, 0 llamadas al Planner, status=sent',
+      openai.calls.length === 1 && openai.plannerCalls.length === 0 && run?.status === 'sent', { calls: openai.calls.length, plannerCalls: openai.plannerCalls.length, run })
+  })
+
+  // 21 (B). Flag='false' explícito → mismo comportamiento que A.
+  await withDecisionPlanFlag('false', async () => {
+    const conv = await makeConversation(storeA, 'orch21')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch21')
+    const openai = fakeOpenAI({ ok: true, text: 'Respuesta RG-2 AUDIT_GENESIS_TEST' })
+    const wamid = `AUDIT_GENESIS_TEST.wamid.${randomUUID()}`
+    const send = fakeSend({ ok: true, wamid })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('21 (B). Flag="false" → 1 llamada OpenAI total, 0 llamadas al Planner, status=sent',
+      openai.calls.length === 1 && openai.plannerCalls.length === 0 && run?.status === 'sent', { calls: openai.calls.length, plannerCalls: openai.plannerCalls.length, run })
+  })
+
+  // 22 (C). Flag='true' → 2 llamadas, plan válido, el Generator recibe el
+  //     plan (verificado inspeccionando su propio system message), el
+  //     validador corre (status=sent confirma que pasó sin violaciones).
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch22')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch22')
+    const openai = fakeOpenAI({ ok: true, text: 'Ayuda a fortalecer el esmalte con el uso diario.' })
+    const wamid = `AUDIT_GENESIS_TEST.wamid.${randomUUID()}`
+    const send = fakeSend({ ok: true, wamid })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    const generatorPrompt = openai.lastGeneratorSystemMessage()
+    check('22 (C). Flag="true" → 2 llamadas (1 Planner + 1 Generator), Generator recibe el plan, status=sent',
+      openai.calls.length === 2 && openai.plannerCalls.length === 1 && openai.generatorCalls.length === 1 &&
+      !!generatorPrompt && generatorPrompt.includes('Plan de esta respuesta') && run?.status === 'sent',
+      { calls: openai.calls.length, plannerCalls: openai.plannerCalls.length, generatorCalls: openai.generatorCalls.length, run })
+  })
+
+  // 23 (D). Planner falla con flag='true' → Generator NUNCA se llama, run se
+  //     cierra con el código legal correspondiente (openai_timeout, ya que
+  //     'timeout' mapea a ese valor del CHECK constraint de failure_code).
+  await withDecisionPlanFlag('true', async () => {
+    const conv = await makeConversation(storeA, 'orch23')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch23')
+    const openai = fakeOpenAI({ ok: true, text: 'NO DEBERÍA LLEGAR A GENERARSE' }, { planResult: { ok: false, kind: 'timeout' } })
+    const send = fakeSend({ ok: true, wamid: 'unused' })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('23 (D). Planner falla con flag="true" → Generator nunca llamado, status=failed_retryable, failure_code=openai_timeout (mapeo legal)',
+      openai.generatorCalls.length === 0 && run?.status === 'failed_retryable' && run.failure_code === 'openai_timeout' && send.calls.length === 0,
+      { generatorCalls: openai.generatorCalls.length, run })
+  })
+
+  // 24 (E). Flag apagado + un planResult con JSON inválido preparado en el
+  //     doble → irrelevante, porque el Planner nunca se invoca. El turno se
+  //     resuelve con el único call (RG-2) sin ningún error.
+  await withDecisionPlanFlag(undefined, async () => {
+    const conv = await makeConversation(storeA, 'orch24')
+    const msg = await makeMessage(storeA, conv, 'inbound', 'orch24')
+    const openai = fakeOpenAI(
+      { ok: true, text: 'Respuesta RG-2 AUDIT_GENESIS_TEST' },
+      { planResult: { ok: true, text: 'esto no es JSON — si el Planner se llamara, esto fallaría' } },
+    )
+    const wamid = `AUDIT_GENESIS_TEST.wamid.${randomUUID()}`
+    const send = fakeSend({ ok: true, wamid })
+    await maybeGenesisRespond(svc, storeA, conv, msg, { callOpenAI: openai.fn, sendWhatsAppText: send.fn })
+    const run = await getRun(conv)
+    check('24 (E). Flag apagado + planResult inválido preparado (irrelevante) → Planner nunca invocado, status=sent igual',
+      openai.plannerCalls.length === 0 && run?.status === 'sent', { plannerCalls: openai.plannerCalls.length, run })
+  })
 }
 
 // ============================================================
@@ -445,7 +700,7 @@ async function main() {
   let fatalError: unknown = null
 
   try {
-    await withTimeout(runScenarios(fixtures), GLOBAL_TIMEOUT_MS, 'ejecución completa de los 12 escenarios del orquestador')
+    await withTimeout(runScenarios(fixtures), GLOBAL_TIMEOUT_MS, 'ejecución completa de los 24 escenarios del orquestador')
   } catch (e) {
     fatalError = e
     console.error('\n❌ Excepción no controlada durante los escenarios:', e)

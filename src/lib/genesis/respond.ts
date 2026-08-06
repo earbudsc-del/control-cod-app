@@ -41,6 +41,10 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { sendWhatsAppText as sendWhatsAppTextReal } from '@/lib/whatsapp/send-text'
 import { randomUUID } from 'node:crypto'
+import type { DecisionPlan, PlanConstraints } from './decision-plan'
+import { derivePlanConstraints } from './decision-plan'
+import { buildPlannerContext, generateDecisionPlan } from './planner'
+import { validateResponse } from './response-validator'
 
 type ServiceClient = Awaited<ReturnType<typeof createServiceClient>>
 
@@ -100,12 +104,26 @@ export type CallOpenAIResult =
   | { ok: true; text: string }
   | { ok: false; kind: 'timeout' | 'error' }
 
+export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
+
+// Opts opcionales — únicamente usados por el Planner (Decision Plan V1).
+// El Generator (caller existente, sin cambios) nunca los pasa, así que su
+// comportamiento es idéntico a antes: temperature=0.6, max_tokens=300, sin
+// response_format. Parámetro opcional, no rompe ningún caller existente.
+export interface CallOpenAIOpts {
+  temperature?: number
+  maxTokens?:   number
+  jsonMode?:    boolean
+  timeoutMs?:   number
+}
+
 // Tipos exportados únicamente para que scripts/test-genesis-respond-
 // orchestrator.ts pueda tipar sus dobles de prueba sin duplicar la firma.
 export type CallOpenAIFn = (
   apiKey:   string,
   model:    string,
-  messages: { role: 'system' | 'user' | 'assistant'; content: string }[],
+  messages: ChatMessage[],
+  opts?:    CallOpenAIOpts,
 ) => Promise<CallOpenAIResult>
 
 export type SendWhatsAppTextFn = typeof sendWhatsAppTextReal
@@ -273,14 +291,165 @@ export function buildSystemPrompt(
   return parts.join('\n\n')
 }
 
+// Decision Plan V1 — footer del Generator. Reutiliza persona+knowledge
+// exactamente igual que buildSystemPrompt(), pero:
+//   - Elimina "Proceso mental" y "Un solo objetivo por turno" — ambas
+//     secciones le pedían al modelo INFERIR stage/concept/objection/goal;
+//     eso ya lo resolvió el Planner, así que pedírselo de nuevo aquí sería
+//     trabajo duplicado y una fuente de inconsistencia (el Generator podría
+//     "decidir" algo distinto de lo que ya decidió el Planner).
+//   - Inserta un bloque nuevo con el Decision Plan ya resuelto + los
+//     constraints derivados por código (nunca por el LLM — ver
+//     decision-plan.ts).
+//   - Conserva sin cambios el resto del footer RG-1+RG-2 (Concepto
+//     dominante, Etapa del cliente, Longitud, Una sola pregunta y CTA,
+//     Ofertas, Objeciones, Naturalidad, Reglas generales) — son reglas de
+//     REDACCIÓN (cómo suena, no qué decidir), y ese trabajo lo sigue
+//     haciendo el Generator igual que antes. No se tocan para minimizar el
+//     riesgo de reabrir la calibración ya validada en RG-1/RG-2.
+export function buildGeneratorPrompt(
+  agentName:    string,
+  systemPrompt: string | null,
+  sections:     KnowledgeSectionRow[],
+  plan:         DecisionPlan,
+  constraints:  PlanConstraints,
+): string {
+  const parts: string[] = []
+
+  parts.push(
+    systemPrompt?.trim() ||
+    `Eres ${agentName || 'Génesis'}, un asistente de atención al cliente por WhatsApp para una ` +
+    'tienda de e-commerce con pago contra entrega (COD) en República Dominicana. Responde de ' +
+    'forma breve, natural, cordial y útil. No inventes información que no esté en la base de ' +
+    'conocimiento provista.',
+  )
+
+  const active = sections.filter(s => s.content?.trim())
+  if (active.length > 0) {
+    parts.push('--- Base de conocimiento ---')
+    for (const s of active) parts.push(`## ${s.label}\n${s.content}`)
+  }
+
+  const planLines = [
+    `Etapa del cliente: ${plan.stage}`,
+    `Concepto dominante: ${plan.concept}`,
+    `Objeción activa: ${plan.objection ?? 'ninguna'}`,
+    `Objetivo de este turno: ${plan.goal}`,
+    `Señal de seguridad: ${plan.safety_signal}`,
+  ]
+  if (constraints.mustEscalate) {
+    planLines.push(
+      'Este turno REQUIERE escalar — aplica de inmediato las reglas de reacción adversa o límite ' +
+      'médico según corresponda (ver Reglas generales más abajo). No vendas, no presiones, no ' +
+      'sigas construyendo la venta.',
+    )
+  }
+  if (!constraints.greetingAllowed) planLines.push('No saludes — ya existe historial en esta conversación.')
+  if (!constraints.offerAllowed)    planLines.push('No presentes la oferta en este turno.')
+  planLines.push(`Preguntas permitidas en esta respuesta: máximo ${constraints.maxQuestions}.`)
+
+  parts.push(
+    '--- Plan de esta respuesta (ya decidido — no lo reevalúes, no lo cuestiones, no lo muestres ' +
+    'al cliente) ---\n' + planLines.join('\n'),
+  )
+
+  parts.push(
+    '--- Cómo abrir una respuesta ---\n' +
+    'La primera oración contiene la respuesta directa o el beneficio principal — nunca un preámbulo. ' +
+    'No abras con "no", "pero", "sin embargo", una limitación o una advertencia, salvo que tu plan ' +
+    'indique señal de seguridad distinta de "ninguna". Para preguntas sobre un beneficio del ' +
+    'producto, sigue este orden: 1) respuesta directa, 2) el beneficio, 3) por qué funciona, 4) la ' +
+    'limitación honesta si aplica (ej. la pasta no elimina caries ya formadas, solo ayuda a ' +
+    'prevenirlas), 5) el siguiente paso natural — nunca omitas el paso 4 cuando exista una ' +
+    'limitación real conocida, y nunca inviertas el orden empezando por ella.\n\n' +
+    '--- Concepto dominante ---\n' +
+    'Redacta enfocado únicamente en el concepto de tu plan — no listes los demás beneficios salvo ' +
+    'que hagan falta para responder. Cuando expliques por qué funciona, nombra explícitamente la ' +
+    'nano-hidroxiapatita como el ingrediente responsable, no solo el efecto. Si el concepto es ' +
+    'blanqueamiento o el cliente pregunta por manchas/amarillamiento, la palabra "blanqueamiento" ' +
+    'debe aparecer literalmente en tu respuesta (aclarando que es suave y gradual, sin peróxidos). ' +
+    'Sé preciso con hechos ya aprobados en vez de generalizar con términos vagos.\n\n' +
+    '--- Etapa del cliente ---\n' +
+    'Curioso: genera interés, sin lanzar la oferta salvo que pregunte precio — termina ' +
+    'preferiblemente con una pregunta que descubra su necesidad real. Interesado: construye valor ' +
+    'sobre su necesidad concreta. Escéptico: usa evidencia real y el pago contra entrega como ' +
+    'reductor de riesgo. Comparando con otra marca: diferencia por la fórmula, nunca ataques ni ' +
+    'menosprecies a la competencia. Indeciso: reduce riesgo, no presiones. Confundido: simplifica, ' +
+    'una sola idea a la vez, nunca agregues más información encima de la confusión existente. ' +
+    'Ansioso o preocupado: reconoce brevemente la preocupación, responde con calma, nunca vendas ' +
+    'encima de esa emoción. Frustrado o molesto: no defiendas al negocio ni te justifiques, resuelve ' +
+    'primero lo que motivó la molestia. Listo para comprar: deja de vender y avanza directo al dato ' +
+    'operativo que falte, sin reabrir objeciones ni listar más opciones. Cliente con pedido ' +
+    'existente: prioriza servicio, no lo trates como lead nuevo, nunca pidas datos que ya tienes. ' +
+    'Riesgo de cancelación: entiende el motivo primero con empatía, sin lanzar promociones ni ' +
+    'presión comercial mientras tanto. El cliente debe sentir que tiene el control — ofrécele el ' +
+    'siguiente paso sin presionarlo, nunca decidas por él, nunca uses urgencia falsa.\n\n' +
+    '--- Longitud ---\n' +
+    'Breve (1-2 frases, menos de 280 caracteres): precio, pago, entrega, cliente listo para comprar, ' +
+    'pregunta repetida, o mensajes cortos/impacientes. Normal (2-4 frases, menos de 450 caracteres): ' +
+    'beneficio, producto, objeción sencilla. Profunda (hasta ~600 caracteres, máximo dos párrafos ' +
+    'cortos): objeción compleja, comparación, desconfianza, o explicación médica prudente. Por defecto ' +
+    'usa breve o normal, nunca párrafos largos por costumbre.\n\n' +
+    '--- Una sola pregunta ---\n' +
+    'Respeta el máximo de preguntas indicado en el plan — si necesitas presentar varias opciones de ' +
+    'oferta, hazlo en una sola frase interrogativa, nunca pregunta + otra oración que también termine ' +
+    'en "?". Si ya mostró señal de compra clara sin especificar oferta, asume la oferta principal (2 ' +
+    'pastas + 1 cepillo por RD$2,100) y ve directo a pedir el dato operativo que falte.\n\n' +
+    '--- Ofertas ---\n' +
+    'Si tu plan permite ofertar, dilo de forma directa: si preguntan el precio, dilo primero, en la ' +
+    'primera oración, sin rodeo. Usa una sola oferta salvo que pidan alternativas. Si tu plan no ' +
+    'permite ofertar en este turno, no la menciones aunque parezca natural hacerlo.\n\n' +
+    '--- Objeciones ---\n' +
+    'La desconfianza del cliente no es una agresión — nunca respondas desde una posición defensiva. ' +
+    'Valida la duda como legítima, reencuadra con un hecho real, da la evidencia concreta que lo ' +
+    'sostiene (ingrediente, pago contra entrega, contenido completo de la oferta), y solo entonces ' +
+    'avanza con una pregunta o CTA suave si el plan lo permite. Antes de intentar cerrar, reduce el ' +
+    'riesgo percibido en este orden: claridad sobre lo que va a pasar, pago contra entrega, cómo es el ' +
+    'proceso, y un hecho verificable. Si la objeción es específicamente no tener dinero ahora, la ' +
+    'evidencia correcta es recordar que no necesita pagar en este momento — paga contra entrega, ' +
+    'cuando el mensajero se la entregue, no antes. Si la misma objeción ya se resolvió una vez y ' +
+    'reaparece, no insistas con más argumentos — deja la puerta abierta sin presionar.\n\n' +
+    '--- Naturalidad ---\n' +
+    'Varía la apertura, el cierre y el emoji entre mensajes de la misma conversación — nunca repitas ' +
+    'literalmente la apertura, el CTA o el emoji del turno anterior de Génesis. Si en las instrucciones ' +
+    'anteriores aparece "Sí 😊" como ejemplo ilustrativo, es solo un ejemplo — nunca lo repitas como ' +
+    'fórmula fija. Nunca repitas literalmente la pregunta del cliente como apertura. No repitas ' +
+    'información, oferta u objeción ya resuelta salvo que el cliente la pida de nuevo o haya confusión ' +
+    'real. Evita sonar clínico o como un asistente genérico de IA.\n\n' +
+    '--- Reglas generales ---\n' +
+    'Responde siempre en español natural para República Dominicana, sin markdown ni listas. No ' +
+    'inventes claims que no estén en la base de conocimiento. No confirmes ni canceles pedidos por tu ' +
+    'cuenta — esa acción la gestiona el sistema automáticamente cuando el cliente pulsa los botones del ' +
+    'mensaje de confirmación. Si tu plan indica señal de seguridad "reaccion_adversa", tu mensaje ' +
+    'completo tiene solo tres partes, en este orden, y nada más: empatía breve, recomendar suspender el ' +
+    'uso de inmediato, y decir explícitamente que un agente humano va a continuar el caso. Nunca ' +
+    'agregues una cuarta parte preguntando por los síntomas, su intensidad, o pidiendo más detalle antes ' +
+    'de ofrecer el agente — escala siempre, de inmediato, sin excepción, sin importar qué más haya dicho ' +
+    'el cliente en el mismo mensaje (incluida una cancelación). Si tu plan indica señal de seguridad ' +
+    '"revision_medica", recomienda evaluación profesional con naturalidad, sin alarmar. Si no sabes la ' +
+    'respuesta a algo o el cliente pide algo que requiere intervención humana, dilo con naturalidad y ' +
+    'ofrece que un agente lo va a atender.',
+  )
+
+  return parts.join('\n\n')
+}
+
 // Timeout explícito vía AbortController (antes no existía — hallazgo H14).
 // Un abort produce kind='timeout', distinguible de cualquier otro fallo
 // (kind='error') para poder registrar failure_code='openai_timeout' en vez
-// de 'openai_error' genérico. Mismo modelo/max_tokens/temperature que
-// siempre — cero cambio de comportamiento comercial.
-const callOpenAI: CallOpenAIFn = async (apiKey, model, messages) => {
+// de 'openai_error' genérico.
+//
+// Decision Plan V1: acepta un 4º parámetro opcional `opts` para que el
+// Planner pueda pedir temperature baja / max_tokens chico / JSON mode sin
+// duplicar esta función (instrucción explícita: "Debe reutilizar
+// callOpenAI()"). El Generator (único caller previo a esta fase) nunca pasa
+// `opts` — sus valores por defecto (0.6 / 300 / sin json mode / 15s)
+// reproducen EXACTAMENTE el comportamiento anterior, cero cambio para el
+// caller existente.
+const callOpenAI: CallOpenAIFn = async (apiKey, model, messages, opts = {}) => {
+  const timeoutMs = opts.timeoutMs ?? OPENAI_TIMEOUT_MS
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -292,8 +461,9 @@ const callOpenAI: CallOpenAIFn = async (apiKey, model, messages) => {
       body: JSON.stringify({
         model,
         messages,
-        max_tokens:  MAX_TOKENS,
-        temperature: 0.6,
+        max_tokens:  opts.maxTokens ?? MAX_TOKENS,
+        temperature: opts.temperature ?? 0.6,
+        ...(opts.jsonMode ? { response_format: { type: 'json_object' } } : {}),
       }),
       signal: controller.signal,
     })
@@ -312,13 +482,15 @@ const callOpenAI: CallOpenAIFn = async (apiKey, model, messages) => {
   } catch (err) {
     clearTimeout(timer)
     if (err instanceof Error && err.name === 'AbortError') {
-      console.error('[genesis] OpenAI timeout tras', OPENAI_TIMEOUT_MS, 'ms')
+      console.error('[genesis] OpenAI timeout tras', timeoutMs, 'ms')
       return { ok: false, kind: 'timeout' }
     }
     console.error('[genesis] OpenAI fetch threw', err)
     return { ok: false, kind: 'error' }
   }
 }
+
+export { callOpenAI }
 
 // Cierre del run — único punto que llama a finish_genesis_run(), usado desde
 // los 3 caminos de salida terminal (fallo de OpenAI, rechazo de
@@ -506,32 +678,168 @@ export async function maybeGenesisRespond(
       return
     }
 
-    // ── 5. Llamar OpenAI ─────────────────────────────────────────────────────
-    const systemPrompt = buildSystemPrompt(
-      config.agent_name,
-      config.system_prompt,
-      (sections ?? []) as KnowledgeSectionRow[],
-    )
-
-    const chatMessages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
-      { role: 'system', content: systemPrompt },
-      ...history.map(m => ({
-        role:    (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
-        content: m.body as string,
-      })),
-    ]
+    // ── 5. Generar la respuesta — RG-2 (desplegado) o Decision Plan V1 (experimental) ──
+    // GENESIS_DECISION_PLAN_ENABLED — flag de seguridad. Cualquier valor
+    // distinto de la cadena exacta 'true' (ausente, vacío, 'false', typo,
+    // etc.) usa el camino RG-2 — el mismo que corre hoy en producción, sin
+    // ninguna llamada al Planner. Default seguro: false. La variable NO se
+    // agregó a Vercel en esta fase — hasta que exista ahí, este flag es
+    // siempre 'false' en producción real.
+    const decisionPlanEnabled = process.env.GENESIS_DECISION_PLAN_ENABLED === 'true'
 
     const model = config.model?.trim() || 'gpt-4o-mini'
-    console.log('[genesis] llamando a OpenAI — model:', model, '| historial:', history.length, 'mensajes | run:', runId)
-    const openaiResult = await openaiFn(apiKey, model, chatMessages)
+    let replyText: string
 
-    if (!openaiResult.ok) {
-      const failureCode = openaiResult.kind === 'timeout' ? 'openai_timeout' : 'openai_error'
-      console.log('[genesis] OpenAI falló (', openaiResult.kind, ') — cerrando run como failed_retryable | run:', runId)
-      await finishRun(supabase, runId, lockToken, 'failed_retryable', { failure_code: failureCode })
-      return
+    if (!decisionPlanEnabled) {
+      // ── RG-2 — camino desplegado, sin cambios de comportamiento ──────────
+      // Deliberadamente NO comparte código con la rama Decision Plan de
+      // abajo más allá de `historyMessages` (mapeo puro de `history`, cero
+      // lógica de negocio) — instrucción explícita: no refactorizar RG-2
+      // para compartir código si eso aumenta el riesgo. Esta rama reproduce
+      // exactamente la única llamada a OpenAI que existía antes de esta
+      // fase: mismo buildSystemPrompt(), mismo mensaje de log, mismo mapeo
+      // de failure_code (openai_timeout/openai_error — ya eran los valores
+      // legales, sin cambios).
+      const systemPrompt = buildSystemPrompt(
+        config.agent_name,
+        config.system_prompt,
+        (sections ?? []) as KnowledgeSectionRow[],
+      )
+
+      const historyMessages: ChatMessage[] = history.map(m => ({
+        role:    (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: m.body as string,
+      }))
+
+      const chatMessages: ChatMessage[] = [
+        { role: 'system', content: systemPrompt },
+        ...historyMessages,
+      ]
+
+      console.log('[genesis] llamando a OpenAI — model:', model, '| historial:', history.length, 'mensajes | run:', runId)
+      const openaiResult = await openaiFn(apiKey, model, chatMessages)
+
+      if (!openaiResult.ok) {
+        const failureCode = openaiResult.kind === 'timeout' ? 'openai_timeout' : 'openai_error'
+        console.log('[genesis] OpenAI falló (', openaiResult.kind, ') — cerrando run como failed_retryable | run:', runId)
+        await finishRun(supabase, runId, lockToken, 'failed_retryable', { failure_code: failureCode })
+        return
+      }
+      replyText = openaiResult.text
+    } else {
+      // ── Decision Plan V1 — EXPERIMENTAL, detrás de GENESIS_DECISION_PLAN_ENABLED ──
+      // No activado en producción (cierre de fase — ver docs internas):
+      // 1/10 casos con mejora clara, 8/10 equivalentes a RG-2, 1/10 peor
+      // (turno perdido por plan incoherente), ~+68% tokens de entrada, mayor
+      // latencia. Se conserva completo detrás del flag para no perder el
+      // trabajo, sin activarlo.
+      const historyMessages: ChatMessage[] = history.map(m => ({
+        role:    (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: m.body as string,
+      }))
+
+      // ── 5a. Planner ──────────────────────────────────────────────────────
+      // Llamada independiente, JSON puro, temperature baja, timeout propio,
+      // reutiliza openaiFn (mismo seam de deps que el Generator). No escribe
+      // en BD, no envía mensajes — solo clasifica.
+      const plannerPrompt = buildPlannerContext(
+        config.agent_name,
+        config.system_prompt,
+        (sections ?? []) as KnowledgeSectionRow[],
+      )
+
+      console.log('[genesis] llamando al Planner — model:', model, '| historial:', history.length, 'mensajes | run:', runId)
+      const planOutcome = await generateDecisionPlan(apiKey, model, plannerPrompt, historyMessages, openaiFn)
+
+      if (!planOutcome.ok) {
+        // Sin fallback a un plan neutro — decisión explícita del producto:
+        // "prefiero perder un turno antes que responder con una decisión
+        // incorrecta". El run se cierra aquí, el Generator nunca se llama.
+        //
+        // failure_code está restringido por un CHECK constraint de Postgres
+        // (migración 056_genesis_message_runs.sql) a un enum fijo que NO
+        // incluye valores específicos de Planner/Generator/Validator — solo
+        // 'openai_error' | 'openai_timeout' | 'validation_rejected' | ...
+        // Agregar valores nuevos requeriría una migración, fuera de alcance.
+        // Mapeo (documentado aquí, NO es lo que Supabase almacena
+        // literalmente — la columna solo ve el valor de la derecha; el
+        // detalle específico de la izquierda vive únicamente en los logs de
+        // arriba, nunca lo afirmes como consultable desde la DB):
+        //   planner_timeout           → openai_timeout
+        //   planner_api_error         → openai_error
+        //   planner_invalid_json      → validation_rejected
+        //   planner_validation_failed → validation_rejected
+        //   response_validation_failed→ validation_rejected (ver 5c abajo)
+        const dbFailureCodeByKind: Record<typeof planOutcome.kind, 'openai_timeout' | 'openai_error' | 'validation_rejected'> = {
+          timeout:            'openai_timeout',
+          api_error:          'openai_error',
+          invalid_json:       'validation_rejected',
+          validation_failed:  'validation_rejected',
+        }
+        const failureCode = dbFailureCodeByKind[planOutcome.kind]
+        console.log('[genesis] Planner falló (', planOutcome.kind, planOutcome.reason ?? '', ') — cerrando run como failed_retryable, sin llamar al Generator | run:', runId, '| failure_code(DB):', failureCode)
+        await finishRun(supabase, runId, lockToken, 'failed_retryable', { failure_code: failureCode })
+        return
+      }
+
+      const plan = planOutcome.plan
+      console.log('[genesis] Decision Plan —', JSON.stringify(plan), '| run:', runId)
+
+      // ── 5b. Generator — redacta a partir del plan ya decidido ────────────
+      // `history` incluye el propio mensaje inbound que disparó este turno
+      // (ya está insertado en wa_messages antes de que el webhook llame a
+      // maybeGenesisRespond) — por eso "hay conversación previa" es
+      // history.length > 1 (más que solo el mensaje actual), no > 0.
+      const hasHistory = history.length > 1
+      const constraints = derivePlanConstraints(plan, hasHistory)
+      const generatorPrompt = buildGeneratorPrompt(
+        config.agent_name,
+        config.system_prompt,
+        (sections ?? []) as KnowledgeSectionRow[],
+        plan,
+        constraints,
+      )
+
+      const chatMessages: ChatMessage[] = [
+        { role: 'system', content: generatorPrompt },
+        ...historyMessages,
+      ]
+
+      console.log('[genesis] llamando al Generator — model:', model, '| historial:', history.length, 'mensajes | run:', runId)
+      const openaiResult = await openaiFn(apiKey, model, chatMessages)
+
+      if (!openaiResult.ok) {
+        // Mismo enum legal que arriba — 'openai_timeout'/'openai_error' ya
+        // existían antes de esta fase y siguen siendo los valores correctos
+        // para un fallo de OpenAI, sea del Planner o del Generator.
+        const failureCode = openaiResult.kind === 'timeout' ? 'openai_timeout' : 'openai_error'
+        console.log('[genesis] Generator falló (', openaiResult.kind, ') — cerrando run como failed_retryable | run:', runId)
+        await finishRun(supabase, runId, lockToken, 'failed_retryable', { failure_code: failureCode })
+        return
+      }
+
+      // ── 5c. Validador determinístico — última puerta antes de Meta ───────
+      const previousAssistantText = [...history].reverse().find(m => m.direction === 'outbound')?.body ?? null
+      const validation = validateResponse(openaiResult.text, plan, constraints, {
+        hasHistory,
+        previousAssistantText,
+      })
+
+      if (validation.warnings.length > 0) {
+        console.log('[genesis] validador — advertencias:', validation.warnings.join(' | '), '| run:', runId)
+      }
+
+      if (validation.graveViolations.length > 0) {
+        // 'validation_rejected' ya existía en el enum legal de failure_code
+        // (migración 056) — encaja exactamente con este caso sin necesitar
+        // ningún valor nuevo.
+        console.log('[genesis] validador — violación grave, no se envía:', validation.graveViolations.join(' | '), '| run:', runId)
+        await finishRun(supabase, runId, lockToken, 'failed_terminal', { failure_code: 'validation_rejected' })
+        return
+      }
+
+      replyText = validation.finalText
     }
-    const replyText = openaiResult.text
 
     // ── 6. renew_genesis_run(status='generated') — checkpoint 2, tras OpenAI ──
     const { data: renew2, error: renew2Error } = await supabase
