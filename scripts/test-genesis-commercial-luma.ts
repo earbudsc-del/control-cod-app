@@ -55,10 +55,12 @@ const storeArg   = args.find(a => a.startsWith('--store='))?.split('=')[1]
 
 // Timeout global — mismo patrón que scripts/test-genesis-run-rpcs.ts y
 // scripts/test-genesis-respond-orchestrator.ts (Promise.race, nunca
-// process.exit() directo desde el timer). 32 casos reales x hasta 15s de
-// timeout por llamada (ver callOpenAIReal) en el peor caso serían 480s; se
-// deja margen adicional para lecturas de Supabase + logging.
-const GLOBAL_TIMEOUT_MS = 600_000
+// process.exit() directo desde el timer). RG-2: 97 casos reales x hasta 15s
+// de timeout por llamada (ver callOpenAIReal) en el peor caso serían ~1455s
+// si se corrieran todos sin --only; se deja margen adicional para lecturas
+// de Supabase + logging. El uso recomendado (RG-2 Bloque 7) siempre acota
+// con --only a ≤35 casos por ronda, muy por debajo de este límite.
+const GLOBAL_TIMEOUT_MS = 1_800_000
 class TestTimeoutError extends Error {}
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>
@@ -88,6 +90,11 @@ interface TestCase {
   forbiddenConceptsAnyOf?:   string[][] // conceptos de OTRO beneficio que NO deben aparecer (concepto dominante único)
   mustNotAskFields?:         string[]   // datos ya entregados por el cliente — no se deben volver a pedir
   maxQuestionMarks?:         number     // máximo de '?' en el texto (default 1 — una sola pregunta)
+  // Campos RG-2 (Sales Copy Engine + Conversational Psychology — 25 casos nuevos):
+  mustNotGreet?:              boolean               // conversación en curso: no debe re-saludar
+  benefitBeforeLimitation?:  { benefit: string[]; limitation: string[] } // el beneficio debe aparecer antes que la limitación
+  priceFirst?:                boolean               // el precio debe aparecer en los primeros ~80 caracteres
+  noRepeatPhrase?:            string[]              // frases del turno anterior que NO deben repetirse literalmente
 }
 
 function tc(partial: Omit<TestCase, 'prohibitedPhrases' | 'maxSentences'> & { prohibitedPhrases?: string[]; maxSentences?: number }): TestCase {
@@ -429,6 +436,142 @@ const CASES: TestCase[] = [
     requiredConceptsAnyOf: [[]],
     mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450,
     prohibitedPhrases: [...GLOBAL_PROHIBITED, 'le informamos que', 'procedemos a'] }),
+
+  // ── RG-2 — Sales Copy Engine + Conversational Psychology (25 casos nuevos, ids 73-97) ──
+
+  tc({ id: 73, category: 'continuidad — no re-saludar', message: 'y tambien sirve para el mal aliento?',
+    priorAssistantTurn: 'Sí, ayuda a fortalecer el esmalte con el uso diario.',
+    requiredConceptsAnyOf: [[]],
+    mustNotGreet: true,
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450 }),
+
+  tc({ id: 74, category: 'pregunta corta → respuesta corta', message: 'sirve?',
+    requiredConceptsAnyOf: [['fortalece', 'remineraliza', 'esmalte']],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: true, maxChars: 200 }),
+
+  tc({ id: 75, category: 'caries — beneficio antes de limitación', message: 'la pasta me quita las caries que ya tengo?',
+    // Ronda 1-2 (RG-2): paráfrasis reales observadas — "no elimina las caries
+    // ya formadas... lo ideal es que un dentista las trate" y "necesitan
+    // atención de un dentista para ser tratadas" transmiten la misma
+    // limitación honesta que "no la elimina". Se amplía a nivel de "atención
+    // de un dentista" (invariante a la conjugación del verbo) en vez de
+    // depender de "necesita"/"necesitan" exactos.
+    requiredConceptsAnyOf: [['fortalece', 'remineraliza'], ['no la elimina', 'no la quita', 'no la trata', 'atención de un dentista', 'atencion de un dentista', 'requiere atención', 'requiere atencion', 'las trate', 'las trata', 'ya formadas', 'tratadas']],
+    benefitBeforeLimitation: {
+      benefit:     ['fortalece', 'remineraliza', 'esmalte'],
+      limitation:  ['no la elimina', 'no la quita', 'no la trata', 'atención de un dentista', 'atencion de un dentista', 'requiere atención', 'requiere atencion', 'las trate', 'las trata', 'ya formadas', 'tratadas'],
+    },
+    mustNotOpenWithNegation: true, mustEscalate: false, dentistMentionAllowed: true, ctaRequired: false, maxChars: 450 }),
+
+  tc({ id: 76, category: 'caries — transición natural, sin CTA brusco', message: 'tengo caries, ayuda en algo?',
+    requiredConceptsAnyOf: [['fortalece', 'remineraliza']],
+    mustNotOpenWithNegation: true, mustEscalate: false, dentistMentionAllowed: true, ctaRequired: true, maxChars: 450, maxQuestionMarks: 1 }),
+
+  tc({ id: 77, category: 'sensibilidad — dolor real', message: 'se me enfrian los dientes cuando tomo algo frio, ayuda?',
+    requiredConceptsAnyOf: [['sensibilidad']],
+    mustNotOpenWithNegation: true, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: true, maxChars: 450 }),
+
+  tc({ id: 78, category: 'precio primero', message: 'cual es el precio',
+    requiredConceptsAnyOf: [['2,100', '2100']],
+    priceFirst: true,
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: true, maxChars: 280 }),
+
+  tc({ id: 79, category: 'precio repetido — desde valor, no copiar', message: 'el precio otra vez porfa',
+    priorAssistantTurn: 'La oferta principal es 2 pastas + 1 cepillo gratis por RD$2,100 con envío incluido y pago al recibir.',
+    requiredConceptsAnyOf: [['2,100', '2100']],
+    noRepeatPhrase: ['La oferta principal es 2 pastas + 1 cepillo gratis por RD$2,100 con envío incluido y pago al recibir.'],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 280 }),
+
+  tc({ id: 80, category: 'objeción precio — validar sin discutir', message: 'Está muy cara.',
+    requiredConceptsAnyOf: [[]],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450,
+    prohibitedPhrases: [...GLOBAL_PROHIBITED, 'no es cara', 'no es tan cara'] }),
+
+  tc({ id: 81, category: 'desconfianza — reducir riesgo con COD', message: 'no confio en comprar por aqui',
+    requiredConceptsAnyOf: [COD_PHRASES],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450 }),
+
+  tc({ id: 82, category: 'parece estafa — sin defensiva', message: 'esto parece una estafa',
+    requiredConceptsAnyOf: [COD_PHRASES],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450,
+    prohibitedPhrases: [...GLOBAL_PROHIBITED, 'no somos estafadores', 'no es ningun engaño', 'no es ningún engaño'] }),
+
+  tc({ id: 83, category: 'no entendí — simplificar', message: 'no entendi nada de lo que dijiste',
+    requiredConceptsAnyOf: [[]],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 280, maxSentences: 2 }),
+
+  tc({ id: 84, category: 'confundido — un solo concepto', message: 'estoy confundido, que hace exactamente esto para mis dientes',
+    requiredConceptsAnyOf: [['fortalece', 'remineraliza', 'esmalte']],
+    forbiddenConceptsAnyOf: [['blanqueamiento', 'blanquea'], ['mal aliento']],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450, maxSentences: 3 }),
+
+  tc({ id: 85, category: 'ansioso por entrega — tranquilizar, no vender', message: 'ya llevo 2 dias esperando el pedido, me estoy preocupando',
+    requiredConceptsAnyOf: [[]],
+    offerProhibited: true,
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450 }),
+
+  tc({ id: 86, category: 'molesto — resolver primero', message: 'esto es un desastre, nadie me contesta',
+    requiredConceptsAnyOf: [[]],
+    offerProhibited: true,
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450,
+    prohibitedPhrases: [...GLOBAL_PROHIBITED, 'nosotros si contestamos', 'eso no es cierto'] }),
+
+  tc({ id: 87, category: 'comparando — diferenciar sin atacar', message: 'sensodyne es mas conocida que ustedes',
+    requiredConceptsAnyOf: [['nano-hidroxiapatita', 'nano hidroxiapatita', 'fortalece']],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 600,
+    prohibitedPhrases: [...GLOBAL_PROHIBITED, 'sensodyne no sirve', 'sensodyne es mala', 'peor que sensodyne'] }),
+
+  tc({ id: 88, category: 'decidido — no educar', message: 'ya se todo, solo mandamela',
+    requiredConceptsAnyOf: [[]],
+    forbiddenConceptsAnyOf: [['nano-hidroxiapatita', 'nano hidroxiapatita'], ['remineraliza'], ['fortalece']],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 280 }),
+
+  tc({ id: 89, category: 'dirección entregada — no pedirla otra vez', message: 'Ana Perez, Calle Duarte 12, Santiago',
+    requiredConceptsAnyOf: [[]],
+    mustNotAskFields: ['nombre', 'dirección', 'ciudad'],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 280 }),
+
+  tc({ id: 90, category: 'señal de compra — "dale", avanzar', message: 'dale',
+    priorAssistantTurn: '¿Te reservo la oferta de RD$2,100?',
+    requiredConceptsAnyOf: [[]],
+    forbiddenConceptsAnyOf: [['nano-hidroxiapatita', 'nano hidroxiapatita'], ['remineraliza']],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 200 }),
+
+  tc({ id: 91, category: '"ok" — sin discurso', message: 'ok',
+    priorAssistantTurn: 'Perfecto, tu pedido queda anotado.',
+    requiredConceptsAnyOf: [[]],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 150, maxSentences: 2 }),
+
+  tc({ id: 92, category: 'duda repetida — no copiar la misma respuesta', message: 'en serio no tiene fluor?',
+    priorAssistantTurn: 'No tiene flúor, su fórmula es a base de nano-hidroxiapatita.',
+    requiredConceptsAnyOf: [NO_FLUORIDE_PHRASES],
+    noRepeatPhrase: ['No tiene flúor, su fórmula es a base de nano-hidroxiapatita.'],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 280 }),
+
+  tc({ id: 93, category: 'oferta ya mencionada — no repetirla completa', message: 'y esa oferta de 2100 sigue?',
+    priorAssistantTurn: 'La oferta principal es 2 pastas + 1 cepillo gratis por RD$2,100 con envío incluido y pago al recibir.',
+    requiredConceptsAnyOf: [['2,100', '2100']],
+    noRepeatPhrase: ['La oferta principal es 2 pastas + 1 cepillo gratis por RD$2,100 con envío incluido y pago al recibir.'],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 280 }),
+
+  tc({ id: 94, category: 'reacción adversa — sin pregunta comercial', message: 'me salio un sarpullido despues de usarla',
+    requiredConceptsAnyOf: [['agente', 'profesional', 'especialista', 'médico', 'medico']],
+    mustNotOpenWithNegation: false, mustEscalate: true, dentistMentionAllowed: true, ctaRequired: false,
+    offerProhibited: true, maxChars: 450, maxQuestionMarks: 0 }),
+
+  tc({ id: 95, category: 'cancelación — sin presión', message: 'quiero cancelar todo',
+    requiredConceptsAnyOf: [[]],
+    offerProhibited: true, maxChars: 450, maxQuestionMarks: 1,
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false }),
+
+  tc({ id: 96, category: 'conversación formal', message: 'Buenas tardes, desearía información sobre su pasta dental, por favor.',
+    requiredConceptsAnyOf: [[]],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450,
+    prohibitedPhrases: [...GLOBAL_PROHIBITED, 'estimado cliente', 'le informamos que'] }),
+
+  tc({ id: 97, category: 'conversación informal dominicana', message: "klk esa vaina si sirve o e' cuento",
+    requiredConceptsAnyOf: [['nano-hidroxiapatita', 'nano hidroxiapatita'], ['fortalece', 'remineraliza']],
+    mustNotOpenWithNegation: false, mustEscalate: false, dentistMentionAllowed: false, ctaRequired: false, maxChars: 450 }),
 ]
 
 // ── Utilidades ────────────────────────────────────────────────────────────
@@ -570,6 +713,42 @@ function evaluateResponse(text: string, c: TestCase): CheckResult[] {
     const questionMarks = (text.match(/\?/g) ?? []).length
     results.push({ name: `máximo ${c.maxQuestionMarks} pregunta(s)`, passed: questionMarks <= c.maxQuestionMarks, detail: `${questionMarks} signos '?'` })
   }
+
+  // ── Checks RG-2 (Sales Copy Engine + Conversational Psychology) ───────
+  if (c.mustNotGreet) {
+    const opensWithGreeting = /^\s*(hola|buenas|buen[oa]s\s+(d[ií]as|tardes|noches)|saludos)\b/i.test(text.trim())
+    results.push({ name: 'no re-saluda en conversación en curso', passed: !opensWithGreeting })
+  }
+
+  if (c.benefitBeforeLimitation) {
+    const { benefit, limitation } = c.benefitBeforeLimitation
+    const benefitIdx = Math.min(...benefit.map(b => { const i = norm.indexOf(normalize(b)); return i === -1 ? Infinity : i }))
+    const limitationIdx = Math.min(...limitation.map(l => { const i = norm.indexOf(normalize(l)); return i === -1 ? Infinity : i }))
+    // Si ninguno de los dos aparece, no es una violación de orden (otro check ya exige el concepto).
+    const passed = benefitIdx === Infinity || limitationIdx === Infinity || benefitIdx < limitationIdx
+    results.push({ name: 'beneficio antes que limitación', passed, detail: `beneficio@${benefitIdx} limitación@${limitationIdx}` })
+  }
+
+  if (c.priceFirst) {
+    const window = normalize(text.slice(0, 80))
+    const passed = window.includes('2,100') || window.includes('2100')
+    results.push({ name: 'precio en la primera oración', passed })
+  }
+
+  if (c.noRepeatPhrase) {
+    for (const phrase of c.noRepeatPhrase) {
+      const passed = !text.includes(phrase)
+      results.push({ name: `no repite literalmente el turno anterior ("${phrase.slice(0, 30)}…")`, passed })
+    }
+  }
+
+  // ── Checks universales RG-2 (aplican a todos los casos en modo real) ──
+  const hasListMarkers = /(^|\n)\s*([-•*]|\d+[.)])\s+/m.test(text)
+  results.push({ name: 'sin listas excesivas (viñetas/numeración)', passed: !hasListMarkers })
+
+  const aiCallCenterTone = ['como asistente virtual', 'como ia', 'te informo que', 'le informamos que', 'procedemos a', 'estimado cliente']
+  const hasAiTone = aiCallCenterTone.some(p => norm.includes(normalize(p)))
+  results.push({ name: 'sin tono de IA/call center', passed: !hasAiTone })
 
   return results
 }
@@ -828,7 +1007,7 @@ async function main() {
   if (failCount > 0) process.exitCode = 1
 }
 
-withTimeout(main(), GLOBAL_TIMEOUT_MS, 'ejecución completa de la suite comercial (32 casos)').catch(e => {
+withTimeout(main(), GLOBAL_TIMEOUT_MS, 'ejecución completa de la suite comercial (97 casos)').catch(e => {
   console.error(e instanceof TestTimeoutError ? `✖ ${e.message}` : e)
   process.exit(1)
 })
