@@ -10,7 +10,8 @@ import { NextResponse } from 'next/server'
  * Query params:
  *   ?page=N                      — página (default 1)
  *   ?limit=N                     — registros por página (default 50, max 100)
- *   ?search=X                    — búsqueda por nombre, teléfono, #orden, tracking
+ *   ?search=X                    — búsqueda por nombre, teléfono, #orden, tracking,
+ *                                  ciudad, provincia o dirección (parcial, case-insensitive)
  *   ?from=ISO                    — filtro desde fecha, se combina (AND) con cualquier filter/status/
  *                                  payment activo, incluyendo santo_domingo. Columna: shopify_created_at,
  *                                  EXCEPTO con filter=santo_domingo&payment=paid, donde es paid_at
@@ -70,7 +71,7 @@ export async function GET(request: Request) {
     // ── Filtros de búsqueda por texto ─────────────────────────────────────────
     if (search) {
       query = query.or(
-        `customer_name.ilike.%${search}%,customer_phone.ilike.%${search}%,order_number.ilike.%${search}%,tracking_number.ilike.%${search}%`,
+        `customer_name.ilike.%${search}%,customer_phone.ilike.%${search}%,order_number.ilike.%${search}%,tracking_number.ilike.%${search}%,city.ilike.%${search}%,province.ilike.%${search}%,customer_address.ilike.%${search}%`,
       )
     }
 

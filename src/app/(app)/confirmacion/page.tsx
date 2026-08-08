@@ -1040,9 +1040,12 @@ export default function ConfirmacionPage() {
     const q = searchQuery.trim().toLowerCase()
     if (!q) return result
     return result.filter(o =>
-      (o.customer_name  ?? '').toLowerCase().includes(q) ||
-      (o.customer_phone ?? '').toLowerCase().includes(q) ||
-      (o.order_number   ?? '').toLowerCase().includes(q),
+      (o.customer_name    ?? '').toLowerCase().includes(q) ||
+      (o.customer_phone   ?? '').toLowerCase().includes(q) ||
+      (o.order_number     ?? '').toLowerCase().includes(q) ||
+      (o.city             ?? '').toLowerCase().includes(q) ||
+      (o.province         ?? '').toLowerCase().includes(q) ||
+      (o.customer_address ?? '').toLowerCase().includes(q),
     )
   }, [displayedOrders, effectiveDateRange, searchQuery, statusFilter])
 
@@ -1593,7 +1596,7 @@ export default function ConfirmacionPage() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
             <input type="text" value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Buscar por nombre, teléfono, #orden o guía..."
+              placeholder="Buscar por nombre, teléfono, ciudad, dirección, #orden o guía..."
               className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg
                          focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400
                          placeholder:text-gray-400 bg-white" />
