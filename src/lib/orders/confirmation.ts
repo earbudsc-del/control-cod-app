@@ -79,7 +79,7 @@ export async function applyConfirmationAction({
 }: ApplyConfirmationActionParams): Promise<ApplyConfirmationActionResult> {
   const { data: order } = await supabase
     .from('orders')
-    .select('confirmation_attempts, duplicate_alert, confirmation_status, normalized_status, city, province, customer_address, tracking_number')
+    .select('confirmation_attempts, duplicate_alert, confirmation_status, normalized_status, city, province, customer_address, tracking_number, payment_status')
     .eq('id', orderId)
     .single()
 
@@ -117,6 +117,26 @@ export async function applyConfirmationAction({
   const attempts   = (order.confirmation_attempts ?? 0) + 1
   const confidence = computeConfidence(action, method, attempts, !!order.duplicate_alert)
 
+  // 'cancelled' manual (agente humano, con sesión real — el camino normal
+  // de POST /api/orders/[id]/confirmation) pasa por la RPC transaccional
+  // cancel_confirmed_order() (migración 060): SELECT ... FOR UPDATE +
+  // guardas + UPDATE orders + INSERT agent_actions(customer_declined)
+  // ocurren en una única transacción real — antes eran dos escrituras
+  // PostgREST separadas (mismo problema de atomicidad ya resuelto para
+  // 'reopened' en la migración 052).
+  //
+  // El camino automatizado (guardAutomated=true — webhook de WhatsApp,
+  // botón "No, gracias") NO pasa por aquí: corre con createServiceClient()
+  // (sin sesión real → auth.uid() sería NULL dentro del RPC) y ya está
+  // excluido por el guard de arriba a confirmation_status='pending' —
+  // estructuralmente incompatible con normalized_status='en_reparto' (solo
+  // ocurre después de confirmar), así que ese camino jamás necesita el
+  // INSERT atómico de customer_declined. Sigue el switch de abajo, sin
+  // cambios respecto a antes de esta migración.
+  if (action === 'cancelled' && !guardAutomated) {
+    return applyCancel(supabase, orderId, attempts, method, confidence)
+  }
+
   const updates: Record<string, unknown> = {
     confirmation_attempts:     attempts,
     last_confirmation_attempt: new Date().toISOString(),
@@ -141,19 +161,47 @@ export async function applyConfirmationAction({
       }
       break
     case 'no_answer':
-      if (attempts >= MAX_ATTEMPTS) updates.confirmation_status = 'unreachable'
+      // Solo degrada a 'unreachable' pedidos que nunca fueron confirmados.
+      // Un pedido ya confirmado que no contesta un contacto de seguimiento
+      // (ej. reconfirmar antes de despachar) sigue siendo 'confirmed' — este
+      // intento es solo un registro de contacto, no una reversión silenciosa
+      // de la confirmación (ver auditoría "conservar acciones tras confirmar",
+      // 2026-08-07).
+      if (attempts >= MAX_ATTEMPTS && order.confirmation_status !== 'confirmed') {
+        updates.confirmation_status = 'unreachable'
+      }
       break
     case 'wrong_number':
       updates.confirmation_status = 'unreachable'
       break
     case 'cancelled':
+      // Solo alcanzable aquí con guardAutomated=true (automatización sin
+      // sesión real — ver el early-return de applyCancel() más arriba para
+      // el camino manual, migración 060). Comportamiento sin cambios
+      // respecto a antes de esa migración: mismas guardas, mismo UPDATE
+      // directo — este camino nunca inserta agent_actions(customer_declined)
+      // porque guardAutomated ya exige confirmation_status='pending' arriba,
+      // estructuralmente incompatible con normalized_status='en_reparto'.
+      if (order.normalized_status === 'delivered' || order.normalized_status === 'returned') {
+        return { ok: false, reason: 'terminal_status' }
+      }
+      if (order.payment_status === 'paid') {
+        return { ok: false, reason: 'already_paid' }
+      }
+      if (order.tracking_number) {
+        return { ok: false, reason: 'has_tracking' }
+      }
       updates.confirmation_status = 'cancelled'
+      updates.customer_confirmed  = false
       break
     case 'no_coverage':
       updates.confirmation_status = 'no_coverage'
       break
     case 'rescheduled':
-      // confirmation_status permanece 'pending' para seguimiento
+      // confirmation_status no se toca — sea cual sea el estado actual
+      // (pending para seguimiento, o confirmed si el cliente ya había
+      // confirmado y ahora hay que reprogramar la entrega), reprogramar
+      // nunca deshace una confirmación previa.
       break
   }
 
@@ -179,6 +227,14 @@ export async function applyConfirmationAction({
     })
   }
 
+  // Nota: 'cancelled' ya NO inserta agent_actions(customer_declined) aquí —
+  // ese INSERT vive ahora dentro de cancel_confirmed_order() (migración
+  // 060), atómico con el UPDATE de orders. El único caller que llega a este
+  // punto del código para 'cancelled' es el camino automatizado
+  // (guardAutomated=true), que por construcción nunca tiene
+  // normalized_status='en_reparto' (ver comentario en applyCancel más
+  // arriba) — nunca habría necesitado ese INSERT de todas formas.
+
   if (isSdAutoDispatch && userId) {
     await supabase.from('agent_actions').insert({
       order_id:    orderId,
@@ -191,7 +247,14 @@ export async function applyConfirmationAction({
   return {
     ok: true,
     confirmation_attempts:   attempts,
-    confirmation_status:     (updates.confirmation_status as string | undefined) ?? 'pending',
+    // 'no_answer' (sin degradar) y 'rescheduled' no incluyen
+    // confirmation_status en `updates` a propósito — no lo tocan en DB. El
+    // fallback debe reflejar lo que YA HABÍA en la fila (order.confirmation_status),
+    // no asumir 'pending': desde que estas dos acciones también se aplican
+    // sobre pedidos ya confirmados (ver auditoría "conservar acciones tras
+    // confirmar", 2026-08-07), asumir 'pending' aquí le mentiría al caller
+    // sobre un pedido que sigue 'confirmed' en la base de datos.
+    confirmation_status:     (updates.confirmation_status as string | undefined) ?? order.confirmation_status ?? 'pending',
     confirmation_confidence: confidence,
     auto_dispatched:         isSdAutoDispatch,
   }
@@ -210,6 +273,73 @@ function isKnownReopenFailure(
     value === 'already_paid' || value === 'terminal_status' || value === 'dispatched' ||
     value === 'forbidden' || value === 'reason_required' || value === 'reason_too_long'
   )
+}
+
+// Únicos outcomes que cancel_confirmed_order() puede devolver además de
+// 'ok' — deben mantenerse en sincronía exacta con los RETURN de
+// supabase/migrations/060_cancel_confirmed_order_rpc.sql.
+function isKnownCancelFailure(
+  value: string,
+): value is 'not_found' | 'forbidden' | 'already_paid' | 'has_tracking' | 'terminal_status' {
+  return (
+    value === 'not_found' || value === 'forbidden' ||
+    value === 'already_paid' || value === 'has_tracking' || value === 'terminal_status'
+  )
+}
+
+// "Ya no desea" (manual, agente humano) — auditoría "conservar acciones
+// tras confirmar" (2026-08-07), corrección de atomicidad (misma sesión,
+// ronda 3). Antes de esta función, el case 'cancelled' hacía UPDATE orders
+// + (cuando correspondía) INSERT agent_actions(customer_declined) como dos
+// escrituras HTTP/PostgREST separadas — mismo problema ya resuelto para
+// 'reopened' abajo. Vive dentro de este archivo — no es un motor nuevo —
+// para respetar el Principio 4 de docs/ARCHITECTURE_RUTA_COD_V1.md:
+// applyConfirmationAction() sigue siendo el único punto de entrada de la
+// aplicación autorizado a mover confirmation_status. cancel_confirmed_order()
+// es solo el mecanismo de persistencia — todas las guardas de negocio viven
+// en el RPC (migración 060), revalidadas bajo lock, no solo aquí.
+//
+// attempts/method/confidence se calculan en TypeScript (computeConfidence
+// es lógica de negocio pura, no algo que deba reimplementarse en SQL) y se
+// pasan como parámetros — el RPC no decide nada de eso, solo persiste.
+async function applyCancel(
+  supabase: SupabaseClient,
+  orderId: string,
+  attempts: number,
+  method: ConfirmMethod,
+  confidence: string,
+): Promise<ApplyConfirmationActionResult> {
+  const { data, error } = await supabase.rpc('cancel_confirmed_order', {
+    p_order_id:   orderId,
+    p_attempts:   attempts,
+    p_method:     method,
+    p_confidence: confidence,
+  })
+
+  if (error) {
+    console.error('[confirmation] cancel RPC error — order:', orderId, '| code:', error.code, '| message:', error.message)
+    return { ok: false, reason: 'db_error' }
+  }
+
+  const outcome = data as string
+
+  if (outcome === 'ok') {
+    return {
+      ok: true,
+      confirmation_attempts:   attempts,
+      confirmation_status:     'cancelled',
+      confirmation_confidence: confidence,
+      auto_dispatched:         false,
+    }
+  }
+
+  if (isKnownCancelFailure(outcome)) return { ok: false, reason: outcome }
+
+  // Cualquier valor no reconocido del RPC (nunca debería ocurrir si esta
+  // función y la migración 060 están sincronizadas) se trata como conflicto
+  // defensivo — nunca como éxito silencioso.
+  console.error('[confirmation] cancel RPC devolvió un outcome inesperado:', outcome, '— order:', orderId)
+  return { ok: false, reason: 'conflict' }
 }
 
 // "Reabrir pedido" — Fase 1 de la auditoría de deshacer-confirmación

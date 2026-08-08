@@ -161,6 +161,26 @@ function isPagoPendiente(order: Order): boolean {
   )
 }
 
+// Estado comercial "efectivo" de una fila de la vista Santo Domingo: lo que
+// el agente acaba de hacer en esta sesión (terminal, de terminalMap) tiene
+// prioridad; si no hizo nada aún, se lee confirmation_status tal como vino
+// de la DB. 'rescheduled' y 'no_answer' (mientras no degrada a 'unreachable')
+// nunca llegan a pisar terminalMap — ver postConfirmation — así que no
+// aparecen como valores posibles aquí.
+function sdEffectiveStatus(order: Order, terminal: string | undefined): string {
+  return terminal ?? (order.confirmation_status as string) ?? 'pending'
+}
+
+// Determina si la fila SD debe mostrar herramientas de gestión (WA/Llamar +
+// grid de acciones) — antes de confirmar (pending, sin guía) Y después de
+// confirmar (confirmed). Antes de este fix, "confirmed" caía directo al
+// badge terminal "Confirmado" y perdía todas las herramientas (ver
+// auditoría "conservar acciones tras confirmar", 2026-08-07).
+function sdShowsTools(order: Order, terminal: string | undefined): boolean {
+  const status = sdEffectiveStatus(order, terminal)
+  return (status === 'pending' && !order.tracking_number) || status === 'confirmed'
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function rdMidnightUTC(offsetDays = 0): number {
@@ -397,22 +417,32 @@ function ConfirmacionCard({
 // ── PedidoCard (mobile — vista Pedidos) ────────────────────────────────────────
 
 interface PedidoCardProps {
-  order: Order; busy: boolean; terminal?: string
+  order: Order; busy: boolean; terminal?: string; isSD?: boolean
   onConfirmed: () => void; onNoAnswer: () => void
-  onNoCoverage: () => void; onCancelled: () => void
+  onNoCoverage: () => void; onCancelled: () => void; onRescheduled?: () => void
   onSetMethod: (m: ContactMethod) => void
   onPaidSuccess?: () => void
 }
 
-function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCoverage, onCancelled, onSetMethod, onPaidSuccess }: PedidoCardProps) {
+function PedidoCard({
+  order, busy, terminal, isSD, onConfirmed, onNoAnswer, onNoCoverage, onCancelled, onRescheduled, onSetMethod, onPaidSuccess,
+}: PedidoCardProps) {
   const nombre    = order.customer_name ?? ''
   const waUrl     = whatsAppUrl(order.customer_phone, buildConfirmMsg(nombre, order.product_summary, order.cod_amount))
   const telUrl    = callUrl(order.customer_phone)
   const hasPhone  = !!order.customer_phone
-  const isPending = !terminal && (order.confirmation_status as string) === 'pending' && !order.tracking_number
   const confBadge = getConfirmBadge(order, terminal)
   const logBadge  = getLogisticsBadge(order)
   const delay     = getDelayBadge(order)
+
+  // SD (Santo Domingo): mismas herramientas antes Y después de confirmar
+  // (mismo criterio que renderActionButtonsSD en desktop — ver sdShowsTools).
+  // No-SD: comportamiento histórico sin cambios — solo antes de confirmar,
+  // sin tracking_number.
+  const sdStatus     = isSD ? sdEffectiveStatus(order, terminal) : null
+  const sdIsPending  = sdStatus === 'pending'
+  const isPending    = !terminal && (order.confirmation_status as string) === 'pending' && !order.tracking_number
+  const showsActions = isSD ? sdShowsTools(order, terminal) : isPending
 
   return (
     <div className="p-4 space-y-2.5 bg-white">
@@ -479,8 +509,9 @@ function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCovera
         <MarkPaidButton orderId={order.id} onSuccess={onPaidSuccess} className="w-full flex items-center justify-center gap-1.5 min-h-[40px] bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-xl shadow-sm" />
       )}
 
-      {/* Acciones (solo si pendiente sin tracking) */}
-      {isPending && (
+      {/* Acciones — SD: visibles antes Y después de confirmar. No-SD: solo
+          antes de confirmar (comportamiento histórico, sin cambios). */}
+      {showsActions && (
         busy ? (
           <div className="flex justify-center py-1"><Spinner className="w-4 h-4 text-indigo-500" /></div>
         ) : (
@@ -504,28 +535,55 @@ function PedidoCard({ order, busy, terminal, onConfirmed, onNoAnswer, onNoCovera
                 )}
               </div>
             )}
-            <div className="grid grid-cols-2 gap-1">
-              <button onClick={onConfirmed}
-                className="flex items-center justify-center gap-1 min-h-[36px]
-                           bg-green-100 hover:bg-green-200 text-green-700 text-xs font-medium rounded-lg">
-                <CheckCircle2 className="w-3.5 h-3.5" />Confirmó
-              </button>
-              <button onClick={onNoAnswer}
-                className="flex items-center justify-center gap-1 min-h-[36px]
-                           bg-amber-100 hover:bg-amber-200 text-amber-700 text-xs font-medium rounded-lg">
-                <PhoneMissed className="w-3.5 h-3.5" />No contesta
-              </button>
-              <button onClick={onNoCoverage}
-                className="flex items-center justify-center gap-1 min-h-[36px]
-                           bg-orange-100 hover:bg-orange-200 text-orange-700 text-xs font-medium rounded-lg">
-                <MapPinOff className="w-3.5 h-3.5" />Sin cobertura
-              </button>
-              <button onClick={onCancelled}
-                className="flex items-center justify-center gap-1 min-h-[36px]
-                           bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-medium rounded-lg">
-                <XCircle className="w-3.5 h-3.5" />Canceló
-              </button>
-            </div>
+            {isSD ? (
+              <div className={`grid ${sdIsPending ? 'grid-cols-2' : 'grid-cols-3'} gap-1`}>
+                {sdIsPending && (
+                  <button onClick={onConfirmed}
+                    className="flex items-center justify-center gap-1 min-h-[36px]
+                               bg-green-100 hover:bg-green-200 text-green-700 text-xs font-medium rounded-lg">
+                    <CheckCircle2 className="w-3.5 h-3.5" />Confirmó
+                  </button>
+                )}
+                <button onClick={onNoAnswer}
+                  className="flex items-center justify-center gap-1 min-h-[36px]
+                             bg-amber-100 hover:bg-amber-200 text-amber-700 text-xs font-medium rounded-lg">
+                  <PhoneMissed className="w-3.5 h-3.5" />No responde
+                </button>
+                <button onClick={onRescheduled}
+                  className="flex items-center justify-center gap-1 min-h-[36px]
+                             bg-blue-100 hover:bg-blue-200 text-blue-700 text-xs font-medium rounded-lg">
+                  <RotateCcw className="w-3.5 h-3.5" />Reprogramar
+                </button>
+                <button onClick={onCancelled}
+                  className="flex items-center justify-center gap-1 min-h-[36px]
+                             bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-medium rounded-lg">
+                  <XCircle className="w-3.5 h-3.5" />Ya no desea
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-1">
+                <button onClick={onConfirmed}
+                  className="flex items-center justify-center gap-1 min-h-[36px]
+                             bg-green-100 hover:bg-green-200 text-green-700 text-xs font-medium rounded-lg">
+                  <CheckCircle2 className="w-3.5 h-3.5" />Confirmó
+                </button>
+                <button onClick={onNoAnswer}
+                  className="flex items-center justify-center gap-1 min-h-[36px]
+                             bg-amber-100 hover:bg-amber-200 text-amber-700 text-xs font-medium rounded-lg">
+                  <PhoneMissed className="w-3.5 h-3.5" />No contesta
+                </button>
+                <button onClick={onNoCoverage}
+                  className="flex items-center justify-center gap-1 min-h-[36px]
+                             bg-orange-100 hover:bg-orange-200 text-orange-700 text-xs font-medium rounded-lg">
+                  <MapPinOff className="w-3.5 h-3.5" />Sin cobertura
+                </button>
+                <button onClick={onCancelled}
+                  className="flex items-center justify-center gap-1 min-h-[36px]
+                             bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-medium rounded-lg">
+                  <XCircle className="w-3.5 h-3.5" />Canceló
+                </button>
+              </div>
+            )}
           </div>
         )
       )}
@@ -1012,7 +1070,16 @@ export default function ConfirmacionPage() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, method }),
       })
-      if (!res.ok) { showToast('Error al procesar la acción. Intenta de nuevo.', 'error'); return }
+      if (!res.ok) {
+        // Mostramos el motivo real (ej. "El pedido ya fue pagado — no se
+        // puede modificar") en vez del genérico — desde que 'cancelled'
+        // (Ya no desea) puede fallar por guardas de negocio (pagado/
+        // entregado/con guía), un mensaje ciego dejaría al agente sin saber
+        // qué hacer distinto.
+        const errBody = await res.json().catch(() => null) as { error?: string } | null
+        showToast(errBody?.error ?? 'Error al procesar la acción. Intenta de nuevo.', 'error')
+        return
+      }
       const data = await res.json() as ConfirmResult
       setConfidenceMap(prev => ({ ...prev, [orderId]: data.confirmation_confidence }))
       if (action === 'no_answer') {
@@ -1023,6 +1090,12 @@ export default function ConfirmacionPage() {
         } else {
           showToast(`Intento ${data.confirmation_attempts}/${MAX_ATTEMPTS} registrado`, 'success')
         }
+      } else if (action === 'rescheduled') {
+        // A propósito NO se fija terminalMap: reprogramar es una acción de
+        // seguimiento, no cierra el pedido — la fila debe seguir mostrando
+        // WhatsApp/Llamar/No responde/Ya no desea (antes y después de
+        // confirmar), igual que "No responde" ya se comporta arriba.
+        showToast('Reprogramación registrada', 'success')
       } else {
         setTerminalMap(prev => ({ ...prev, [orderId]: action }))
         const TOAST_MSG: Record<string, string> = {
@@ -1144,28 +1217,37 @@ export default function ConfirmacionPage() {
   }
 
   function renderActionButtonsSD(order: Order) {
-    const terminal  = terminalMap[order.id]
-    const busy      = !!loadingRow[order.id]
-    const isPending = !terminal && (order.confirmation_status as string) === 'pending' && !order.tracking_number
-    if (busy)     return <Spinner className="w-4 h-4 text-indigo-500" />
-    if (terminal) return (
-      <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full
-                        ${TERMINAL[terminal]?.color ?? 'bg-gray-100 text-gray-600'}`}>
-        <CheckCircle2 className="w-3 h-3" />{TERMINAL[terminal]?.label ?? terminal}
-      </span>
-    )
-    if (!isPending) return null
+    const terminal = terminalMap[order.id]
+    const busy     = !!loadingRow[order.id]
+    const status   = sdEffectiveStatus(order, terminal)
+    if (busy) return <Spinner className="w-4 h-4 text-indigo-500" />
+
+    // Estados finales — sin más herramientas operativas para este pedido.
+    // 'confirmed' NO es uno de estos casos a propósito: ver sdShowsTools.
+    if (status !== 'pending' && status !== 'confirmed') {
+      return (
+        <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full
+                          ${TERMINAL[status]?.color ?? 'bg-gray-100 text-gray-600'}`}>
+          <CheckCircle2 className="w-3 h-3" />{TERMINAL[status]?.label ?? status}
+        </span>
+      )
+    }
+    if (!sdShowsTools(order, terminal)) return null // pending pero con tracking_number ya asignado — caso EFI, no SD
+
     // WhatsApp/Llamar NO se repiten aquí — el llamador (columna "Acción" de la
     // tabla Pedidos/Santo Domingo) ya los renderiza una sola vez antes de
     // invocar esta función. Antes había un segundo bloque WA/Llamar duplicado
     // dentro de este componente (fix 2026-07-20).
+    const isPending = status === 'pending'
     return (
-      <div className="grid grid-cols-2 gap-1">
-        <button onClick={() => postConfirmation(order.id, 'confirmed')}
-          className="flex items-center gap-1 bg-green-100 hover:bg-green-200
-                     text-green-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
-          <CheckCircle2 className="w-3 h-3 shrink-0" />Confirmó
-        </button>
+      <div className={`grid ${isPending ? 'grid-cols-2' : 'grid-cols-3'} gap-1`}>
+        {isPending && (
+          <button onClick={() => postConfirmation(order.id, 'confirmed')}
+            className="flex items-center gap-1 bg-green-100 hover:bg-green-200
+                       text-green-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
+            <CheckCircle2 className="w-3 h-3 shrink-0" />Confirmó
+          </button>
+        )}
         <button onClick={() => postConfirmation(order.id, 'no_answer')}
           className="flex items-center gap-1 bg-amber-100 hover:bg-amber-200
                      text-amber-700 text-[11px] font-medium px-2 py-1 rounded whitespace-nowrap">
@@ -1676,10 +1758,12 @@ export default function ConfirmacionPage() {
                     <div key={order.id} ref={el => { if (el) rowRefs.current.set(order.id, el) }}>
                       <PedidoCard
                         order={order} busy={!!loadingRow[order.id]} terminal={terminalMap[order.id]}
+                        isSD={viewMode === 'santo_domingo'}
                         onConfirmed={() => postConfirmation(order.id, 'confirmed')}
                         onNoAnswer={() => postConfirmation(order.id, 'no_answer')}
                         onNoCoverage={() => postConfirmation(order.id, 'no_coverage')}
                         onCancelled={() => postConfirmation(order.id, 'cancelled')}
+                        onRescheduled={() => postConfirmation(order.id, 'rescheduled')}
                         onSetMethod={m => setMethodMap(prev => ({ ...prev, [order.id]: m }))}
                         onPaidSuccess={() => {
                           showToast('✓ Pedido marcado como pagado', 'success')
@@ -1805,46 +1889,47 @@ export default function ConfirmacionPage() {
                               )}
                             </td>
 
-                            {/* Acción */}
+                            {/* Acción — Pagado ya no es exclusivo: convive con las
+                                herramientas operativas (WA/Llamar/No responde/
+                                Reprogramar/Ya no desea) en vez de reemplazarlas —
+                                ver auditoría "conservar acciones tras confirmar"
+                                (2026-08-07). */}
                             <td className="px-3 py-2.5">
-                              {viewMode === 'santo_domingo' && isPagoPendiente(order) ? (
-                                <MarkPaidButton
-                                  orderId={order.id}
-                                  onSuccess={() => {
-                                    showToast('✓ Pedido marcado como pagado', 'success')
-                                    setSdData(prev => prev.map(o =>
-                                      o.id === order.id ? { ...o, payment_status: 'paid', normalized_status: 'delivered' } : o))
-                                    fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter)
-                                    fetchStats()
-                                  }}
-                                />
-                              ) : isPending ? (
-                                <div className="flex flex-col gap-1">
-                                  {hasPhone && (
-                                    <div className="flex gap-1">
-                                      {waUrl && (
-                                        <a href={waUrl} target="_blank" rel="noopener noreferrer"
-                                           onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'whatsapp' }))}
-                                           className="flex items-center gap-1 bg-green-500 hover:bg-green-600
-                                                      text-white text-[11px] font-semibold px-2 py-1 rounded-lg">
-                                          <MessageCircle className="w-3 h-3" />WhatsApp
-                                        </a>
-                                      )}
-                                      {telUrl && (
-                                        <a href={telUrl}
-                                           onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'call' }))}
-                                           className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
-                                                      text-white text-[11px] font-semibold px-2 py-1 rounded-lg">
-                                          <Phone className="w-3 h-3" />Llamar
-                                        </a>
-                                      )}
-                                    </div>
-                                  )}
-                                  {viewMode === 'santo_domingo' ? renderActionButtonsSD(order) : renderActionButtons(order)}
-                                </div>
-                              ) : (
-                                viewMode === 'santo_domingo' ? renderActionButtonsSD(order) : renderActionButtons(order)
-                              )}
+                              <div className="flex flex-col gap-1.5">
+                                {viewMode === 'santo_domingo' && isPagoPendiente(order) && (
+                                  <MarkPaidButton
+                                    orderId={order.id}
+                                    onSuccess={() => {
+                                      showToast('✓ Pedido marcado como pagado', 'success')
+                                      setSdData(prev => prev.map(o =>
+                                        o.id === order.id ? { ...o, payment_status: 'paid', normalized_status: 'delivered' } : o))
+                                      fetchSD(sdPage, searchQuery, statusFilter, sdPaymentFilter)
+                                      fetchStats()
+                                    }}
+                                  />
+                                )}
+                                {((viewMode === 'santo_domingo' ? sdShowsTools(order, terminal) : isPending)) && hasPhone && (
+                                  <div className="flex gap-1">
+                                    {waUrl && (
+                                      <a href={waUrl} target="_blank" rel="noopener noreferrer"
+                                         onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'whatsapp' }))}
+                                         className="flex items-center gap-1 bg-green-500 hover:bg-green-600
+                                                    text-white text-[11px] font-semibold px-2 py-1 rounded-lg">
+                                        <MessageCircle className="w-3 h-3" />WhatsApp
+                                      </a>
+                                    )}
+                                    {telUrl && (
+                                      <a href={telUrl}
+                                         onClick={() => setMethodMap(prev => ({ ...prev, [order.id]: 'call' }))}
+                                         className="flex items-center gap-1 bg-blue-500 hover:bg-blue-600
+                                                    text-white text-[11px] font-semibold px-2 py-1 rounded-lg">
+                                        <Phone className="w-3 h-3" />Llamar
+                                      </a>
+                                    )}
+                                  </div>
+                                )}
+                                {viewMode === 'santo_domingo' ? renderActionButtonsSD(order) : renderActionButtons(order)}
+                              </div>
                             </td>
 
                             {/* Ver detalle */}

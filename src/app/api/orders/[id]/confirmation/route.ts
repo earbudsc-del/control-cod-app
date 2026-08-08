@@ -34,15 +34,22 @@ const FAILURE_STATUS: Record<string, number> = {
 // primero). No se puede distinguir cuál de los dos ocurrió sin una señal
 // adicional que hoy no existe, así que el mensaje cubre ambos casos sin
 // afirmar una causa específica que podría ser falsa.
+//
+// terminal_status/has_tracking/already_paid ya no son exclusivos de
+// 'reopened' — desde la auditoría "conservar acciones tras confirmar"
+// (2026-08-07) también los puede devolver applyConfirmationAction() para
+// action='cancelled' (guardas de "Ya no desea" sobre un pedido confirmado).
+// El texto se generalizó para no decir "no se puede reabrir" cuando la
+// acción real era cancelar.
 const FAILURE_MESSAGE: Record<string, string> = {
   not_found:       'Pedido no encontrado',
-  terminal_status: 'El pedido ya fue entregado o devuelto — no se puede reabrir',
+  terminal_status: 'El pedido ya fue entregado o devuelto — no se puede modificar',
   reason_required: 'El motivo es obligatorio para reabrir un pedido',
   reason_too_long: 'El motivo es demasiado largo',
   forbidden:       'Sin permisos para reabrir pedidos',
   not_confirmed:   'El pedido ya no está en estado confirmado — puede que ya lo hayan reabierto o modificado. Actualiza la página para ver el estado actual.',
-  has_tracking:    'El pedido ya tiene guía asignada — no se puede reabrir',
-  already_paid:    'El pedido ya fue pagado — no se puede reabrir',
+  has_tracking:    'El pedido ya tiene guía de transporte asignada — no se puede modificar aquí',
+  already_paid:    'El pedido ya fue pagado — no se puede modificar',
   dispatched:      'El pedido ya está siendo trabajado en ruta — no se puede reabrir',
   conflict:        'El pedido cambió mientras se procesaba esta acción. Actualiza y vuelve a intentar.',
   db_error:        'Error interno',
