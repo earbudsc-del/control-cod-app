@@ -364,6 +364,20 @@ function isSdContext(haystack: string): boolean {
   return SD_COVERAGE_TERMS.some(term => haystack.includes(term))
 }
 
+// Subconjunto curado (NO una segunda lista de zonas SD) de SD_COVERAGE_TERMS:
+// nombres de sector lo bastante específicos y compuestos como para ser
+// inequívocos de Santo Domingo, sin colisión conocida con una localidad real
+// de otra provincia. A diferencia de términos cortos/genéricos (ej. "guerra",
+// "sdo") o nombres que sí colisionan (ej. "villa hermosa", que también existe
+// en La Romana — ver guard `provinceIsElsewhere` abajo), estos términos
+// deben bastar por sí solos para clasificar el pedido como SD incluso cuando
+// `province` es texto libre inconsistente. Ampliar con cuidado, término por
+// término, solo tras confirmar que no colisiona con otra provincia.
+// Auditoría 2026-08-08 (caso Pantoja): un pedido real de Pantoja quedaba
+// fuera de SD cuando `province` (texto libre del checkout) no era
+// reconocible como Santo Domingo — ver caso completo abajo.
+const SD_HIGH_CONFIDENCE_TERMS = ['pantoja', 'los alcarrizos', 'pedro brand', 'la cuaba']
+
 export function isSantoDomingoOrder(
   city:     string | null | undefined,
   province: string | null | undefined,
@@ -373,22 +387,28 @@ export function isSantoDomingoOrder(
   // (ej. "Villa Hermosa" — barrio real de SD Este) coinciden por nombre con
   // localidades de OTRAS provincias (ej. Villa Hermosa, La Romana). Cuando
   // `province` viene informada y por sí sola NO indica Santo Domingo/DN, es
-  // la señal más confiable de que el pedido es de otra provincia —incluso si
-  // `city`/`address` matchean un término de sector— así que se suprimen los
-  // términos de zona (SD_ZONES) y solo se acepta un match explícito y
-  // genérico de "santo domingo"/"distrito nacional"/"dn" en el propio texto
-  // de ciudad o dirección. Provincia vacía no descarta nada (no hay señal
-  // para desambiguar): se mantiene el comportamiento histórico.
+  // una señal de que el pedido podría ser de otra provincia —así que se
+  // suprimen los términos AMBIGUOS de zona (SD_ZONES) y solo se acepta un
+  // match explícito y genérico de "santo domingo"/"distrito nacional"/"dn",
+  // O un término de sector de ALTA CONFIANZA (SD_HIGH_CONFIDENCE_TERMS,
+  // ver arriba) en el propio texto de ciudad o dirección. Provincia vacía no
+  // descarta nada (no hay señal para desambiguar): se mantiene el
+  // comportamiento histórico.
   // Caso real que motivó este guard: pedidos #10798/#10800 (La Romana)
   // quedaron marcados como despacho local SD por error — ver auditoría
   // 2026-07-28 y docs/ARCHITECTURE_RUTA_COD_V1.md.
+  // Caso real que motivó la excepción de alta confianza: pedidos de Pantoja
+  // (municipio Santo Domingo Oeste, fronterizo con San Cristóbal) con
+  // `province` en texto libre no reconocido quedaban excluidos de SD pese a
+  // que "pantoja" ya es un término inequívoco — ver auditoría 2026-08-08.
   const provinceNorm       = normalize(province ?? '')
   const provinceIsElsewhere = provinceNorm.trim() !== '' && !isSdContext(provinceNorm)
 
   if (provinceIsElsewhere) {
     const cityAddressHaystack = normalize(`${city ?? ''} ${address ?? ''}`)
     if (DN_ABBREVIATION.test(cityAddressHaystack)) return true
-    return SD_GENERIC_TERMS.some(term => cityAddressHaystack.includes(term))
+    if (SD_GENERIC_TERMS.some(term => cityAddressHaystack.includes(term))) return true
+    return SD_HIGH_CONFIDENCE_TERMS.some(term => cityAddressHaystack.includes(term))
   }
 
   const haystack = normalize(`${city ?? ''} ${province ?? ''} ${address ?? ''}`)
