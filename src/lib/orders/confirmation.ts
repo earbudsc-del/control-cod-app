@@ -47,6 +47,18 @@ export interface ApplyConfirmationActionParams {
   guardAutomated?: boolean
   // Motivo obligatorio — solo se usa (y se exige) para action='reopened'.
   reason?: string
+  // Solo relevante para action='cancelled'. true únicamente cuando el
+  // caller es Ruta COD (POST /api/v1/deliveries/orders/[id]/actions,
+  // action='customer_cancelled') — señal explícita para
+  // cancel_confirmed_order() (migración 061) de que debe insertar
+  // agent_actions(customer_declined) incondicionalmente (no solo cuando
+  // normalized_status='en_reparto'), porque Ruta COD también permite
+  // cancelar pedidos SD que aún no fueron despachados (pool='nuevo' en
+  // sd-status.ts) y sin esa fila su propia máquina de estados no tiene
+  // forma de reflejar 'cancelado'. false/omitido (default) preserva
+  // exactamente el comportamiento original de la migración 060 para
+  // /confirmacion — nunca cambia nada para ese caller.
+  fromRutaCod?: boolean
 }
 
 export type ApplyConfirmationActionResult =
@@ -76,6 +88,7 @@ export async function applyConfirmationAction({
   userId = null,
   guardAutomated = false,
   reason,
+  fromRutaCod = false,
 }: ApplyConfirmationActionParams): Promise<ApplyConfirmationActionResult> {
   const { data: order } = await supabase
     .from('orders')
@@ -117,13 +130,15 @@ export async function applyConfirmationAction({
   const attempts   = (order.confirmation_attempts ?? 0) + 1
   const confidence = computeConfidence(action, method, attempts, !!order.duplicate_alert)
 
-  // 'cancelled' manual (agente humano, con sesión real — el camino normal
-  // de POST /api/orders/[id]/confirmation) pasa por la RPC transaccional
-  // cancel_confirmed_order() (migración 060): SELECT ... FOR UPDATE +
+  // 'cancelled' manual (agente humano en /confirmacion, o mensajero SD en
+  // Ruta COD — ambos con sesión real) pasa por la RPC transaccional
+  // cancel_confirmed_order() (migraciones 060/061): SELECT ... FOR UPDATE +
   // guardas + UPDATE orders + INSERT agent_actions(customer_declined)
   // ocurren en una única transacción real — antes eran dos escrituras
   // PostgREST separadas (mismo problema de atomicidad ya resuelto para
-  // 'reopened' en la migración 052).
+  // 'reopened' en la migración 052). `fromRutaCod` distingue el único
+  // matiz de comportamiento entre ambos callers — ver el parámetro en
+  // ApplyConfirmationActionParams arriba y el comentario de applyCancel().
   //
   // El camino automatizado (guardAutomated=true — webhook de WhatsApp,
   // botón "No, gracias") NO pasa por aquí: corre con createServiceClient()
@@ -134,7 +149,7 @@ export async function applyConfirmationAction({
   // INSERT atómico de customer_declined. Sigue el switch de abajo, sin
   // cambios respecto a antes de esta migración.
   if (action === 'cancelled' && !guardAutomated) {
-    return applyCancel(supabase, orderId, attempts, method, confidence)
+    return applyCancel(supabase, orderId, attempts, method, confidence, fromRutaCod)
   }
 
   const updates: Record<string, unknown> = {
@@ -302,18 +317,28 @@ function isKnownCancelFailure(
 // attempts/method/confidence se calculan en TypeScript (computeConfidence
 // es lógica de negocio pura, no algo que deba reimplementarse en SQL) y se
 // pasan como parámetros — el RPC no decide nada de eso, solo persiste.
+//
+// fromRutaCod: reenviado tal cual a p_from_ruta_cod (migración 061). Con
+// false (default, todo caller salvo Ruta COD) el RPC preserva EXACTAMENTE
+// el comportamiento de la migración 060 — solo inserta
+// agent_actions(customer_declined) cuando normalized_status='en_reparto'.
+// Con true (únicamente Ruta COD, action='customer_cancelled'), el RPC
+// inserta esa fila en cualquier cancelación exitosa, sin condicionar a
+// normalized_status — ver el comentario de cabecera de 061 para el porqué.
 async function applyCancel(
   supabase: SupabaseClient,
   orderId: string,
   attempts: number,
   method: ConfirmMethod,
   confidence: string,
+  fromRutaCod: boolean,
 ): Promise<ApplyConfirmationActionResult> {
   const { data, error } = await supabase.rpc('cancel_confirmed_order', {
-    p_order_id:   orderId,
-    p_attempts:   attempts,
-    p_method:     method,
-    p_confidence: confidence,
+    p_order_id:      orderId,
+    p_attempts:      attempts,
+    p_method:        method,
+    p_confidence:    confidence,
+    p_from_ruta_cod: fromRutaCod,
   })
 
   if (error) {

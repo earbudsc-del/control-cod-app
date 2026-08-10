@@ -50,7 +50,7 @@ interface ActionBody {
 
 const ORDER_FIELDS =
   'id, order_number, customer_name, customer_phone, customer_address, city, province, ' +
-  'cod_amount, normalized_status, confirmation_status, tracking_number, assigned_to, ' +
+  'cod_amount, normalized_status, confirmation_status, customer_confirmed, tracking_number, assigned_to, ' +
   'store_id, shopify_order_id, source, product_summary, delivery_attempts, created_at, ' +
   'status_since, last_tracking_update, updated_at, rescheduled_date, rescheduled_note, payment_status'
 
@@ -58,6 +58,7 @@ interface OrderRow extends SdOrderRow {
   order_number: string | null
   customer_name: string | null
   customer_phone: string | null
+  customer_confirmed: boolean | null
   cod_amount: number | null
   store_id: string
   shopify_order_id: string | null
@@ -202,6 +203,35 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       }, { status: 200, headers })
     }
 
+    // --- customer_cancelled: idempotencia operativa — mismo patrón que
+    // 'paid' arriba. Tras una cancelación exitosa, computeStatus() ya
+    // devuelve 'cancelado' y computeAllowedActions() ya no incluye
+    // 'customer_cancelled' — sin este atajo, un doble tap del mensajero
+    // caería en el guard genérico de abajo (`!allowedActions.includes`) y
+    // respondería 422, aunque el resultado que el mensajero quería ya esté
+    // logrado. Exige AMBOS campos del eje comercial coherentes
+    // (confirmation_status='cancelled' Y customer_confirmed=false) — no
+    // basta con uno solo — para no confundir "ya cancelado de verdad" con
+    // el estado legacy inconsistente que el bloque de abajo repara (fila
+    // customer_declined existente pero confirmation_status todavía
+    // 'confirmed': ese caso NO debe tomar este atajo, debe repararse). Se
+    // lee directamente de ORDER_FIELDS — sin heurísticas ni consulta
+    // adicional. ---
+    if (
+      body.action === 'customer_cancelled' && ownership !== 'other' &&
+      order.confirmation_status === 'cancelled' && order.customer_confirmed === false
+    ) {
+      return NextResponse.json({
+        action: 'customer_cancelled',
+        orderId,
+        status,
+        allowedActions,
+        assignedTo: order.assigned_to,
+        alreadyCancelled: true,
+        at: new Date().toISOString(),
+      }, { status: 200, headers })
+    }
+
     // --- accept: caso especial de concurrencia (409), no encaja en el flujo genérico ---
     if (body.action === 'accept') {
       if (ownership === 'mine') {
@@ -257,7 +287,29 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       return NextResponse.json({ error: 'Este pedido está asignado a otro mensajero.' }, { status: 403, headers })
     }
     if (!allowedActions.includes(body.action)) {
-      return NextResponse.json({ error: `La acción "${body.action}" no es válida desde el estado actual (${status}).` }, { status: 422, headers })
+      // Excepción puntual: 'customer_cancelled' sobre un pedido con un
+      // registro operativo de rechazo ya existente (agent_actions.
+      // customer_declined) cuyo eje comercial NUNCA se sincronizó —
+      // estado legacy inconsistente (bug anterior a las migraciones
+      // 060/061, o creado por /sd-delivery legacy, que todavía inserta
+      // ese action_type sin pasar por applyConfirmationAction()). No
+      // confiar en computeAllowedActions() para este caso puntual: su
+      // cálculo de `status` ya ve 'cancelado' por esa misma fila
+      // (sd-status.ts revisa customer_declined ANTES que cualquier otra
+      // cosa) y por eso NUNCA volvería a ofrecer 'customer_cancelled' en
+      // allowedActions — el pedido quedaría atrapado sin reparación
+      // posible. Se permite reintentar la transición explícitamente; el
+      // motor comercial (RPC, con fromRutaCod=true) revalida sus propios
+      // guards de negocio de todas formas, así que esto nunca sortea una
+      // regla real, solo el gate de workflow de esta máquina de estados.
+      const isLegacyCommercialRepair =
+        body.action === 'customer_cancelled' &&
+        order.confirmation_status !== 'cancelled' &&
+        (recentActions ?? []).some(a => a.action_type === 'customer_declined')
+
+      if (!isLegacyCommercialRepair) {
+        return NextResponse.json({ error: `La acción "${body.action}" no es válida desde el estado actual (${status}).` }, { status: 422, headers })
+      }
     }
 
     // Auto-claim: si el pedido estaba disponible (assigned_to NULL, backlog previo
@@ -377,12 +429,30 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       }
 
       case 'customer_cancelled': {
-        actionType = 'customer_declined'
-        const { data: action, error: insertError } = await supabase
-          .from('agent_actions')
-          .insert({ order_id: orderId, agent_id: profile.id, action_type: actionType, notes })
-          .select('id, created_at').single()
-        if (insertError) throw insertError
+        // Reutiliza el motor comercial único (applyConfirmationAction() →
+        // cancel_confirmed_order(), migraciones 060/061) en vez de escribir
+        // agent_actions directamente. Antes, esta acción solo insertaba
+        // 'customer_declined' sin tocar confirmation_status/customer_confirmed
+        // — el pedido quedaba operativamente cancelado pero comercialmente
+        // 'confirmed' (auditoría customer_cancelled, 2026-08-08). Se pasa
+        // `authClient` (el cliente de sesión del mensajero, NO el `supabase`
+        // de service role usado en el resto de este handler): la RPC deriva
+        // el actor de auth.uid() dentro de la función — con el service
+        // client auth.uid() sería NULL y devolvería 'forbidden'. Mismo
+        // motor que ya usa POST /api/orders/[id]/confirmation (agente
+        // humano en /confirmacion) — no se crea un segundo motor de
+        // cancelación. fromRutaCod:true — ver el parámetro p_from_ruta_cod
+        // en la migración 061: Ruta COD necesita agent_actions
+        // (customer_declined) sin condicionar a normalized_status='en_reparto'
+        // (a diferencia de /confirmacion), porque también cancela pedidos
+        // SD aún sin despachar.
+        const result = await applyConfirmationAction({
+          supabase: authClient, orderId, action: 'cancelled', method: 'call', userId: profile.id,
+          fromRutaCod: true,
+        })
+        if (!result.ok) {
+          return NextResponse.json({ error: 'No se pudo cancelar el pedido.' }, { status: 422, headers })
+        }
         break
       }
 
