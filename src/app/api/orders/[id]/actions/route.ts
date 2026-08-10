@@ -4,6 +4,7 @@ import type { ActionType, ContactResult, NoveltyType } from '@/types'
 import { isAgentOrAbove } from '@/lib/roles'
 import { createLocalFulfillment } from '@/lib/shopify/fulfillments'
 import { recordNoveltyAction, type NoveltyActionInput } from '@/lib/novelty/record-novelty-action'
+import { applyConfirmationAction } from '@/lib/orders/confirmation'
 
 interface ActionBody {
   action_type: ActionType
@@ -19,6 +20,20 @@ interface ActionBody {
 // normalized_status='novedad'. Fuera de novedad (Reparto, SD Delivery) estos
 // mismos valores siguen el camino genérico de siempre, sin cambios.
 const NOVELTY_ACTION_TYPES = new Set<ActionType>(['contacted', 'rescheduled', 'recovered'])
+
+// Únicos outcomes que applyConfirmationAction()/cancel_confirmed_order()
+// (migración 061) puede devolver para action='cancelled' con sesión real
+// (ver isKnownCancelFailure en src/lib/orders/confirmation.ts). Mismo
+// mapeo de status que ya usa POST /api/orders/[id]/confirmation.
+const CANCEL_FAILURE_STATUS: Record<string, number> = {
+  not_found:       404,
+  forbidden:        403,
+  terminal_status:  422,
+  already_paid:     422,
+  has_tracking:     422,
+  conflict:         409,
+  db_error:         500,
+}
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -113,6 +128,40 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         // la UI sin re-fetch completo.
         return NextResponse.json(result.data, { status: 201 })
       }
+    }
+
+    // ── customer_declined ("Ya no desea", /sd-delivery legacy) ─────────────
+    // Antes: INSERT directo en agent_actions sin sincronizar
+    // confirmation_status/customer_confirmed — mismo bug ya corregido en
+    // Ruta COD v1 (ver src/app/api/v1/deliveries/orders/[id]/actions/route.ts,
+    // auditoría 2026-08-08/09). Reutiliza el motor comercial único
+    // (applyConfirmationAction() → cancel_confirmed_order(), migración 061)
+    // con fromRutaCod:true — mismo flag que Ruta COD v1, porque esta acción
+    // representa exactamente el mismo hecho operativo (el mensajero SD
+    // reporta que el cliente ya no desea el pedido) sin importar la
+    // superficie que lo dispara. `supabase` aquí YA es el cliente de sesión
+    // real del usuario (createClient(), cookies) — a diferencia de Ruta COD
+    // v1 no hace falta un cliente auxiliar: auth.uid() resuelve
+    // directamente dentro de la RPC con este mismo cliente. No es un
+    // segundo motor de cancelación — es el mismo, con un tercer caller.
+    if (action_type === 'customer_declined') {
+      const result = await applyConfirmationAction({
+        supabase, orderId: order_id, action: 'cancelled', method: 'call',
+        userId: profile.id, fromRutaCod: true,
+      })
+      if (!result.ok) {
+        console.error(`[actions/customer_declined] order=${order_id} reason=${result.reason}`)
+        return NextResponse.json(
+          { error: 'No se pudo registrar el rechazo del cliente.', reason: result.reason },
+          { status: CANCEL_FAILURE_STATUS[result.reason] ?? 422 },
+        )
+      }
+      // Shape distinto del path genérico de abajo — el único consumidor real
+      // (sd-delivery/page.tsx → postAction) no lee el body de la respuesta,
+      // solo dispara el fetch y actualiza su estado local optimista, así
+      // que no hace falta imitar el shape de agent_actions que devolvía el
+      // INSERT directo anterior.
+      return NextResponse.json({ ok: true, action_type: 'customer_declined', order_id }, { status: 201 })
     }
 
     const { data, error } = await supabase
