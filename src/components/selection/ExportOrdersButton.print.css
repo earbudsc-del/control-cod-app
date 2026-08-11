@@ -1,0 +1,36 @@
+/*
+  Mismo mecanismo de aislamiento que OrderCodLabelBatch.print.css: ocultar
+  todos los hermanos directos de <body> excepto el portal de exportación, para
+  que el motor de paginación de impresión solo vea la lista de pedidos (nunca
+  la altura completa de la SPA). A diferencia del sticker COD (4x6in fijo),
+  aquí usamos tamaño de página estándar porque es un documento de texto, no
+  una etiqueta física.
+*/
+
+.export-print-portal {
+  display: none;
+}
+
+@media print {
+  body {
+    margin: 0 !important;
+  }
+
+  body > *:not(.export-print-portal) {
+    display: none !important;
+  }
+
+  .export-print-portal {
+    display: block !important;
+    margin: 0 !important;
+  }
+
+  .export-print-item {
+    break-inside: avoid;
+  }
+}
+
+@page {
+  size: auto;
+  margin: 14mm 12mm;
+}

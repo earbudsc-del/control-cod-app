@@ -23,6 +23,7 @@ import { SelectionCheckbox } from '@/components/selection/SelectionCheckbox'
 import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderCheckbox'
 import { SelectionBulkActionBar } from '@/components/selection/BulkActionBar'
 import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabelsBatchButton'
+import { ExportOrdersButton } from '@/components/selection/ExportOrdersButton'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -244,7 +245,7 @@ function buildDateParams(
     case '7dias': return `&from=${toISO(rdMidnightUTC(-7))}&to=${toISO(rdMidnightUTC(1))}`
     case '30dias':return `&from=${toISO(rdMidnightUTC(-30))}&to=${toISO(rdMidnightUTC(1))}`
     case 'personalizado': {
-      if (!dateApplied || !dateFrom || !dateTo) return ''
+      if (!dateApplied || !dateFrom || !dateTo || dateFrom > dateTo) return ''
       const [fy, fm, fd] = dateFrom.split('-').map(Number)
       const [ty, tm, td] = dateTo.split('-').map(Number)
       return `&from=${toISO(Date.UTC(fy, fm-1, fd, 4, 0, 0, 0))}&to=${toISO(Date.UTC(ty, tm-1, td+1, 4, 0, 0, 0))}`
@@ -725,6 +726,15 @@ export default function ConfirmacionPage() {
   const [dateFrom, setDateFrom]           = useState('')
   const [dateTo, setDateTo]               = useState('')
   const [dateApplied, setDateApplied]     = useState(false)
+  // Incrementa en cada click de "Aplicar" — dateApplied por sí solo no basta
+  // como dependencia de efecto: si ya era `true` (2do+ rango aplicado en la
+  // misma sesión), setDateApplied(true) es un no-op para React (mismo valor,
+  // sin re-render) y el useEffect de fetch nunca vuelve a dispararse aunque
+  // dateFrom/dateTo hayan cambiado. Este tick SIEMPRE cambia de valor, así
+  // que garantiza el refetch en cada aplicación, sin volver el filtro
+  // reactivo a cada tecleo (dateFrom/dateTo no están en los deps).
+  const [dateApplyTick, setDateApplyTick] = useState(0)
+  const [dateRangeError, setDateRangeError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter]   = useState<ConfirmStatusFilter>('')
 
   // ── Vista "Pedidos" (server-paginated) ──────────────────────────────────────
@@ -941,7 +951,7 @@ export default function ConfirmacionPage() {
     setPedidosPage(1)
     fetchPedidos(1, searchQuery, dateFilter, dateFrom, dateTo, dateApplied, statusFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, dateFilter, dateApplied, statusFilter])
+  }, [searchQuery, dateFilter, dateApplied, dateApplyTick, statusFilter])
 
   // ── Cambio de página en pedidos ─────────────────────────────────────────────
   useEffect(() => {
@@ -959,7 +969,7 @@ export default function ConfirmacionPage() {
     setSdPage(1)
     fetchSD(1, searchQuery, statusFilter, sdPaymentFilter, dateFilter, dateFrom, dateTo, dateApplied)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, statusFilter, sdPaymentFilter, dateFilter, dateApplied])
+  }, [searchQuery, statusFilter, sdPaymentFilter, dateFilter, dateApplied, dateApplyTick])
 
   // ── Cambio de página en Santo Domingo ────────────────────────────────────────
   useEffect(() => {
@@ -974,7 +984,7 @@ export default function ConfirmacionPage() {
     setFcdPage(1)
     fetchFCD(1, searchQuery, statusFilter, dateFilter, dateFrom, dateTo, dateApplied)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, statusFilter, dateFilter, dateApplied])
+  }, [searchQuery, statusFilter, dateFilter, dateApplied, dateApplyTick])
 
   // ── Cambio de página en Fuera de cobertura ───────────────────────────────────
   useEffect(() => {
@@ -1019,7 +1029,7 @@ export default function ConfirmacionPage() {
       case '7dias': return { from: rdMidnightUTC(-7),  to: tomorrowMs }
       case '30dias':return { from: rdMidnightUTC(-30), to: tomorrowMs }
       case 'personalizado': {
-        if (!dateApplied || !dateFrom || !dateTo) return null
+        if (!dateApplied || !dateFrom || !dateTo || dateFrom > dateTo) return null
         const [fy, fm, fd] = dateFrom.split('-').map(Number)
         const [ty, tm, td] = dateTo.split('-').map(Number)
         return { from: Date.UTC(fy, fm-1, fd, 4, 0, 0, 0), to: Date.UTC(ty, tm-1, td+1, 4, 0, 0, 0) }
@@ -1608,7 +1618,7 @@ export default function ConfirmacionPage() {
           <CalendarDays className="w-3.5 h-3.5 text-gray-400 shrink-0" />
           {(['hoy', 'ayer', '7dias', '30dias'] as DateFilter[]).map(f => (
             <button key={f}
-              onClick={() => { setDateFilter(prev => prev === f ? null : f); setCurrentPage(1) }}
+              onClick={() => { setDateFilter(prev => prev === f ? null : f); setDateRangeError(null); setCurrentPage(1) }}
               className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors shrink-0
                 ${dateFilter === f
                   ? 'bg-indigo-500 text-white border-indigo-500'
@@ -1617,7 +1627,7 @@ export default function ConfirmacionPage() {
             </button>
           ))}
           <button
-            onClick={() => { setDateFilter(prev => prev === 'personalizado' ? null : 'personalizado'); setCurrentPage(1) }}
+            onClick={() => { setDateFilter(prev => prev === 'personalizado' ? null : 'personalizado'); setDateRangeError(null); setCurrentPage(1) }}
             className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors shrink-0
               ${dateFilter === 'personalizado'
                 ? 'bg-indigo-500 text-white border-indigo-500'
@@ -1626,21 +1636,37 @@ export default function ConfirmacionPage() {
           </button>
           {dateFilter === 'personalizado' && (
             <div className="flex items-center gap-1.5 flex-wrap">
-              <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+              <input type="date" value={dateFrom}
+                onChange={e => { setDateFrom(e.target.value); setDateRangeError(null) }}
                 className="text-[11px] border border-gray-200 rounded px-2 py-1
                            focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white" />
               <span className="text-[10px] text-gray-400">—</span>
-              <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+              <input type="date" value={dateTo}
+                onChange={e => { setDateTo(e.target.value); setDateRangeError(null) }}
                 className="text-[11px] border border-gray-200 rounded px-2 py-1
                            focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white" />
-              <button onClick={() => { setDateApplied(true); setPedidosPage(1); setCurrentPage(1) }}
+              <button
+                onClick={() => {
+                  if (!dateFrom || !dateTo) { setDateRangeError('Selecciona ambas fechas'); return }
+                  if (dateFrom > dateTo) { setDateRangeError('La fecha inicial no puede ser posterior a la final'); return }
+                  setDateRangeError(null)
+                  // SIEMPRE usa los valores actuales de dateFrom/dateTo (ya
+                  // aplicados vía closure) y SIEMPRE fuerza el refetch, sea
+                  // la 1ra o la Nva aplicación consecutiva — ver dateApplyTick.
+                  setDateApplied(true)
+                  setDateApplyTick(t => t + 1)
+                  setPedidosPage(1); setSdPage(1); setFcdPage(1); setCurrentPage(1)
+                }}
                 className="text-[11px] bg-indigo-600 text-white px-2.5 py-1 rounded-full hover:bg-indigo-700 shrink-0">
                 Aplicar
               </button>
+              {dateRangeError && (
+                <span className="text-[11px] text-red-600 font-medium">{dateRangeError}</span>
+              )}
             </div>
           )}
           {dateFilter && (
-            <button onClick={() => { setDateFilter(null); setDateFrom(''); setDateTo(''); setDateApplied(false); setCurrentPage(1); setPedidosPage(1) }}
+            <button onClick={() => { setDateFilter(null); setDateFrom(''); setDateTo(''); setDateApplied(false); setDateRangeError(null); setCurrentPage(1); setPedidosPage(1) }}
               className="text-[11px] text-gray-400 hover:text-red-500 ml-auto shrink-0">
               ✕ Limpiar
             </button>
@@ -2346,6 +2372,10 @@ export default function ConfirmacionPage() {
 
       <SelectionBulkActionBar>
         <PrintCodLabelsBatchButton />
+        <ExportOrdersButton
+          orders={viewMode === 'reintentar' ? filteredOrders : clientFilteredData}
+          scopeLabel={VIEW_META.find(v => v.mode === viewMode)?.label ?? 'pedidos'}
+        />
       </SelectionBulkActionBar>
       </SelectionProvider>
     </div>
