@@ -41,8 +41,12 @@ export const SD_ZONES: SdZone[] = [
     tarifa:     300,
     terms: [
       'villa mella', 'santo domingo norte', 'sdn', 'los guaricanos',
-      'villas agricolas', 'sabana perdida', 'boca de soco', 'guerra',
-      'sabana iglesia', 'el pedregal', 'palmarejo',
+      'villas agricolas', 'sabana perdida', 'boca de soco',
+      // 'guerra' a secas es demasiado genérico (colisiona con apellidos/calles
+      // "Guerra" en cualquier provincia) — se exige el nombre compuesto del
+      // municipio para evitar falsos positivos (auditoría 2026-08-10).
+      'san antonio de guerra',
+      'sabana iglesia', 'el pedregal', 'palmarejo', 'la victoria',
     ],
   },
   {
@@ -54,7 +58,7 @@ export const SD_ZONES: SdZone[] = [
     terms: [
       'santo domingo oeste', 'sdo', 'herrera', 'los alcarrizos', 'km 12',
       'manoguayabo', 'pantoja', 'mendoza sdo', 'hato nuevo',
-      'monte san juan',
+      'monte san juan', 'pedro brand', 'la cuaba', 'el gallo',
     ],
   },
   {
@@ -67,7 +71,7 @@ export const SD_ZONES: SdZone[] = [
     terms: [
       'santo domingo este', 'sde', 'los mina', 'san luis', 'alma rosa',
       'ensanche isabelita', 'sabana larga', 'jardines del este',
-      'ozama', 'villa hermosa', 'las americas',
+      'ozama', 'villa hermosa', 'las americas', 'villa duarte',
     ],
   },
   {

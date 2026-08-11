@@ -124,13 +124,105 @@ for (const c of ZONE_CASES) {
   )
 }
 
+// ── Auditoría 2026-08-10 — La Victoria / Villa Duarte / San Antonio de Guerra ─
+// La Victoria y Villa Duarte caían en zona 'otro' (no agrupaban en norte/este).
+// El término genérico 'guerra' producía falsos positivos con cualquier
+// dirección/apellido que contuviera esa palabra fuera de SD.
+
+interface ZoneIdCase {
+  label: string
+  city?: string | null
+  province?: string | null
+  address?: string | null
+  expectedZoneId: string
+}
+
+function runZoneGroup(title: string, cases: ZoneIdCase[]): void {
+  console.log(`\n— ${title} —`)
+  for (const c of cases) {
+    const zone = detectSdZone(c.city ?? null, c.province ?? null, c.address ?? null)
+    const pass = zone.id === c.expectedZoneId
+    if (!pass) failures++
+    console.log(
+      `${pass ? '✅' : '❌'} detectSdZone(city=${JSON.stringify(c.city)}, province=${JSON.stringify(c.province)}, address=${JSON.stringify(c.address)}) = ${zone.id} (esperado ${c.expectedZoneId}) — ${c.label}`,
+    )
+  }
+}
+
+// La Victoria
+const LA_VICTORIA_CASES: Case[] = [
+  { label: 'La Victoria + province="Santo Domingo" → SD',        city: 'La Victoria', province: 'Santo Domingo', expected: true },
+  // province vacío: el término ahora vive directo en SD_COVERAGE_TERMS (no
+  // depende de la señal de alta confianza), así que sigue clasificando SD
+  // igual que con province informado — comportamiento esperado, documentado.
+  { label: 'La Victoria + province="" → SD (sin depender de province)', city: 'La Victoria', province: '', expected: true },
+]
+runGroup('La Victoria', LA_VICTORIA_CASES)
+
+const LA_VICTORIA_ZONE_CASES: ZoneIdCase[] = [
+  { label: 'La Victoria (city) → norte',        city: 'La Victoria', province: 'Santo Domingo', expectedZoneId: 'norte' },
+  { label: 'La Victoria en address → norte',    address: 'Calle Principal, La Victoria',          expectedZoneId: 'norte' },
+]
+runZoneGroup('La Victoria — zona', LA_VICTORIA_ZONE_CASES)
+
+// Villa Duarte
+const VILLA_DUARTE_CASES: Case[] = [
+  { label: 'Villa Duarte + province="Santo Domingo" → SD', city: 'Villa Duarte', province: 'Santo Domingo', expected: true },
+]
+runGroup('Villa Duarte', VILLA_DUARTE_CASES)
+
+const VILLA_DUARTE_ZONE_CASES: ZoneIdCase[] = [
+  { label: 'Villa Duarte (city) → este',     city: 'Villa Duarte', province: 'Santo Domingo', expectedZoneId: 'este' },
+  { label: 'Villa Duarte en address → este', address: 'Sector Villa Duarte, Ave. España',        expectedZoneId: 'este' },
+]
+runZoneGroup('Villa Duarte — zona', VILLA_DUARTE_ZONE_CASES)
+
+// Guerra
+const GUERRA_CASES: Case[] = [
+  { label: 'San Antonio de Guerra → SD',                                city: 'San Antonio de Guerra', expected: true },
+  // "Guerra" a secas ya NO es señal SD — es demasiado genérico (apellido,
+  // calle, etc. en cualquier provincia). Comportamiento esperado tras el fix.
+  { label: '"Guerra" aislado (sin "San Antonio de") → NOT-SD, documentado', city: 'Guerra', expected: false },
+  // Dirección real de otra provincia que contiene la palabra "guerra" (ej.
+  // apellido/calle "Guerra") — caso de falso positivo que motivó el fix.
+  { label: 'Dirección provincial con "guerra" no relacionada → NOT-SD', city: 'Santiago', address: 'Calle Alberto Guerra #45', expected: false },
+  { label: 'Apellido "Guerra" en La Romana → NOT-SD',                   city: 'La Romana', address: 'Juan Guerra, Calle 5',      expected: false },
+  { label: 'La Romana sigue NOT-SD (regresión)',                        city: 'La Romana', expected: false },
+]
+runGroup('Guerra', GUERRA_CASES)
+
+const GUERRA_ZONE_CASES: ZoneIdCase[] = [
+  { label: 'San Antonio de Guerra → zona norte (tarifa sin cambios)', city: 'San Antonio de Guerra', expectedZoneId: 'norte' },
+  { label: '"Guerra" aislado → cae en otro (no falso positivo de zona)', city: 'Guerra', expectedZoneId: 'otro' },
+]
+runZoneGroup('Guerra — zona', GUERRA_ZONE_CASES)
+
+// Regresión — no romper zonas/localidades ya cubiertas
+const LA_VICTORIA_VILLA_DUARTE_GUERRA_REGRESSION_CASES: Case[] = [
+  { label: 'Pantoja',               city: 'Pantoja',             expected: true },
+  { label: 'Los Alcarrizos',        city: 'Los Alcarrizos',      expected: true },
+  { label: 'Pedro Brand',           city: 'Pedro Brand',         expected: true },
+  { label: 'Villa Mella',           city: 'Villa Mella',         expected: true },
+  { label: 'Santo Domingo Este',    city: 'Santo Domingo Este',  expected: true },
+  { label: 'Distrito Nacional',     city: 'Distrito Nacional',   expected: true },
+  { label: 'Boca Chica',            city: 'Boca Chica',          expected: true },
+]
+runGroup('Regresión — La Victoria/Villa Duarte/Guerra no rompen nada', LA_VICTORIA_VILLA_DUARTE_GUERRA_REGRESSION_CASES)
+
 const totalCases =
   CASES.length +
   PANTOJA_CASES.length +
   HIGH_CONFIDENCE_CASES.length +
   PROVINCE_PROTECTION_CASES.length +
   SD_REGRESSION_CASES.length +
-  ZONE_CASES.length
+  ZONE_CASES.length +
+  LA_VICTORIA_CASES.length +
+  LA_VICTORIA_ZONE_CASES.length +
+  VILLA_DUARTE_CASES.length +
+  VILLA_DUARTE_ZONE_CASES.length +
+  GUERRA_CASES.length +
+  GUERRA_ZONE_CASES.length +
+  LA_VICTORIA_VILLA_DUARTE_GUERRA_REGRESSION_CASES.length
 
 if (failures > 0) {
   console.error(`\n${failures} prueba(s) fallaron.`)
