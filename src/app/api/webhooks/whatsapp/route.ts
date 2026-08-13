@@ -4,6 +4,7 @@ import { createServiceClient }  from '@/lib/supabase/server'
 import { normalizePhoneRD }     from '@/lib/normalize-phone'
 import { applyConfirmationAction, type ConfirmAction } from '@/lib/orders/confirmation'
 import { maybeGenesisRespond }  from '@/lib/genesis/respond'
+import { isSantoDomingoOrder }  from '@/lib/alert-helpers'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -19,14 +20,22 @@ interface MetaWebhookButton {
   payload: string
 }
 
+interface MetaWebhookLocation {
+  latitude:  number
+  longitude: number
+  name?:     string
+  address?:  string
+}
+
 interface MetaWebhookMessage {
   from:        string
   id:          string              // wamid.xxx — clave de deduplicación
   timestamp:   string              // Unix epoch segundos, como string
-  type:        string              // 'text' | 'image' | 'audio' | 'interactive' | 'button' | etc.
+  type:        string              // 'text' | 'image' | 'audio' | 'interactive' | 'button' | 'location' | etc.
   text?:       { body: string }
   interactive?: MetaWebhookButtonReply   // respuesta a botones interactive (Reply Buttons)
   button?:      MetaWebhookButton        // respuesta a quick-reply de un template
+  location?:    MetaWebhookLocation      // pin de ubicación (Sprint 3A)
   [key: string]: unknown          // otros campos según el tipo de mensaje
 }
 
@@ -60,6 +69,21 @@ function parseInboundContent(msg: MetaWebhookMessage): InboundContent | null {
       body:        text,
       messageType: 'button_reply',
       metadata:    { button: msg.button, button_reply_id: payload, button_reply_title: text },
+    }
+  }
+
+  // Pin de ubicación de WhatsApp (Sprint 3A) — usado para "Ubicación recibida"
+  // en pedidos SD. body=null (no hay texto), la coordenada vive en metadata.
+  if (msg.type === 'location' && msg.location) {
+    return {
+      body:        null,
+      messageType: 'location',
+      metadata:    {
+        latitude:  msg.location.latitude,
+        longitude: msg.location.longitude,
+        name:      msg.location.name ?? null,
+        address:   msg.location.address ?? null,
+      },
     }
   }
 
@@ -106,6 +130,16 @@ function verifyMetaHmac(rawBody: string, signatureHeader: string, appSecret: str
   }
 }
 
+
+// Enmascarado para logs — nunca coordenadas completas ni teléfono completo.
+function maskPhone(phone: string | null | undefined): string {
+  if (!phone) return '(sin teléfono)'
+  return phone.length <= 4 ? '****' : `${'*'.repeat(phone.length - 4)}${phone.slice(-4)}`
+}
+function maskCoord(n: number | null | undefined): string {
+  if (typeof n !== 'number') return '(?)'
+  return n.toFixed(1) + '…'
+}
 
 // Trunca el preview a 150 chars. Contrato: el webhook es el único escritor.
 function makePreview(body: string | null | undefined, msgType: string): string {
@@ -232,6 +266,9 @@ export async function POST(request: Request) {
               console.log('[wa-webhook] tipo', msg.type, 'omitido — sin manejador')
               console.log('[wa-diag] FASE6B payload completo mensaje no soportado:', JSON.stringify(msg))
               continue
+            }
+            if (content.messageType === 'location') {
+              console.log(`[wa-webhook] ✓ webhook recibió tipo location — from=${maskPhone(msg.from)}`)
             }
 
             const displayName = contactsMap.get(msg.from)?.profile?.name ?? null
@@ -504,6 +541,79 @@ async function processInboundMessage(
 
   console.log('[wa-diag] UPDATE wa_conversations → error:', updateConvErr?.message ?? null)
 
+  // ── 4b. Ubicación recibida — Ruta COD v1 Fase 5 (docs/IMPLEMENTATION_PLAN_
+  // RUTA_COD_V1.md). Asocia la coordenada al pedido SD activo más reciente y
+  // compatible de este teléfono (tracking_number NULL + no terminal). Si hay
+  // más de un pedido activo compatible, no se asigna a ciegas: se toma el más
+  // reciente igualmente (mejor esfuerzo) pero se marca
+  // sd_location_status='ambiguous' para que Ruta COD lo señale para revisión
+  // manual en vez de mostrar "Ubicación recibida" con confianza total — y,
+  // crucialmente, NO se confirma el pedido en ese caso (ver más abajo).
+  if (content.messageType === 'location' && content.metadata) {
+    const lat = content.metadata.latitude as number | undefined
+    const lng = content.metadata.longitude as number | undefined
+    if (typeof lat === 'number' && typeof lng === 'number') {
+      console.log(`[wa-webhook] location conversación encontrada — conv=${conversation.id} coords≈(${maskCoord(lat)},${maskCoord(lng)})`)
+      const candidates = await findActiveSdOrdersByPhone(supabase, storeId, phoneNormalized)
+      console.log(`[wa-webhook] location candidatos de pedidos encontrados — count=${candidates.length}`)
+      if (candidates.length > 0) {
+        const target = candidates[0]
+        const locationStatus = candidates.length > 1 ? 'ambiguous' : 'received'
+        const { error: locErr } = await supabase
+          .from('orders')
+          .update({
+            sd_location_lat: lat,
+            sd_location_lng: lng,
+            sd_location_received_at: sentAt,
+            sd_location_status: locationStatus,
+            sd_location_wa_msg_id: msg.id,
+            sd_location_conversation_id: conversation.id,
+          })
+          .eq('id', target.id)
+
+        if (locErr) {
+          console.error('[wa-webhook] ✖ Error guardando ubicación SD (update de orders falló):', locErr.message)
+        } else {
+          console.log(
+            `[wa-webhook] ✓ pedido asignado (update de orders OK) — order=${target.id} status=${locationStatus} candidatos=${candidates.length}`,
+          )
+
+          // Ubicación válida y NO ambigua confirma y despacha — único punto
+          // de entrada autorizado (applyConfirmationAction, Principio 4 de
+          // ARCHITECTURE_RUTA_COD_V1.md). guardAutomated:true exige
+          // confirmation_status='pending' — si el pedido ya estaba
+          // 'confirmed' (ej. el cliente reenvía el pin, o un agente ya lo
+          // confirmó por llamada mientras tanto), devuelve 'not_pending' sin
+          // tocar nada: no hay reintento, no hay doble confirmación, no hay
+          // segunda fila de auditoría. Nunca se llama en el caso 'ambiguous'.
+          if (locationStatus === 'received') {
+            const confirmResult = await applyConfirmationAction({
+              supabase,
+              orderId: target.id,
+              action: 'confirmed',
+              method: 'whatsapp_location',
+              userId: null,
+              guardAutomated: true,
+            })
+
+            if (!confirmResult.ok) {
+              console.warn(
+                `[wa-webhook] ⚠ confirmación automática por ubicación omitida — order=${target.id} reason=${confirmResult.reason}`,
+              )
+            } else {
+              console.log(
+                `[wa-webhook] ✓ pedido confirmado y despachado por ubicación — order=${target.id} ` +
+                `auto_dispatched=${confirmResult.auto_dispatched} confirmation_status=${confirmResult.confirmation_status}`,
+              )
+            }
+          }
+        }
+      } else {
+        console.log('[wa-webhook] ubicación recibida sin pedido SD activo compatible — phone=', maskPhone(phoneNormalized))
+      }
+    }
+  }
+
   // ── 5. Acción automática sobre el pedido (Fase 6C) ────────────────────────
   // Botón "Confirmar" / "No, gracias" del template order_confirmation_cod.
   // Reutiliza exactamente la misma lógica que el endpoint manual de confirmación.
@@ -641,4 +751,41 @@ async function findOrderByPhone(
   })
 
   return match?.id ?? null
+}
+
+// ── Helper: pedidos SD activos y compatibles con un teléfono (Sprint 3A) ──────
+// Mismo criterio de matching por sufijo que findOrderByPhone, pero devuelve
+// TODOS los candidatos activos (no solo el primero) para que el llamador
+// pueda decidir si hay ambigüedad. "Compatible" = cobertura interna SD,
+// sin guía EFI (tracking_number NULL) y no en estado terminal. Ordenado por
+// created_at DESC — candidates[0] es siempre el pedido más reciente.
+async function findActiveSdOrdersByPhone(
+  supabase:        ServiceClient,
+  storeId:         string,
+  phoneNormalized: string,
+): Promise<{ id: string; created_at: string }[]> {
+  if (phoneNormalized.length < 7) return []
+
+  const { data: orders } = await supabase
+    .from('orders')
+    .select('id, customer_phone, customer_address, city, province, tracking_number, normalized_status, created_at')
+    .eq('store_id', storeId)
+    .not('customer_phone', 'is', null)
+    .is('tracking_number', null)
+    .not('normalized_status', 'in', '(delivered,returned,cancelled)')
+    .order('created_at', { ascending: false })
+    .limit(200)
+
+  if (!orders?.length) return []
+
+  return orders
+    .filter(o => {
+      if (!o.customer_phone) return false
+      const stored  = o.customer_phone.replace(/\D/g, '')
+      const shorter = stored.length <= phoneNormalized.length ? stored : phoneNormalized
+      const longer  = stored.length <= phoneNormalized.length ? phoneNormalized : stored
+      if (!(longer.endsWith(shorter) && shorter.length >= 7)) return false
+      return isSantoDomingoOrder(o.city, o.province, o.customer_address)
+    })
+    .map(o => ({ id: o.id, created_at: o.created_at }))
 }

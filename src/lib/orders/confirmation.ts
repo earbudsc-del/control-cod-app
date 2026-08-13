@@ -12,7 +12,13 @@ import { isSantoDomingoOrder } from '@/lib/alert-helpers'
 // Génesis) — todos pasan por esta función.
 
 export type ConfirmAction = 'confirmed' | 'no_answer' | 'wrong_number' | 'cancelled' | 'no_coverage' | 'rescheduled' | 'reopened'
-export type ConfirmMethod = 'call' | 'whatsapp' | 'other'
+// 'whatsapp_location' — Ruta COD v1, Fase 5 (docs/IMPLEMENTATION_PLAN_RUTA_COD_V1.md):
+// confirmación automática por ubicación de WhatsApp válida y no ambigua (ver
+// webhooks/whatsapp/route.ts, bloque 4b). Requiere la migración
+// 045_confirmation_method_whatsapp_location.sql aplicada — sin ella, el UPDATE
+// de abajo falla con Postgres 23514 y applyConfirmationAction devuelve
+// { ok:false, reason:'db_error' } (fallo seguro, no corrompe datos).
+export type ConfirmMethod = 'call' | 'whatsapp' | 'other' | 'whatsapp_location'
 
 type SupabaseClient = Awaited<ReturnType<typeof createClient>>
 

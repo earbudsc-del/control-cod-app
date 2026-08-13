@@ -61,6 +61,18 @@ interface OrderRow extends SdOrderRow {
   sd_location_status: string | null
   sd_location_wa_msg_id: string | null
   sd_location_conversation_id: string | null
+  raw_status?: string | null
+}
+
+// Null-safe: pedidos SD locales (courier interno, nunca tocados por EFI)
+// tienen raw_status=NULL siempre — nunca "anulada"/"cancelada" (esos valores
+// solo los escribe el parser EFI). Ver isCancelledGuide en
+// src/lib/order-status-helpers.ts (misma semántica, tipo Order en vez de
+// OrderRow — se reimplementa aquí en vez de castear para no forzar un tipo
+// que no calza 1:1).
+function isNotCancelledRawStatus(rawStatus: string | null | undefined): boolean {
+  const r = (rawStatus ?? '').toLowerCase()
+  return !r.includes('anulad') && !r.includes('cancelad')
 }
 
 function getBearerToken(request: Request): string | null {
@@ -103,12 +115,19 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Sin permisos' }, { status: 403, headers })
     }
 
+    // Nota: la exclusión de anulada/cancelada NO se hace aquí vía
+    // .not('raw_status','ilike',...) — con raw_status=NULL (el caso de TODO
+    // pedido SD local, siempre, nunca tocado por EFI) esos filtros de
+    // PostgREST descartan la fila (lógica de 3 valores de Postgres: NOT NULL
+    // = NULL, y WHERE NULL excluye). Confirmado en vivo durante el Sprint
+    // Crítico 1: los 293 pedidos SD reales en 'en_reparto' hoy (100% del pool
+    // real) tienen raw_status=NULL y ninguno pasaba este filtro — poolA
+    // devolvía vacío siempre. El filtro se aplica ahora en JS
+    // (isNotCancelledRawStatus, null-safe) junto con isSdEligible más abajo.
     const poolAQuery = userClient
       .from('orders_with_sla')
       .select(`${ORDER_FIELDS}, raw_status`)
       .eq('normalized_status', 'en_reparto')
-      .not('raw_status', 'ilike', '%anulad%')
-      .not('raw_status', 'ilike', '%cancelad%')
       .eq('is_test', false)
       .is('tracking_number', null)
       .limit(500)
@@ -161,7 +180,7 @@ export async function GET(request: Request) {
     const poolDData = (poolDRes.data ?? []) as unknown as OrderRow[]
 
     const terminal = new Set(['delivered', 'returned', 'cancelled'])
-    const poolA = poolAData.filter(isSdEligible)
+    const poolA = poolAData.filter(o => isSdEligible(o) && isNotCancelledRawStatus(o.raw_status))
     const poolB = poolBData.filter(isSdEligible)
     const poolC = poolCData.filter(o => isSdEligible(o) && !terminal.has(o.normalized_status))
     const poolD = poolDData.filter(isSdEligible)
