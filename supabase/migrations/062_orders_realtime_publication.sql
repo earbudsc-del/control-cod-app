@@ -1,0 +1,41 @@
+-- ============================================================
+-- 062_orders_realtime_publication.sql
+-- Sprint Crítico 2 — Ruta COD realtime + push notifications.
+--
+-- Habilita Supabase Realtime (postgres_changes) para `orders` y
+-- `agent_actions`. Sin esta migración, cualquier suscripción de Ruta COD a
+-- estas tablas se conecta con éxito (SUBSCRIBED) pero NUNCA recibe eventos —
+-- confirmado empíricamente durante este sprint con un cliente service-role
+-- (bypassa RLS por completo) que sí recibió eventos reales de `wa_messages`
+-- (tabla ya habilitada) pero cero eventos de `orders`/`agent_actions` tras
+-- INSERT/UPDATE reales sobre filas de prueba. La pertenencia a la
+-- publicación de Postgres (`supabase_realtime`) es un requisito separado e
+-- independiente de RLS — RLS decide QUÉ ve cada cliente, la publicación
+-- decide SI se emite el evento en absoluto.
+--
+-- Seguridad: aditivo puro, no crea ni modifica políticas RLS. `orders` y
+-- `agent_actions` YA tienen RLS habilitada con políticas scoped a
+-- store_id=get_user_store_id() (ver 002_rls.sql, orders_select/actions_select)
+-- — una vez en la publicación, un cliente autenticado con JWT real (anon key
+-- + sesión de usuario, exactamente como ya usa el Inbox de WhatsApp para
+-- wa_messages/wa_conversations) solo recibirá eventos de pedidos de su
+-- propia tienda. Un cliente service-role (nunca usado desde el navegador)
+-- recibe todo, como siempre.
+--
+-- No se cambia REPLICA IDENTITY — el default (primary key) es suficiente
+-- para que payload.new incluya todas las columnas en INSERT/UPDATE (que es
+-- lo único que Ruta COD necesita: una señal para disparar un refetch al
+-- endpoint oficial, nunca confía en el payload realtime como fuente de
+-- verdad — ver docs de la Fase 3 del sprint).
+-- ============================================================
+
+ALTER PUBLICATION supabase_realtime ADD TABLE orders;
+ALTER PUBLICATION supabase_realtime ADD TABLE agent_actions;
+
+-- ============================================================
+-- VERIFICACIÓN (ejecutar manualmente después de aplicar, no automatizada)
+-- ============================================================
+-- SELECT schemaname, tablename FROM pg_publication_tables
+-- WHERE pubname = 'supabase_realtime' AND tablename IN ('orders', 'agent_actions');
+--
+-- Resultado esperado: 2 filas (orders, agent_actions).
