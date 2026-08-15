@@ -7,6 +7,7 @@ import type { OrderCodLabelModel } from '@/lib/order-label/types'
 import { sanitizeFileName } from '@/lib/order-label/format-order-label'
 import { exportOrderCodLabelPng, LabelExportDimensionError } from '@/lib/order-label/export-png'
 import { useFittedLabelTier } from '@/lib/order-label/use-fitted-label-tier'
+import { installPrintPageStyle, STICKER_LABEL_PAGE_CSS } from '@/lib/print/page-style'
 import { OrderCodLabel } from './OrderCodLabel'
 import './print-isolation.css'
 
@@ -59,6 +60,12 @@ export function OrderCodLabelModal({ model, onClose }: OrderCodLabelModalProps) 
   }
 
   function handlePrint() {
+    const uninstall = installPrintPageStyle(STICKER_LABEL_PAGE_CSS)
+    function cleanup() {
+      uninstall()
+      window.removeEventListener('afterprint', cleanup)
+    }
+    window.addEventListener('afterprint', cleanup)
     window.print()
   }
 
@@ -112,7 +119,7 @@ export function OrderCodLabelModal({ model, onClose }: OrderCodLabelModalProps) 
             solo vea 4x6in de contenido real (ver print-isolation.css). */}
         {typeof document !== 'undefined' &&
           createPortal(
-            <div className="cod-label-print-portal">
+            <div className="cod-label-print-portal print-isolation-root">
               <OrderCodLabel model={model} tier={tier} />
             </div>,
             document.body,

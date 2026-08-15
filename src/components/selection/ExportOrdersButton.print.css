@@ -5,6 +5,17 @@
   la altura completa de la SPA). A diferencia del sticker COD (4x6in fijo),
   aquí usamos tamaño de página estándar porque es un documento de texto, no
   una etiqueta física.
+
+  La regla de "ocultar hermanos" exceptúa .print-isolation-root (clase
+  compartida con los portales de Sticker COD, ver print-isolation.css): este
+  botón y PrintCodLabelsBatchButton están montados a la vez en /confirmacion,
+  así que sin esta clase compartida cada print.css termina ocultando el
+  portal del otro.
+
+  @page tampoco se declara aquí de forma estática (es global, no se puede
+  scopear por clase, y competía con el @page 4in×6in del Sticker COD). Lo
+  instala installPrintPageStyle() justo antes de window.print() — ver
+  src/lib/print/page-style.ts y el useEffect de impresión en ExportOrdersButton.tsx.
 */
 
 .export-print-portal {
@@ -16,7 +27,7 @@
     margin: 0 !important;
   }
 
-  body > *:not(.export-print-portal) {
+  body > *:not(.print-isolation-root) {
     display: none !important;
   }
 
@@ -28,9 +39,4 @@
   .export-print-item {
     break-inside: avoid;
   }
-}
-
-@page {
-  size: auto;
-  margin: 14mm 12mm;
 }

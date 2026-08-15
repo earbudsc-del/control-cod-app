@@ -6,7 +6,12 @@ import { Download, ChevronDown, FileText, Printer } from 'lucide-react'
 import type { Order } from '@/types'
 import { useSelection } from './SelectionProvider'
 import { buildOrdersTxt, buildExportFilename, downloadTextFile, toExportRow } from '@/lib/order-export/build-export'
+import { installPrintPageStyle } from '@/lib/print/page-style'
 import './ExportOrdersButton.print.css'
+
+// Tamaño de página estándar para el listado de texto (no es una etiqueta
+// física de 4x6in como el Sticker COD) — ver src/lib/print/page-style.ts.
+const EXPORT_LIST_PAGE_CSS = '@page { size: auto; margin: 14mm 12mm; }'
 
 interface ExportOrdersButtonProps {
   // Pool de pedidos "conocidos" de la vista activa — mismo array que
@@ -41,12 +46,17 @@ export function ExportOrdersButton({ orders, scopeLabel }: ExportOrdersButtonPro
 
   useEffect(() => {
     if (!printing) return
-    function handleAfterPrint() { setPrinting(false) }
+    const uninstallPageStyle = installPrintPageStyle(EXPORT_LIST_PAGE_CSS)
+    function handleAfterPrint() {
+      uninstallPageStyle()
+      setPrinting(false)
+    }
     window.addEventListener('afterprint', handleAfterPrint)
     const t = setTimeout(() => window.print(), 50)
     return () => {
       window.removeEventListener('afterprint', handleAfterPrint)
       clearTimeout(t)
+      uninstallPageStyle()
     }
   }, [printing])
 
@@ -105,7 +115,7 @@ export function ExportOrdersButton({ orders, scopeLabel }: ExportOrdersButtonPro
 function PrintableOrderList({ orders, scopeLabel }: { orders: Order[]; scopeLabel: string }) {
   const rows = orders.map(toExportRow)
   return (
-    <div className="export-print-portal" style={{ fontFamily: 'Arial, Helvetica, sans-serif', color: '#111' }}>
+    <div className="export-print-portal print-isolation-root" style={{ fontFamily: 'Arial, Helvetica, sans-serif', color: '#111' }}>
       <h1 style={{ fontSize: '16pt', margin: '0 0 4pt' }}>Pedidos seleccionados</h1>
       <p style={{ fontSize: '9pt', color: '#555', margin: '0 0 12pt' }}>
         {scopeLabel} · {rows.length} pedido{rows.length !== 1 ? 's' : ''}

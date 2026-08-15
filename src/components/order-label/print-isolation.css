@@ -12,6 +12,28 @@
   en la primera). Fix: ocultar con display:none (saca del flujo) a todos los
   hermanos directos de <body> excepto el portal — así el documento impreso
   mide exactamente lo que mide el portal (4x6in), una sola página.
+
+  v3: PrintCodLabelsBatchButton.tsx (impresión batch) y ExportOrdersButton.tsx
+  (exportar PDF) montan sus propios portales hermanos de este, cada uno con su
+  propio print.css usando el MISMO patrón `body > *:not(.propia-clase)`. Como
+  los tres componentes están montados a la vez en las mismas páginas
+  (Confirmación, Confirmados, Despachados, Reparto, SD), sus tres hojas de
+  estilo están activas simultáneamente durante cualquier impresión — y como
+  cada regla solo exceptúa SU PROPIA clase, cada una terminaba ocultando (con
+  !important) los portales de las otras dos, dando hoja en blanco según cuál
+  cargara último en el bundle (confirmado con page.pdf(): PDF de 737 bytes,
+  portal con display:none). Fix: la regla de "ocultar hermanos" exceptúa la
+  clase compartida `.print-isolation-root` (ver también
+  OrderCodLabelBatch.print.css y ExportOrdersButton.print.css), que los tres
+  portales llevan además de su clase propia — así ningún sistema de impresión
+  esconde al de otro, sin importar el orden de carga del CSS.
+
+  v4: @page es global — no se puede scopear por clase como display:none. El
+  tamaño 4in×6in ya NO se declara aquí de forma estática (competía con el
+  @page de OrderCodLabelBatch.print.css/ExportOrdersButton.print.css según
+  cuál cargara último). Ahora lo instala installPrintPageStyle() justo antes
+  de window.print() — ver src/lib/print/page-style.ts y handlePrint() en
+  OrderCodLabelModal.tsx.
 */
 
 .cod-label-print-portal {
@@ -23,7 +45,7 @@
     margin: 0 !important;
   }
 
-  body > *:not(.cod-label-print-portal) {
+  body > *:not(.print-isolation-root) {
     display: none !important;
   }
 
@@ -31,9 +53,4 @@
     display: block !important;
     margin: 0 !important;
   }
-}
-
-@page {
-  size: 4in 6in;
-  margin: 0;
 }

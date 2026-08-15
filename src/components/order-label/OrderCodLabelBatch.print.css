@@ -9,6 +9,17 @@
   seguidas, cada una en un wrapper .cod-label-batch-item con
   page-break-after:always — así cada Sticker COD queda en su propia página de
   4x6in, en el mismo orden en que el agente las seleccionó.
+
+  La regla de "ocultar hermanos" exceptúa .print-isolation-root (clase
+  compartida con los otros portales de impresión, ver print-isolation.css):
+  este componente y el de impresión individual/export están montados a la vez
+  en las mismas páginas, así que sin esta clase compartida cada print.css
+  termina ocultando el portal de los demás.
+
+  @page tampoco se declara aquí de forma estática (es global, no se puede
+  scopear por clase, y competía con el @page de los otros 2 print.css). Lo
+  instala installPrintPageStyle() justo antes de window.print() — ver
+  src/lib/print/page-style.ts y el useEffect de impresión en este componente.
 */
 
 .cod-label-batch-print-portal {
@@ -20,7 +31,7 @@
     margin: 0 !important;
   }
 
-  body > *:not(.cod-label-batch-print-portal) {
+  body > *:not(.print-isolation-root) {
     display: none !important;
   }
 
@@ -38,9 +49,4 @@
     page-break-after: auto;
     break-after: auto;
   }
-}
-
-@page {
-  size: 4in 6in;
-  margin: 0;
 }

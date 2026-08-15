@@ -9,6 +9,7 @@ import { OrderCodLabel } from './OrderCodLabel'
 import { useFittedLabelTier } from '@/lib/order-label/use-fitted-label-tier'
 import { useSelection } from '@/components/selection/SelectionProvider'
 import { formatCurrency } from '@/lib/utils'
+import { installPrintPageStyle, STICKER_LABEL_PAGE_CSS } from '@/lib/print/page-style'
 import './OrderCodLabelBatch.print.css'
 
 const MAX_BATCH_SIZE = 50
@@ -32,7 +33,9 @@ export function PrintCodLabelsBatchButton() {
 
   useEffect(() => {
     if (stage !== 'printing') return
+    const uninstallPageStyle = installPrintPageStyle(STICKER_LABEL_PAGE_CSS)
     function handleAfterPrint() {
+      uninstallPageStyle()
       setStage('idle')
       setLabels([])
       clearAll()
@@ -43,6 +46,7 @@ export function PrintCodLabelsBatchButton() {
     return () => {
       window.removeEventListener('afterprint', handleAfterPrint)
       clearTimeout(t)
+      uninstallPageStyle()
     }
   }, [stage, clearAll])
 
@@ -151,7 +155,7 @@ export function PrintCodLabelsBatchButton() {
       {stage === 'printing' &&
         typeof document !== 'undefined' &&
         createPortal(
-          <div className="cod-label-batch-print-portal">
+          <div className="cod-label-batch-print-portal print-isolation-root">
             {ready.map(model => (
               <BatchLabelItem key={model.orderId} model={model} />
             ))}
