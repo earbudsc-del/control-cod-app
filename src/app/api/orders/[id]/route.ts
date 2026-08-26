@@ -8,6 +8,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
 
+    const { data: viewerProfile } = await supabase
+      .from('profiles').select('role').eq('id', user.id).single()
+
     const [orderRes, notesRes, actionsRes, assignmentsRes, attemptsRes, historyRes] =
       await Promise.all([
         supabase.from('orders_with_sla').select('*').eq('id', id).single(),
@@ -36,6 +39,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       assignments: assignmentsRes.data ?? [],
       attempts:    attemptsRes.data ?? [],
       history:     historyRes.data ?? [],
+      // Rol del usuario autenticado — solo para gatear UI (ej. botón "Editar
+      // pedido" en /orders/[id]). NUNCA es la guarda real: cada endpoint de
+      // mutación revalida el rol server-side de forma independiente.
+      viewerRole:  viewerProfile?.role ?? null,
     })
   } catch (err) {
     console.error('[GET /api/orders/[id]]', err)

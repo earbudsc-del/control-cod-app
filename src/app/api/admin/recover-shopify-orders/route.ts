@@ -219,7 +219,7 @@ export async function POST(request: Request) {
 
     const { data: existingRows } = await service
       .from('orders')
-      .select('id, shopify_order_id, customer_name, customer_phone, customer_address, city, tracking_number')
+      .select('id, shopify_order_id, customer_name, customer_phone, customer_address, city, province, product_summary, cod_amount, tracking_number')
       .in('shopify_order_id', shopifyIds)
 
     type ExistingRow = {
@@ -229,6 +229,9 @@ export async function POST(request: Request) {
       customer_phone:   string | null
       customer_address: string | null
       city:             string | null
+      province:         string | null
+      product_summary:  string | null
+      cod_amount:       number | null
       tracking_number:  string | null
     }
 
@@ -273,6 +276,9 @@ export async function POST(request: Request) {
 
     function isEmpty(val: string | null | undefined): boolean {
       return !val || val.trim() === '' || val.trim() === '-'
+    }
+    function isEmptyNumber(val: number | null | undefined): boolean {
+      return val === null || val === undefined
     }
 
     for (const order of shopifyOrders) {
@@ -362,27 +368,38 @@ export async function POST(request: Request) {
 
       // ── Rama A: pedido ya existe — actualizar si tiene campos vacíos o tracking ─
       if (existing) {
-        const needsTracking  = !existing.tracking_number && !!trackingNumber
-        const needsCustomer  =
+        const needsTracking    = !existing.tracking_number && !!trackingNumber
+        // "Recovery" solo rellena huecos — nunca resincroniza datos que ya
+        // existen. product_summary/cod_amount/province se agregaron aquí
+        // con el MISMO criterio que ya usaban customer_name/phone/address/
+        // city (isEmpty(...) && valor nuevo) — antes se sobreescribían
+        // incondicionalmente, lo que podía revertir una edición operativa
+        // posterior (ver POST /api/orders/[id]/edit-local) de vuelta a los
+        // datos originales de Shopify si este endpoint se re-ejecutaba
+        // sobre un rango de fechas que incluyera esa orden.
+        const needsMissingData =
           isEmpty(existing.customer_name)    ||
           isEmpty(existing.customer_phone)   ||
           isEmpty(existing.customer_address) ||
-          isEmpty(existing.city)
+          isEmpty(existing.city)             ||
+          isEmpty(existing.province)         ||
+          isEmpty(existing.product_summary)  ||
+          isEmptyNumber(existing.cod_amount)
 
-        if (!needsTracking && !needsCustomer) continue
+        if (!needsTracking && !needsMissingData) continue
 
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
 
         // Tracking number: solo rellenar si estaba vacío — nunca sobreescribir
         if (needsTracking)                                         patch.tracking_number  = trackingNumber
 
-        if (isEmpty(existing.customer_name)    && customer_name)  patch.customer_name    = customer_name
-        if (isEmpty(existing.customer_phone)   && customer_phone) patch.customer_phone   = customer_phone
+        if (isEmpty(existing.customer_name)    && customer_name)    patch.customer_name    = customer_name
+        if (isEmpty(existing.customer_phone)   && customer_phone)   patch.customer_phone   = customer_phone
         if (isEmpty(existing.customer_address) && customer_address) patch.customer_address = customer_address
-        if (isEmpty(existing.city)             && city)           patch.city             = city
-        if (province)                                             patch.province         = province
-        if (productSummary)                                       patch.product_summary  = productSummary
-        if (codAmount)                                            patch.cod_amount       = codAmount
+        if (isEmpty(existing.city)             && city)             patch.city             = city
+        if (isEmpty(existing.province)         && province)         patch.province         = province
+        if (isEmpty(existing.product_summary)  && productSummary)   patch.product_summary  = productSummary
+        if (isEmptyNumber(existing.cod_amount) && codAmount)        patch.cod_amount       = codAmount
 
         // Si solo quedó updated_at no hay nada que persistir
         if (Object.keys(patch).length <= 1) continue
@@ -398,12 +415,12 @@ export async function POST(request: Request) {
             continue
           }
 
-          if (needsTracking)  updatedTracking++
-          if (needsCustomer)  updatedMissingData++
+          if (needsTracking)     updatedTracking++
+          if (needsMissingData)  updatedMissingData++
           console.log(
             `[recover-diag] updated ${order.name ?? shopifyOrderId}:`,
             needsTracking ? `tracking=${trackingNumber}` : '',
-            needsCustomer ? 'customer_data' : '',
+            needsMissingData ? 'missing_data' : '',
           )
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)

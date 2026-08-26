@@ -21,8 +21,9 @@ import {
   ArrowLeft, MessageSquare, MessageCircle, Phone, Zap, UserCheck, Clock,
   AlertTriangle, CheckCircle2, RotateCcw, ShieldAlert, RefreshCw,
   MapPinOff, Navigation, HelpCircle, AlertCircle, CreditCard, ArrowUpCircle,
+  Pencil,
 } from 'lucide-react'
-import { checkCoverage, isTransferOrder } from '@/lib/alert-helpers'
+import { checkCoverage, isTransferOrder, isSantoDomingoOrder } from '@/lib/alert-helpers'
 import { OrderCodLabelActions } from '@/components/order-label/OrderCodLabelActions'
 
 interface OrderDetail {
@@ -32,6 +33,27 @@ interface OrderDetail {
   assignments: OrderAssignment[]
   attempts:    DeliveryAttemptRecord[]
   history:     OrderHistory[]
+  viewerRole?: string | null
+}
+
+// Roles autorizados a editar dirección/producto/monto COD de pedidos del
+// flujo local SD (ver /api/orders/[id]/edit-local). Solo gatea la UI —
+// el endpoint revalida el rol server-side de forma independiente.
+const EDIT_LOCAL_ROLES = ['admin', 'dispatch_agent', 'confirmation_agent']
+
+// Misma regla que el endpoint /edit-local: null si el pedido es editable,
+// o el motivo por el que no lo es (para mostrarlo en vez del formulario).
+function sdEditBlockReason(order: Order): string | null {
+  if (order.tracking_number) {
+    return 'Este pedido ya tiene guía EFI/Gintracom asignada — no se puede editar desde aquí.'
+  }
+  if (!isSantoDomingoOrder(order.city, order.province, order.customer_address)) {
+    return 'La edición solo está disponible para pedidos del flujo local de Santo Domingo.'
+  }
+  if (order.normalized_status === 'delivered') return 'Este pedido ya fue entregado — no se puede editar.'
+  if (order.normalized_status === 'returned')  return 'Este pedido fue devuelto — no se puede editar.'
+  if (order.payment_status === 'paid')         return 'Este pedido ya está pagado — no se puede editar.'
+  return null
 }
 
 const INVALID_REASONS: { value: InvalidReason; label: string }[] = [
@@ -80,6 +102,16 @@ export function OrderOperativeContent({ orderId, onBack, onMutated }: OrderOpera
   const [waConversationId, setWaConversationId] = useState<string | null>(null)
   const [escalating, setEscalating] = useState(false)
   const [escalateFeedback, setEscalateFeedback] = useState<'success' | 'error' | null>(null)
+
+  // Editar pedido (dirección/producto/monto COD — solo flujo local SD)
+  const [showEdit, setShowEdit] = useState(false)
+  const [editAddress, setEditAddress]   = useState('')
+  const [editCity, setEditCity]         = useState('')
+  const [editProvince, setEditProvince] = useState('')
+  const [editProduct, setEditProduct]   = useState('')
+  const [editCodAmount, setEditCodAmount] = useState('')
+  const [savingEdit, setSavingEdit]     = useState(false)
+  const [editFeedback, setEditFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
   async function load() {
     setLoadError(null)
@@ -250,6 +282,74 @@ export function OrderOperativeContent({ orderId, onBack, onMutated }: OrderOpera
     onMutated?.()
   }
 
+  function openEdit(order: Order) {
+    setEditAddress(order.customer_address ?? '')
+    setEditCity(order.city ?? '')
+    setEditProvince(order.province ?? '')
+    setEditProduct(order.product_summary ?? '')
+    setEditCodAmount(order.cod_amount != null ? String(order.cod_amount) : '')
+    setEditFeedback(null)
+    setShowEdit(true)
+  }
+
+  function buildEditBody(order: Order): Record<string, unknown> {
+    const body: Record<string, unknown> = {}
+    if (editAddress.trim() !== (order.customer_address ?? '')) body.customer_address = editAddress.trim()
+    if (editCity.trim() !== (order.city ?? ''))                body.city = editCity.trim()
+    if (editProvince.trim() !== (order.province ?? ''))        body.province = editProvince.trim()
+    if (editProduct.trim() !== (order.product_summary ?? '')) body.product_summary = editProduct.trim()
+    const codTrim = editCodAmount.trim()
+    if (codTrim !== '') {
+      const codNum = Number(codTrim)
+      if (Number.isFinite(codNum) && codNum !== order.cod_amount) body.cod_amount = codNum
+    }
+    return body
+  }
+
+  async function handleSaveEdit() {
+    if (!detail?.order) return
+    const order = detail.order
+    const body = buildEditBody(order)
+    if (Object.keys(body).length === 0) {
+      setEditFeedback({ type: 'error', message: 'No hay cambios para guardar' })
+      return
+    }
+    setSavingEdit(true)
+    setEditFeedback(null)
+    try {
+      const res = await fetch(`/api/orders/${orderId}/edit-local`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (res.ok) {
+        // UPDATE + notes + agent_actions son una sola transacción (RPC
+        // edit_local_sd_order) — un 200 aquí siempre significa que los
+        // tres se guardaron juntos, sin estado parcial posible.
+        setEditFeedback({ type: 'success', message: 'Cambios guardados' })
+        setShowEdit(false)
+        load()
+        onMutated?.()
+      } else if (json?.reason === 'conflict') {
+        // Otro cambio tocó el pedido entre que se cargó el formulario y
+        // se guardó — refrescamos para que el usuario reintente sobre
+        // datos actuales, sin perder el formulario abierto.
+        setEditFeedback({
+          type: 'error',
+          message: 'El pedido cambió mientras lo editabas. Actualiza la información e inténtalo nuevamente.',
+        })
+        load()
+      } else {
+        setEditFeedback({ type: 'error', message: json?.error ?? 'Error al guardar los cambios' })
+      }
+    } catch {
+      setEditFeedback({ type: 'error', message: 'Error de conexión al guardar' })
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
   // ── Estados de carga y error ────────────────────────────────────────────────
 
   if (loading) return (
@@ -313,6 +413,31 @@ export function OrderOperativeContent({ orderId, onBack, onMutated }: OrderOpera
   const isTransfer = isTransferOrder(order.product_summary)
   const waUrl      = whatsAppUrl(order.customer_phone, buildOperativeWaMsg(order))
   const telUrl     = callUrl(order.customer_phone)
+
+  const canEditRole   = !!detail.viewerRole && EDIT_LOCAL_ROLES.includes(detail.viewerRole)
+  const editBlockReason = sdEditBlockReason(order)
+  const editDiffs: { label: string; before: string; after: string }[] = []
+  if (showEdit) {
+    if (editAddress.trim() !== (order.customer_address ?? '')) {
+      editDiffs.push({ label: 'Dirección', before: order.customer_address ?? '—', after: editAddress.trim() || '—' })
+    }
+    if (editCity.trim() !== (order.city ?? '')) {
+      editDiffs.push({ label: 'Ciudad/sector', before: order.city ?? '—', after: editCity.trim() || '—' })
+    }
+    if (editProvince.trim() !== (order.province ?? '')) {
+      editDiffs.push({ label: 'Provincia', before: order.province ?? '—', after: editProvince.trim() || '—' })
+    }
+    if (editProduct.trim() !== (order.product_summary ?? '')) {
+      editDiffs.push({ label: 'Producto/oferta', before: order.product_summary ?? '—', after: editProduct.trim() || '—' })
+    }
+    const codTrim = editCodAmount.trim()
+    if (codTrim !== '') {
+      const codNum = Number(codTrim)
+      if (Number.isFinite(codNum) && codNum !== order.cod_amount) {
+        editDiffs.push({ label: 'Monto COD', before: formatCurrency(order.cod_amount), after: formatCurrency(codNum) })
+      }
+    }
+  }
 
   return (
     <div className="space-y-4 md:space-y-6 max-w-5xl">
@@ -542,6 +667,117 @@ export function OrderOperativeContent({ orderId, onBack, onMutated }: OrderOpera
               )}
             </dl>
           </div>
+
+          {/* Editar pedido — solo flujo local SD, roles autorizados */}
+          {canEditRole && (
+            <div className="bg-white rounded-xl border border-gray-100 p-4 md:p-5">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
+                  <Pencil className="w-4 h-4 text-gray-400" />
+                  Editar pedido
+                </h2>
+                {!showEdit && !editBlockReason && (
+                  <button
+                    onClick={() => openEdit(order)}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700"
+                  >
+                    Modificar
+                  </button>
+                )}
+              </div>
+
+              {editBlockReason ? (
+                <p className="text-xs text-gray-400 mt-2">{editBlockReason}</p>
+              ) : !showEdit ? (
+                <p className="text-xs text-gray-400 mt-2">
+                  Cambiar dirección, oferta o monto COD si el cliente cambió de opinión
+                  (solo pedidos locales de Santo Domingo).
+                </p>
+              ) : (
+                <div className="space-y-3 mt-3">
+                  <div>
+                    <label className="text-xs text-gray-400 mb-0.5 block">Dirección</label>
+                    <input
+                      value={editAddress}
+                      onChange={e => setEditAddress(e.target.value)}
+                      className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2
+                                 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-gray-400 mb-0.5 block">Ciudad/sector</label>
+                      <input
+                        value={editCity}
+                        onChange={e => setEditCity(e.target.value)}
+                        className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2
+                                   focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 mb-0.5 block">Provincia</label>
+                      <input
+                        value={editProvince}
+                        onChange={e => setEditProvince(e.target.value)}
+                        className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2
+                                   focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 mb-0.5 block">Producto / oferta</label>
+                    <input
+                      value={editProduct}
+                      onChange={e => setEditProduct(e.target.value)}
+                      placeholder='Ej. "Oferta 2x1 LÜMA Teeth"'
+                      className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2
+                                 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 mb-0.5 block">Monto COD (RD$)</label>
+                    <input
+                      value={editCodAmount}
+                      onChange={e => setEditCodAmount(e.target.value)}
+                      inputMode="decimal"
+                      className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2
+                                 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  {editDiffs.length > 0 && (
+                    <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 space-y-1">
+                      <p className="text-xs font-semibold text-blue-700 mb-1">Resumen del cambio</p>
+                      {editDiffs.map(d => (
+                        <p key={d.label} className="text-xs text-blue-800">
+                          <span className="font-medium">{d.label}:</span> {d.before} → {d.after}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-3 pt-1">
+                    <Button onClick={handleSaveEdit} disabled={savingEdit || editDiffs.length === 0} size="sm">
+                      {savingEdit ? <Spinner className="w-4 h-4" /> : 'Guardar cambios'}
+                    </Button>
+                    <button
+                      onClick={() => { setShowEdit(false); setEditFeedback(null) }}
+                      className="text-sm text-gray-500 hover:text-gray-700"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {editFeedback && (
+                <p className={`text-xs font-medium mt-2
+                  ${editFeedback.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                  {editFeedback.message}
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Tracking EFI */}
           {(order.delivery_attempts > 0 || order.last_tracking_update || order.last_attempt_reason) && (
