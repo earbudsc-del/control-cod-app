@@ -7,6 +7,7 @@ import { resolveWhatsappLinksBatch } from '@/lib/deliveries/whatsapp-link'
 import { fetchPaidOrderIds, withoutPaidAction } from '@/lib/deliveries/payment-status'
 import { SD_LOCATION_REQUEST_TEMPLATE_NAME } from '@/lib/deliveries/sd-location-request'
 import { fetchSdLocationRequestInfoBatch } from '@/lib/deliveries/sd-location-request-status'
+import { loadAgentActionsForOrders } from '@/lib/deliveries/load-agent-actions'
 import {
   isSdEligible,
   computePool,
@@ -201,17 +202,30 @@ export async function GET(request: Request) {
       // un `.gte('created_at', since)` de 7 días hacía que ese
       // route_confirmed "caducara" y el pedido volviera a mostrar
       // start_route/ready_for_route como si nunca hubiera iniciado ruta.
-      const { data: actions, error: actionsError } = await serviceClient
-        .from('agent_actions')
-        .select('order_id, action_type, contact_result, created_at')
-        .in('order_id', orderIds)
-        .in('action_type', ['route_confirmed', 'rescheduled', 'customer_declined', 'contacted'])
-        .order('created_at', { ascending: false })
-
-      if (actionsError) {
-        console.error('[deliveries/orders] agent_actions query FAILED', actionsError.message)
-      } else {
-        latestByOrder = reduceLatestActions(actions ?? [])
+      //
+      // Carga en chunks (loadAgentActionsForOrders) en vez de un único
+      // .in(orderIds) — con alto volumen (~400+ pedidos activos) ese filtro
+      // construye una URL que PostgREST/Kong rechaza a nivel de transporte
+      // (reproducido: TypeError: fetch failed a partir de ~400 IDs, ver
+      // Sprint Crítico 3). Sin cambiar el contrato de Ruta COD ni la
+      // semántica de reduceLatestActions()/computeStatus() — mismas
+      // columnas, mismos 4 action_type, mismo resultado final.
+      //
+      // Si falla, NO se continúa con "sin acciones": eso convertiría un
+      // fallo de infraestructura en un estado comercial incorrecto
+      // (cancelado/en_ruta/no_responde/reprogramado dependen todos de este
+      // dato). Se falla el request completo con 500 — Ruta COD (polling
+      // cada pollAfterSeconds + reintento) conserva el último estado bueno
+      // que ya tenía en vez de sobreescribirlo con datos parciales.
+      try {
+        const actions = await loadAgentActionsForOrders(serviceClient, orderIds)
+        latestByOrder = reduceLatestActions(actions)
+      } catch (err) {
+        console.error(
+          '[deliveries/orders] agent_actions query FAILED',
+          err instanceof Error ? err.message : String(err),
+        )
+        return NextResponse.json({ error: 'Error interno' }, { status: 500, headers })
       }
     }
 
