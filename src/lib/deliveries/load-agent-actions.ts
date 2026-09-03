@@ -33,6 +33,18 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out
 }
 
+export interface LoadAgentActionsOptions {
+  chunkSize?: number
+  // Corte de fecha opcional (ISO string) — cuando se provee, cada chunk
+  // agrega `.gte('created_at', since)` ADEMÁS de los filtros existentes
+  // (order_id + action_type). Ausente = comportamiento idéntico al de
+  // siempre, sin corte de fecha. Añadido para reusar este helper en
+  // POST /api/v1/deliveries/routes/[id]/complete, que necesita exactamente
+  // esa ventana de 7 días y antes duplicaba el patrón .in() sin chunking
+  // porque el helper no lo soportaba.
+  since?: string
+}
+
 // Carga agent_actions para un conjunto de orderIds de cualquier tamaño sin
 // construir el .in() gigante que rompe a nivel de transporte HTTP con alto
 // volumen (ver AGENT_ACTIONS_CHUNK_SIZE arriba). Reemplaza la única query
@@ -54,23 +66,33 @@ function chunk<T>(arr: T[], size: number): T[][] {
 // estado comercial incorrecto en vez de que el endpoint falle visiblemente.
 // El caller (GET /api/v1/deliveries/orders) decide qué HTTP status devolver
 // ante ese fallo — ver comentario ahí.
+//
+// Retrocompatible: los 4 callers existentes (a la fecha de este cambio)
+// llaman `loadAgentActionsForOrders(client, orderIds)` sin tercer argumento
+// — ninguno pasaba `chunkSize` como número posicional, así que cambiar ese
+// parámetro de `number` a `LoadAgentActionsOptions` no rompe ningún call
+// site real (verificado con grep antes de este cambio).
 export async function loadAgentActionsForOrders(
   supabase: SupabaseClient,
   orderIds: string[],
-  chunkSize: number = AGENT_ACTIONS_CHUNK_SIZE,
+  options: LoadAgentActionsOptions = {},
 ): Promise<AgentActionRow[]> {
   if (orderIds.length === 0) return []
 
+  const { chunkSize = AGENT_ACTIONS_CHUNK_SIZE, since } = options
   const idChunks = chunk(orderIds, chunkSize)
   const allRows: AgentActionRow[] = []
 
   for (const ids of idChunks) {
-    const { data, error } = await supabase
+    let query = supabase
       .from('agent_actions')
       .select('order_id, action_type, contact_result, created_at')
       .in('order_id', ids)
       .in('action_type', RELEVANT_ACTION_TYPES)
-      .order('created_at', { ascending: false })
+
+    if (since) query = query.gte('created_at', since)
+
+    const { data, error } = await query.order('created_at', { ascending: false })
 
     if (error) {
       throw new Error(`agent_actions chunk falló (${ids.length} ids): ${error.message}`)

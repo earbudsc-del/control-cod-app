@@ -4,6 +4,7 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { corsHeaders } from '@/lib/cors'
 import { reduceLatestActions, type LatestAction } from '@/lib/deliveries/sd-status'
 import { buildDerivedRoutes, type RouteOrderRow } from '@/lib/deliveries/routes'
+import { loadAgentActionsForOrders } from '@/lib/deliveries/load-agent-actions'
 
 // POST /api/v1/deliveries/routes/[id]/complete
 //
@@ -19,6 +20,7 @@ const ALLOWED_ROLES = ['admin', 'santo_domingo_delivery_agent']
 const ORDER_FIELDS =
   'id, order_number, customer_name, customer_phone, customer_address, city, province, ' +
   'cod_amount, normalized_status, confirmation_status, tracking_number, assigned_to, ' +
+  'sd_location_lat, sd_location_lng, ' +
   'created_at, status_since, last_tracking_update, updated_at'
 
 function getBearerToken(request: Request): string | null {
@@ -76,15 +78,19 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     let latestByOrder = new Map<string, LatestAction>()
     if (orderIds.length > 0) {
+      // Mismo corte de 7 días que antes (misma fórmula, mismo `since`) — ahora
+      // vía loadAgentActionsForOrders (chunkeado de a 100 IDs, Sprint Crítico
+      // 3), mismas columnas, mismos 4 action_type, mismo orden. Única
+      // diferencia real: la query original ignoraba `error` (`const { data:
+      // actions } = await ...` sin chequear `error`, tragándolo en silencio);
+      // el helper SÍ lanza si algún chunk falla, y ese error cae en el
+      // catch de este endpoint → 500 "Error interno" en vez de continuar
+      // silenciosamente como si no hubiera acciones. Comportamiento más
+      // seguro, consistente con los otros 3 endpoints /routes* — documentado
+      // aquí porque es la única semántica que cambia con esta migración.
       const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-      const { data: actions } = await supabase
-        .from('agent_actions')
-        .select('order_id, action_type, contact_result, created_at')
-        .in('order_id', orderIds)
-        .in('action_type', ['route_confirmed', 'rescheduled', 'customer_declined', 'contacted'])
-        .gte('created_at', since)
-        .order('created_at', { ascending: false })
-      latestByOrder = reduceLatestActions(actions ?? [])
+      const actions = await loadAgentActionsForOrders(supabase, orderIds, { since })
+      latestByOrder = reduceLatestActions(actions)
     }
 
     const { routes } = buildDerivedRoutes({ orders, latestByOrder, courierId: user.id, role: profile.role })

@@ -5,6 +5,7 @@ import { corsHeaders } from '@/lib/cors'
 import { reduceLatestActions, type LatestAction } from '@/lib/deliveries/sd-status'
 import { buildDerivedRoutes, type RouteOrderRow } from '@/lib/deliveries/routes'
 import { executeStartRoute } from '@/lib/deliveries/action-executors'
+import { loadAgentActionsForOrders } from '@/lib/deliveries/load-agent-actions'
 
 // POST /api/v1/deliveries/routes/[id]/start
 //
@@ -19,6 +20,7 @@ const ALLOWED_ROLES = ['admin', 'santo_domingo_delivery_agent']
 const ORDER_FIELDS =
   'id, order_number, customer_name, customer_phone, customer_address, city, province, ' +
   'cod_amount, normalized_status, confirmation_status, tracking_number, assigned_to, ' +
+  'sd_location_lat, sd_location_lng, ' +
   'shopify_order_id, source, created_at, status_since, last_tracking_update, updated_at'
 
 function getBearerToken(request: Request): string | null {
@@ -74,13 +76,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (orderIds.length > 0) {
       // Sin corte de fecha — ver nota en GET /api/v1/deliveries/orders/route.ts:
       // un route_confirmed viejo no debe "caducar" y hacer reaparecer start_route.
-      const { data: actions } = await supabase
-        .from('agent_actions')
-        .select('order_id, action_type, contact_result, created_at')
-        .in('order_id', orderIds)
-        .in('action_type', ['route_confirmed', 'rescheduled', 'customer_declined', 'contacted'])
-        .order('created_at', { ascending: false })
-      latestByOrder = reduceLatestActions(actions ?? [])
+      // loadAgentActionsForOrders ya chunkea de a 100 IDs (Sprint Crítico 3) —
+      // mismos action_type, mismo orden, mismo comportamiento que el .in()
+      // directo que reemplaza, solo que sin el riesgo de URL gigante.
+      const actions = await loadAgentActionsForOrders(supabase, orderIds)
+      latestByOrder = reduceLatestActions(actions)
     }
 
     const { routes, stopsByRoute } = buildDerivedRoutes({ orders, latestByOrder, courierId: user.id, role: profile.role })

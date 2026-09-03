@@ -44,8 +44,16 @@ export interface RouteOrderRow extends SdOrderRow {
   customer_name: string | null
   customer_phone: string | null
   cod_amount: number | null
-  latitude?: number | null
-  longitude?: number | null
+  // Nombres de columna reales de `orders` (mismos que usa GET
+  // /api/v1/deliveries/orders — ver ORDER_FIELDS ahí). Antes este tipo tenía
+  // `latitude?`/`longitude?`, campos que ninguna query de /routes* seleccionaba
+  // nunca — quedaban `undefined` siempre y `hasLocation` daba `false` para
+  // el 100% de las paradas, sin importar el dato real en DB (bug encontrado
+  // en auditoría, corregido aquí). El mapeo a `latitude`/`longitude` (el
+  // nombre que sí espera el DTO `DerivedStop`, contrato ya consumido por
+  // Ruta COD) ocurre explícitamente en buildDerivedRoutes(), no por alias SQL.
+  sd_location_lat?: number | null
+  sd_location_lng?: number | null
   created_at: string
   status_since: string | null
   last_tracking_update: string | null
@@ -139,9 +147,9 @@ export function buildDerivedRoutes(params: BuildRoutesParams): { routes: Derived
         address: order.customer_address,
         amountToCollect: order.cod_amount,
         status,
-        latitude: order.latitude ?? null,
-        longitude: order.longitude ?? null,
-        hasLocation: order.latitude != null && order.longitude != null,
+        latitude: order.sd_location_lat ?? null,
+        longitude: order.sd_location_lng ?? null,
+        hasLocation: order.sd_location_lat != null && order.sd_location_lng != null,
         allowedActions: computeAllowedActions(status, 'confirmado', ownership),
       }
     })
