@@ -45,6 +45,7 @@ import type { DecisionPlan, PlanConstraints } from './decision-plan'
 import { derivePlanConstraints } from './decision-plan'
 import { buildPlannerContext, generateDecisionPlan } from './planner'
 import { validateResponse } from './response-validator'
+import { detectHardEscalationSignal, detectInboundAdverseReactionSignal } from './hard-escalation'
 
 type ServiceClient = Awaited<ReturnType<typeof createServiceClient>>
 
@@ -101,7 +102,7 @@ interface FinishGenesisRunRow {
 }
 
 export type CallOpenAIResult =
-  | { ok: true; text: string }
+  | { ok: true; text: string; usage?: { promptTokens: number; completionTokens: number } }
   | { ok: false; kind: 'timeout' | 'error' }
 
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
@@ -209,7 +210,9 @@ export function buildSystemPrompt(
     'entrega como reductor de riesgo. Comparando con otra marca: diferencia por la fórmula, nunca ' +
     'ataques ni menosprecies a la competencia. Indeciso: reduce riesgo, no presiones, no repitas la ' +
     'oferta sin motivo nuevo. Confundido (pregunta mal formulada, mezcla varias dudas): simplifica, una ' +
-    'sola idea a la vez, nunca agregues más información encima de la confusión existente. Ansioso o ' +
+    'sola idea a la vez, nunca agregues más información encima de la confusión existente — responde en ' +
+    'máximo dos frases centradas solo en el concepto que preguntó, y no menciones blanqueamiento ni ' +
+    'otros beneficios adicionales salvo que el cliente los pida directamente. Ansioso o ' +
     'preocupado (mensajes repetidos, urgencia por resolver): reconoce brevemente la preocupación, ' +
     'responde con calma, nunca vendas encima de esa emoción. Frustrado o molesto: no defiendas al ' +
     'negocio ni te justifiques, resuelve primero lo que motivó la molestia. Listo para comprar (verbos ' +
@@ -475,10 +478,16 @@ const callOpenAI: CallOpenAIFn = async (apiKey, model, messages, opts = {}) => {
       return { ok: false, kind: 'error' }
     }
 
-    const data = await res.json() as { choices?: { message?: { content?: string } }[] }
+    const data = await res.json() as {
+      choices?: { message?: { content?: string } }[]
+      usage?:   { prompt_tokens?: number; completion_tokens?: number }
+    }
     const text = data.choices?.[0]?.message?.content?.trim()
     if (!text) return { ok: false, kind: 'error' }
-    return { ok: true, text }
+    const usage = data.usage
+      ? { promptTokens: data.usage.prompt_tokens ?? 0, completionTokens: data.usage.completion_tokens ?? 0 }
+      : undefined
+    return { ok: true, text, usage }
   } catch (err) {
     clearTimeout(timer)
     if (err instanceof Error && err.name === 'AbortError') {
@@ -662,6 +671,18 @@ export async function maybeGenesisRespond(
       .reverse()
       .filter(m => m.body?.trim())
 
+    // ── 3b. Body real del mensaje inbound que disparó este turno (Sprint 2) ──
+    // Se busca por inboundMessageId explícito — nunca se asume su posición
+    // dentro de `history` ni se confía en texto suministrado por otra vía.
+    // Alimenta: (a) el detector inbound de auto-escalamiento (hard-escalation.ts)
+    // y (b) los constraints dinámicos del validador RG-2 más abajo.
+    const { data: inboundMsgRow } = await supabase
+      .from('wa_messages')
+      .select('body')
+      .eq('id', inboundMessageId)
+      .maybeSingle()
+    const inboundBody = inboundMsgRow?.body ?? null
+
     // ── 4. renew_genesis_run(status='processing') — checkpoint 1, antes de OpenAI ──
     const { data: renew1, error: renew1Error } = await supabase
       .rpc('renew_genesis_run', {
@@ -725,7 +746,65 @@ export async function maybeGenesisRespond(
         await finishRun(supabase, runId, lockToken, 'failed_retryable', { failure_code: failureCode })
         return
       }
-      replyText = openaiResult.text
+
+      // ── 5-RG2. Validador determinístico — Sprint 1B ──────────────────────
+      // RG-2 no corre el Planner (desactivado — ver flag arriba), así que no
+      // existe un DecisionPlan/PlanConstraints real para este turno. Se
+      // construye un plan/constraints NEUTRO, deliberadamente permisivo en
+      // todo lo que dependería del Planner (offerAllowed=true,
+      // mustEscalate=false) — el footer de buildSystemPrompt() ya gobierna
+      // cuándo ofertar/escalar en esta rama, así que el validador aquí NUNCA
+      // debe bloquear por esas dos razones (bloquear ahí sin una
+      // clasificación real dejaría clientes sin respuesta — el riesgo
+      // explícito que esta fase debía evitar). Lo único derivable sin LLM es
+      // greetingAllowed (¿hay historial?) y maxQuestions=1, que ya es la
+      // regla vigente del footer ("Máximo un signo '?' por respuesta").
+      //
+      // EXCEPCIÓN (Sprint 2, ronda de validación final): cuando el detector
+      // determinístico inbound (hard-escalation.ts) reconoce una reacción
+      // adversa en el mensaje real del cliente, SÍ existe una señal de
+      // seguridad confiable sin necesidad del Planner — en ese caso se activa
+      // mustEscalate=true (igual que haría un DecisionPlan real con
+      // safety_signal='reaccion_adversa') y maxQuestions=0 (protocolo estricto
+      // de 3 partes, sin preguntas — ver footer, sección "Reglas generales").
+      // Esto corrige un hallazgo real de la suite comercial (caso 94): el
+      // modelo agregó una 4ª parte con una pregunta comercial al final del
+      // protocolo de reacción adversa, y el validador no lo detectaba porque
+      // maxQuestions=1 nunca se violaba. Con mustEscalate=true además se
+      // exige que la respuesta mencione explícitamente un agente/profesional
+      // (ver findGraveViolations) — si el modelo omitiera esa parte, el
+      // validador ahora sí lo bloquea en vez de dejarlo pasar en silencio.
+      const hasHistoryRG2 = history.length > 1
+      const inboundAdverseRG2 = detectInboundAdverseReactionSignal(inboundBody ?? '')
+      const neutralPlan: DecisionPlan = {
+        stage: 'interesado', concept: 'ninguno', objection: null,
+        goal: 'servicio', safety_signal: inboundAdverseRG2 ? 'reaccion_adversa' : 'ninguna',
+      }
+      const neutralConstraints: PlanConstraints = {
+        offerAllowed: !inboundAdverseRG2,
+        maxQuestions: inboundAdverseRG2 ? 0 : 1,
+        mustEscalate: inboundAdverseRG2,
+        greetingAllowed: !hasHistoryRG2,
+        prohibitedActions: [],
+      }
+      const previousAssistantTextRG2 = [...history].reverse().find(m => m.direction === 'outbound')?.body ?? null
+
+      const validationRG2 = validateResponse(openaiResult.text, neutralPlan, neutralConstraints, {
+        hasHistory: hasHistoryRG2,
+        previousAssistantText: previousAssistantTextRG2,
+      })
+
+      if (validationRG2.warnings.length > 0) {
+        console.log('[genesis] validador (RG-2) — advertencias:', validationRG2.warnings.join(' | '), '| run:', runId)
+      }
+
+      if (validationRG2.graveViolations.length > 0) {
+        console.log('[genesis] validador (RG-2) — violación grave, no se envía:', validationRG2.graveViolations.join(' | '), '| run:', runId)
+        await finishRun(supabase, runId, lockToken, 'failed_terminal', { failure_code: 'validation_rejected' })
+        return
+      }
+
+      replyText = validationRG2.finalText
     } else {
       // ── Decision Plan V1 — EXPERIMENTAL, detrás de GENESIS_DECISION_PLAN_ENABLED ──
       // No activado en producción (cierre de fase — ver docs internas):
@@ -989,6 +1068,48 @@ export async function maybeGenesisRespond(
     })
 
     console.log('[genesis] ✓ respuesta automática enviada — run:', runId, '| conv:', conversationId)
+
+    // ── 11. Auto-escalamiento real — Sprint 1C / 2 ──────────────────────────
+    // Se ejecuta DESPUÉS de que el mensaje ya se envió y el run ya cerró como
+    // 'sent' — orden deliberado: escalate_genesis_conversation() invalida
+    // cualquier run en ('claimed','processing','generated','sending'); si se
+    // llamara antes de finishRun(), invalidaría este MISMO run en pleno
+    // envío (lost_lock) y el mensaje de seguridad nunca llegaría al cliente.
+    // Con el run ya 'sent', la invalidación de la RPC no lo toca — solo
+    // marca la conversación como escalada para que el próximo turno ya no
+    // lo responda Génesis. Si esta RPC falla, se loguea como error visible
+    // (nunca se oculta) — el mensaje de seguridad ya se envió al cliente de
+    // todas formas, pero la conversación podría quedar sin escalar
+    // estructuralmente y requiere revisión manual.
+    //
+    // `inboundBody` (paso 3b) alimenta la señal INBOUND — independiente de
+    // si el modelo redactó bien o mal su propia respuesta (ver
+    // hard-escalation.ts). Si Génesis reconoce el caso, la señal OUTBOUND ya
+    // lo cubre igual; si falla en seguir el protocolo, INBOUND protege el
+    // flujo de todas formas.
+    try {
+      const signal = detectHardEscalationSignal(replyText, inboundBody)
+      if (signal.required && signal.reason) {
+        const { data: escData, error: escError } = await supabase
+          .rpc('escalate_genesis_conversation', {
+            p_conversation_id: conversationId,
+            p_run_id:          runId,
+            p_reason:          signal.reason,
+            p_summary:         'Escalamiento automático — Génesis detectó y aplicó el protocolo de reacción adversa en su respuesta.',
+          })
+          .single<{ escalation_id: string | null; outcome: string; message: string | null }>()
+
+        if (escError) {
+          console.error('[genesis] ✖ escalate_genesis_conversation error de transporte — CONVERSACIÓN PUDO QUEDAR SIN ESCALAR:', escError.message, '| conv:', conversationId, '| run:', runId)
+        } else if (escData?.outcome !== 'escalated' && escData?.outcome !== 'already_escalated') {
+          console.error('[genesis] ✖ escalate_genesis_conversation outcome inesperado — CONVERSACIÓN PUDO QUEDAR SIN ESCALAR:', escData?.outcome, escData?.message ?? '(sin detalle)', '| conv:', conversationId, '| run:', runId)
+        } else {
+          console.log('[genesis] ⚠ auto-escalado tras reacción adversa detectada — outcome:', escData.outcome, '| escalation_id:', escData.escalation_id, '| conv:', conversationId, '| run:', runId)
+        }
+      }
+    } catch (escErr) {
+      console.error('[genesis] ✖ error inesperado ejecutando auto-escalamiento — CONVERSACIÓN PUDO QUEDAR SIN ESCALAR:', escErr, '| conv:', conversationId, '| run:', runId)
+    }
   } catch (err) {
     console.error('[genesis] error inesperado en maybeGenesisRespond:', err)
   }

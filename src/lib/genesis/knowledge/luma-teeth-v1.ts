@@ -25,7 +25,7 @@ export const LUMA_TEETH_KNOWLEDGE_V1: GenesisKnowledgeSectionV1[] = [
     sectionKey: 'luma_teeth',
     title:      'LÜMA Teeth',
     priority:   100, // sin cambios respecto a la prioridad actual en producción
-    version:    '2A.1',
+    version:    '2A.2', // 2A.2: agrega párrafo breve de autenticidad/QR (auditoría Sprint 1)
     content: `LÜMA Teeth™ es una pasta dental premium con 7.5% Nano-Hidroxiapatita (N-HAp).
 
 Beneficios principales:
@@ -69,6 +69,12 @@ Blanqueamiento — precisión:
 LÜMA Teeth ofrece un blanqueamiento suave y gradual por acción de limpieza diaria — no contiene
 peróxidos (el ingrediente típico de los blanqueamientos agresivos/dentales). No debe presentarse
 como un blanqueamiento instantáneo ni comparado con procedimientos de consultorio.
+
+Autenticidad:
+
+LÜMA Teeth™ es un producto 100% original. Cada empaque incluye un código QR de
+autenticidad/verificación que el cliente puede escanear cuando corresponda para confirmar que
+su producto es original.
 
 Nunca prometer resultados médicos.
 Nunca diagnosticar enfermedades.

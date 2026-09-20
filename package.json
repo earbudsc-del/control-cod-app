@@ -15,7 +15,10 @@
     "test:genesis-respond-orchestrator": "tsx scripts/test-genesis-respond-orchestrator.ts",
     "test:genesis-commercial-luma": "tsx scripts/test-genesis-commercial-luma.ts",
     "test:genesis-decision-plan": "tsx scripts/test-genesis-decision-plan.ts",
-    "sync:genesis-luma-knowledge": "tsx scripts/sync-genesis-luma-knowledge.ts"
+    "test:genesis-hard-escalation": "tsx scripts/test-genesis-hard-escalation.ts",
+    "test:genesis-simulator-isolation": "tsx scripts/test-genesis-simulator-isolation.ts",
+    "sync:genesis-luma-knowledge": "tsx scripts/sync-genesis-luma-knowledge.ts",
+    "audit:wa-template-queue": "tsx scripts/audit-wa-template-queue.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.0",

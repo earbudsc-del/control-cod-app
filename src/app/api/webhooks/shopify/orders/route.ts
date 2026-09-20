@@ -3,6 +3,7 @@ import crypto                    from 'crypto'
 import { createServiceClient }   from '@/lib/supabase/server'
 import { createTaskIfNotExists } from '@/lib/tasks/auto-tasks'
 import { normalizePhoneRD }      from '@/lib/normalize-phone'
+import { isWaAutomationsEnabled } from '@/lib/config/wa-automations'
 
 // ── Shopify payload types ─────────────────────────────────────────────────────
 
@@ -375,7 +376,9 @@ export async function POST(request: Request) {
   //     Solo si el pedido tiene teléfono. scheduled_at = ahora + 5 min para que
   //     el cliente pueda escribir primero. ON CONFLICT ignoreDuplicates absorbe
   //     reintentos del webhook sin fallar ni duplicar.
-  if (customerPhone) {
+  //     FAIL-CLOSED: sin WA_AUTOMATIONS_ENABLED='true' explícito, NO se encola
+  //     (ver src/lib/config/wa-automations.ts — Sprint 0, inbox WhatsApp pausado).
+  if (customerPhone && isWaAutomationsEnabled()) {
     const scheduledAt = new Date(Date.now() + 5 * 60 * 1000).toISOString()
     const { error: queueErr } = await supabase
       .from('wa_template_queue')
@@ -392,6 +395,8 @@ export async function POST(request: Request) {
     if (queueErr) {
       console.warn('[shopify-webhook] wa_template_queue upsert warn:', queueErr.message)
     }
+  } else if (customerPhone && !isWaAutomationsEnabled()) {
+    console.log('[WA_AUTOMATION_DISABLED] step=11 template=order_confirmation_cod')
   }
 
   // 12. Auto-recuperar carritos abandonados por phone match

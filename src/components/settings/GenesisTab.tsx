@@ -3,12 +3,13 @@
 import { useEffect, useState } from 'react'
 import { Spinner } from '@/components/ui/spinner'
 import type { AiAgentConfig, AiAgentMode, AiKnowledgeSection, AiProvider } from '@/types'
+import GenesisSimulator from './GenesisSimulator'
 import {
-  Bot, Cpu, FileText, BookOpen, ShieldCheck, Power,
+  Bot, Cpu, FileText, BookOpen, ShieldCheck, Power, FlaskConical,
   CheckCircle2, AlertCircle, Plus, ChevronDown, ChevronUp,
 } from 'lucide-react'
 
-type SubTab = 'perfil' | 'proveedor' | 'prompt' | 'conocimiento' | 'reglas' | 'modo'
+type SubTab = 'perfil' | 'proveedor' | 'prompt' | 'conocimiento' | 'reglas' | 'modo' | 'laboratorio'
 
 const SUB_TABS: { id: SubTab; label: string; icon: React.ElementType }[] = [
   { id: 'perfil',       label: 'Perfil',             icon: Bot },
@@ -17,6 +18,7 @@ const SUB_TABS: { id: SubTab; label: string; icon: React.ElementType }[] = [
   { id: 'conocimiento', label: 'Base de conocimiento', icon: BookOpen },
   { id: 'reglas',       label: 'Reglas operativas',  icon: ShieldCheck },
   { id: 'modo',         label: 'Modo de operación',  icon: Power },
+  { id: 'laboratorio',  label: 'Laboratorio',        icon: FlaskConical },
 ]
 
 const MODE_OPTIONS: { value: AiAgentMode; label: string; description: string }[] = [
@@ -301,6 +303,9 @@ export default function GenesisTab() {
           ))}
         </div>
       )}
+
+      {/* Laboratorio */}
+      {subTab === 'laboratorio' && <GenesisSimulator />}
     </div>
   )
 }

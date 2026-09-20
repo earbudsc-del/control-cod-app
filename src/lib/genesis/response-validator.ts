@@ -88,7 +88,51 @@ function autoFix(text: string, constraints: PlanConstraints): { text: string; fi
     }
   }
 
+  // Preguntas de más — recorta las oraciones interrogativas que exceden el
+  // máximo permitido, en vez de bloquear todo el mensaje. Generaliza dos
+  // hallazgos reales de la suite comercial (ronda de validación final):
+  //   - maxQuestions=1: "¿oferta X? ¿o prefieres otra?" → conserva solo la
+  //     primera pregunta (nunca cambia el significado de lo que SÍ queda).
+  //   - maxQuestions=0 (protocolo de reacción adversa, ver derivePlanConstraints
+  //     y el maxQuestions dinámico de RG-2 en respond.ts): elimina cualquier
+  //     pregunta comercial que el modelo haya agregado de más al final del
+  //     protocolo de 3 partes — nunca bloquea el mensaje de seguridad
+  //     completo por una sola oración de más.
+  // Nunca reescribe ni reordena oraciones — solo elimina las interrogativas
+  // sobrantes, preservando el resto del texto intacto.
+  const { text: trimmedQuestions, trimmed } = trimExcessQuestions(out, constraints.maxQuestions)
+  if (trimmed) {
+    out = trimmedQuestions
+    fixed.push(`pregunta(s) de más removida(s) (máximo permitido: ${constraints.maxQuestions})`)
+  }
+
   return { text: out, fixed }
+}
+
+// Divide en oraciones (conservando el delimitador . ! ?) y conserva las
+// interrogativas solo hasta agotar `maxQuestions` — las siguientes se
+// eliminan por completo. Las oraciones no interrogativas nunca se tocan.
+function trimExcessQuestions(text: string, maxQuestions: number): { text: string; trimmed: boolean } {
+  const totalQuestions = (text.match(/\?/g) ?? []).length
+  if (totalQuestions <= maxQuestions) return { text, trimmed: false }
+
+  const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [text]
+  const kept: string[] = []
+  let questionsKept = 0
+  for (const sentence of sentences) {
+    const isQuestion = sentence.includes('?')
+    if (isQuestion && questionsKept >= maxQuestions) continue
+    kept.push(sentence)
+    if (isQuestion) questionsKept++
+  }
+
+  const result = kept.join('').trim()
+  // Salvaguarda: si el recorte dejara el mensaje vacío (caso degenerado, ej.
+  // el mensaje entero era una sola pregunta y maxQuestions=0), no se aplica
+  // el auto-fix — se deja que findGraveViolations lo bloquee explícitamente
+  // en vez de enviar un mensaje vacío al cliente.
+  if (!result) return { text, trimmed: false }
+  return { text: result, trimmed: true }
 }
 
 // ── Validación grave (bloquea el envío) ────────────────────────────────────

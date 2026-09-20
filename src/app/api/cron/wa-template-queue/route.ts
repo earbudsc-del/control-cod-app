@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
 import { SD_LOCATION_REQUEST_TEMPLATE_NAME } from '@/lib/deliveries/sd-location-request'
+import { isWaAutomationsEnabled } from '@/lib/config/wa-automations'
 
 type ServiceClient = Awaited<ReturnType<typeof createServiceClient>>
 
@@ -23,6 +24,16 @@ export async function GET(request: Request) {
   const authHeader = request.headers.get('authorization')
   if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  // FAIL-CLOSED (Sprint 0 — defensa en profundidad): aunque este endpoint no
+  // esté registrado en vercel.json, si alguien lo reactiva o lo invoca
+  // manualmente, no debe enviar nada mientras el Inbox WhatsApp esté pausado.
+  // Ver src/lib/config/wa-automations.ts. Este guard corre ANTES de cualquier
+  // lectura/escritura en wa_template_queue — 0 jobs se reclaman ni se envían.
+  if (!isWaAutomationsEnabled()) {
+    console.log('[WA_AUTOMATION_DISABLED] step=cron/wa-template-queue processed=0')
+    return NextResponse.json({ processed: 0, sent: 0, skipped: 0, failed: 0, disabled: true })
   }
 
   const supabase = await createServiceClient()
