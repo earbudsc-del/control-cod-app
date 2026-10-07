@@ -176,10 +176,17 @@ export interface BroadcastClassification {
  * NINGUNO se envía automáticamente: todos quedan excluidos como
  * 'multiple_active_orders_same_phone' para revisión manual (no se elige uno
  * arbitrariamente ni se envían dos mensajes).
+ *
+ * `contextOrders` (opcional): otros pedidos activos de la tienda que NO son
+ * candidatos de esta selección pero cuentan para la ambigüedad. Si el admin
+ * selecciona 1 de 2 pedidos elegibles del mismo teléfono, el seleccionado
+ * igual queda excluido — el cliente tiene otro pedido pendiente. Los
+ * contextOrders nunca aparecen en eligible/excluded.
  */
 export function classifyBroadcastCandidates(
   orders: BroadcastCandidateOrder[],
   existingRows: ExistingBroadcastQueueRow[],
+  contextOrders: BroadcastCandidateOrder[] = [],
 ): BroadcastClassification {
   const rowByOrder = new Map(existingRows.map(r => [r.order_id, r]))
 
@@ -201,6 +208,12 @@ export function classifyBroadcastCandidates(
   const countByPhone = new Map<string, number>()
   for (const e of individuallyEligible) {
     countByPhone.set(e.phone_normalized, (countByPhone.get(e.phone_normalized) ?? 0) + 1)
+  }
+  for (const o of contextOrders) {
+    if (seen.has(o.id)) continue // ya contado como candidato
+    seen.add(o.id)
+    const r = evaluateOrderEligibility(o, rowByOrder.get(o.id) ?? null)
+    if (r.eligible) countByPhone.set(r.phone_normalized, (countByPhone.get(r.phone_normalized) ?? 0) + 1)
   }
 
   const eligible: BroadcastEligibleOrder[] = []

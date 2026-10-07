@@ -24,6 +24,9 @@ import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderC
 import { SelectionBulkActionBar } from '@/components/selection/BulkActionBar'
 import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabelsBatchButton'
 import { ExportOrdersButton } from '@/components/selection/ExportOrdersButton'
+import { BroadcastPrepareModal, PrepareWhatsappSelectedButton } from '@/components/broadcast/BroadcastPrepareModal'
+import { BroadcastHistoryModal } from '@/components/broadcast/BroadcastHistoryModal'
+import type { BroadcastSelection } from '@/lib/broadcast/selection'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -688,6 +691,12 @@ export default function ConfirmacionPage() {
     })
   }, [])
   const canReopen = currentUserRole === 'admin' || currentUserRole === 'confirmation_agent'
+
+  // ── Broadcast WhatsApp (Sprint B — solo preparación/borrador, sin envío) ─────
+  // La UI solo describe la selección; el servidor decide elegibilidad.
+  const isAdmin = currentUserRole === 'admin'
+  const [broadcastSelection, setBroadcastSelection] = useState<BroadcastSelection | null>(null)
+  const [showBroadcastHistory, setShowBroadcastHistory] = useState(false)
 
   // ── Reabrir pedido (modal) ───────────────────────────────────────────────────
   const [reopenTarget, setReopenTarget] = useState<Order | null>(null)
@@ -1719,6 +1728,35 @@ export default function ConfirmacionPage() {
                 {label}
               </button>
             ))}
+            {/* Broadcast (admin): el servidor resuelve "todos los resultados del
+                filtro" con la autoridad SD canónica — no se cargan IDs en React. */}
+            {isAdmin && (
+              <div className="ml-auto flex items-center gap-1.5">
+                <button
+                  onClick={() => {
+                    const qs = new URLSearchParams(buildDateParams(dateFilter, dateFrom, dateTo, dateApplied).replace(/^&/, ''))
+                    setBroadcastSelection({
+                      mode: 'filtered',
+                      filters: {
+                        scope:     'santo_domingo',
+                        status:    statusFilter,
+                        payment:   sdPaymentFilter,
+                        date_from: qs.get('from'),
+                        date_to:   qs.get('to'),
+                        search:    searchQuery.trim() || null,
+                      },
+                    })
+                  }}
+                  className="text-[11px] font-semibold px-2.5 py-1 rounded-full border border-teal-600 bg-teal-600 text-white hover:bg-teal-700">
+                  Preparar WhatsApp · todo el filtro
+                </button>
+                <button
+                  onClick={() => setShowBroadcastHistory(true)}
+                  className="text-[11px] font-semibold px-2.5 py-1 rounded-full border border-teal-200 bg-white text-teal-700 hover:border-teal-400">
+                  Historial WhatsApp
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -2371,6 +2409,11 @@ export default function ConfirmacionPage() {
       </div>
 
       <SelectionBulkActionBar>
+        {isAdmin && viewMode === 'santo_domingo' && (
+          <PrepareWhatsappSelectedButton
+            onPrepare={ids => { if (ids.length) setBroadcastSelection({ mode: 'selected_ids', order_ids: ids }) }}
+          />
+        )}
         <PrintCodLabelsBatchButton />
         <ExportOrdersButton
           orders={viewMode === 'reintentar' ? filteredOrders : clientFilteredData}
@@ -2378,6 +2421,14 @@ export default function ConfirmacionPage() {
         />
       </SelectionBulkActionBar>
       </SelectionProvider>
+
+      {broadcastSelection && (
+        <BroadcastPrepareModal
+          selection={broadcastSelection}
+          onClose={() => setBroadcastSelection(null)}
+        />
+      )}
+      {showBroadcastHistory && <BroadcastHistoryModal onClose={() => setShowBroadcastHistory(false)} />}
     </div>
   )
 }
