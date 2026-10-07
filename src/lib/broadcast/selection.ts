@@ -16,6 +16,8 @@
 //     orders.created_at <= resolved_at (instante de alta en Control COD,
 //     inmutable). Pedidos posteriores que cumplan el filtro NO pertenecen.
 
+import { parseCampaign, type BroadcastCampaign } from './campaign'
+
 export const MAX_SELECTED_IDS = 500
 export const MAX_SEARCH_LENGTH = 80
 
@@ -38,16 +40,32 @@ export interface BroadcastFilters {
   search:    string | null
 }
 
-export type BroadcastSelection =
+// Audiencia base: lo que viene de la pantalla (ids marcados o filtros).
+export type BroadcastAudienceBase =
   | { mode: 'selected_ids'; order_ids: string[] }
   | { mode: 'filtered';     filters: BroadcastFilters }
+
+// B.2 — selección completa = audiencia base + campaña explícita.
+export type BroadcastSelection = BroadcastAudienceBase & { campaign: BroadcastCampaign }
 
 export type ParseResult =
   | { ok: true;  selection: BroadcastSelection }
   | { ok: false; error: string }
 
+type BaseParseResult =
+  | { ok: true;  base: BroadcastAudienceBase }
+  | { ok: false; error: string }
+
+// Recompra es por CLIENTE (teléfono) y usa el segmento SD completo: no usa
+// ids de pedidos ni filtros de estado/pago/fecha/búsqueda de la pestaña.
+export const REPURCHASE_AUDIENCE_BASE: BroadcastAudienceBase = {
+  mode: 'filtered',
+  filters: { scope: 'santo_domingo', status: '', payment: 'todos', date_from: null, date_to: null, search: null },
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const FILTER_KEYS = new Set(['scope', 'status', 'payment', 'date_from', 'date_to', 'search'])
+const SELECTION_KEYS = new Set(['mode', 'order_ids', 'filters', 'campaign'])
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -72,6 +90,23 @@ export function normalizeSearch(v: unknown): string | null {
 
 export function parseBroadcastSelection(input: unknown): ParseResult {
   if (!isPlainObject(input)) return { ok: false, error: 'selection requerida' }
+  const base = parseAudienceBase(input)
+  if (!base.ok) return base
+  // Sin campaign → coordinación/pendientes (compat drafts B/B.1).
+  const c = parseCampaign(input.campaign)
+  if (!c.ok) return c
+  if (c.campaign.type === 'repurchase') {
+    const b = base.base
+    const neutral = b.mode === 'filtered' && b.filters.status === '' && b.filters.payment === 'todos'
+      && b.filters.date_from === null && b.filters.date_to === null && b.filters.search === null
+    if (!neutral) return { ok: false, error: 'Recompra usa el segmento SD completo (sin ids ni filtros de la pestaña)' }
+  }
+  return { ok: true, selection: { ...base.base, campaign: c.campaign } }
+}
+
+function parseAudienceBase(input: Record<string, unknown>): BaseParseResult {
+  const extra = Object.keys(input).filter(k => !SELECTION_KEYS.has(k))
+  if (extra.length) return { ok: false, error: `Claves no soportadas: ${extra.join(', ')}` }
 
   if (input.mode === 'selected_ids') {
     const ids = input.order_ids
@@ -81,7 +116,7 @@ export function parseBroadcastSelection(input: unknown): ParseResult {
     if (unique.length > MAX_SELECTED_IDS) {
       return { ok: false, error: `Máximo ${MAX_SELECTED_IDS} pedidos por selección manual — usa "todos los resultados del filtro"` }
     }
-    return { ok: true, selection: { mode: 'selected_ids', order_ids: unique } }
+    return { ok: true, base: { mode: 'selected_ids', order_ids: unique } }
   }
 
   if (input.mode === 'filtered') {
@@ -102,7 +137,7 @@ export function parseBroadcastSelection(input: unknown): ParseResult {
 
     return {
       ok: true,
-      selection: {
+      base: {
         mode: 'filtered',
         filters: { scope: 'santo_domingo', status, payment, date_from: from.value, date_to: to.value, search: normalizeSearch(f.search) },
       },

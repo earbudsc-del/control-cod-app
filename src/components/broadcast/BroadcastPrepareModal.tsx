@@ -1,6 +1,10 @@
 'use client'
 
-// Sprint Broadcast B — modal "Preparar WhatsApp — Confirmación SD".
+// Sprint Broadcast B / B.2 — modal "Preparar WhatsApp".
+//
+// B.2: el admin elige TIPO de campaña (Coordinar pedido | Recompra), el
+// segmento (Pendientes | Confirmados sin pagar) o la ventana de recompra
+// (30/45/60+ días). Recompra usa el segmento SD completo, no la selección.
 //
 // La UI NO decide elegibilidad: envía la selección (ids o filtros allowlisted)
 // a /api/admin/broadcasts/preview y muestra lo que devuelve el servidor.
@@ -8,20 +12,26 @@
 // todo. No existe botón "Enviar" en este sprint.
 
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, CheckCircle2, MessageCircle, Send, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ImageIcon, MessageCircle, Send, X } from 'lucide-react'
 import { Spinner } from '@/components/ui/spinner'
 import { useSelection } from '@/components/selection/SelectionProvider'
-import { broadcastReasonLabel, BROADCAST_WARNING_LABELS } from '@/lib/broadcast/labels'
-import type { BroadcastSelection } from '@/lib/broadcast/selection'
+import { broadcastReasonLabel, BROADCAST_BUTTON_HINTS, BROADCAST_WARNING_LABELS } from '@/lib/broadcast/labels'
+import { REPURCHASE_AUDIENCE_BASE, type BroadcastAudienceBase, type BroadcastSelection } from '@/lib/broadcast/selection'
+import { DEFAULT_CAMPAIGN, REPURCHASE_WINDOWS, campaignLabel, type BroadcastCampaign, type RouteFilter } from '@/lib/broadcast/campaign'
 
 interface PreviewEligible {
   order_id: string; order_number: string | null; customer_name: string | null
   phone_normalized: string; warnings: string[]; message_preview: string
+  offer_kind: string
+  media: { type: 'image'; asset_key: string; label: string; status: 'approved' | 'pending_asset' }
 }
 interface PreviewExcluded {
   order_id: string; order_number: string | null; customer_name: string | null; excluded_reason: string
 }
 interface PreviewResponse {
+  campaign: BroadcastCampaign
+  buttons: [string, string]
+  can_create_draft: boolean
   template_name: string
   eligibility_rule_version: string
   candidate_count: number
@@ -49,7 +59,7 @@ function newRequestKey(): string {
 export function BroadcastPrepareModal({
   selection, onClose, onCreated,
 }: {
-  selection: BroadcastSelection
+  selection: BroadcastAudienceBase
   onClose: () => void
   onCreated?: () => void
 }) {
@@ -63,15 +73,21 @@ export function BroadcastPrepareModal({
   // Una key por apertura del modal: un doble click reenvía la misma key y el
   // servidor devuelve el draft ya creado en vez de crear otro.
   const [requestKey] = useState(newRequestKey)
+  const [campaign, setCampaign] = useState<BroadcastCampaign>(DEFAULT_CAMPAIGN)
+  // Selección efectiva enviada al servidor (preview y create usan la MISMA).
+  const effective = useMemo<BroadcastSelection>(
+    () => campaign.type === 'repurchase' ? { ...REPURCHASE_AUDIENCE_BASE, campaign } : { ...selection, campaign },
+    [selection, campaign],
+  )
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
-      setLoading(true); setError(null)
+      setLoading(true); setError(null); setPreview(null); setSampleIdx(0)
       try {
         const res  = await fetch('/api/admin/broadcasts/preview', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ selection }),
+          body: JSON.stringify({ selection: effective }),
         })
         const body = await res.json().catch(() => ({}))
         if (cancelled) return
@@ -84,7 +100,7 @@ export function BroadcastPrepareModal({
       }
     })()
     return () => { cancelled = true }
-  }, [selection])
+  }, [effective])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape' && !creating) onClose() }
@@ -96,10 +112,12 @@ export function BroadcastPrepareModal({
     () => Object.entries(preview?.excluded_by_reason ?? {}).sort((a, b) => b[1] - a[1]),
     [preview],
   )
-  const warningCount = useMemo(
-    () => (preview?.eligible ?? []).filter(e => e.warnings.length > 0).length,
-    [preview],
-  )
+  // Conteo por tipo de advertencia (sobre la lista devuelta, máx. 300).
+  const warningCounts = useMemo(() => {
+    const m: Record<string, number> = {}
+    for (const e of preview?.eligible ?? []) for (const w of e.warnings) m[w] = (m[w] ?? 0) + 1
+    return Object.entries(m)
+  }, [preview])
   const sample = preview?.eligible[sampleIdx] ?? preview?.eligible[0] ?? null
 
   async function createDraft() {
@@ -108,7 +126,7 @@ export function BroadcastPrepareModal({
     try {
       const res  = await fetch('/api/admin/broadcasts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selection, request_key: requestKey }),
+        body: JSON.stringify({ selection: effective, request_key: requestKey }),
       })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) { setError(body.error ?? `Error ${res.status}`); return }
@@ -130,7 +148,7 @@ export function BroadcastPrepareModal({
         <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-gray-100 bg-white px-5 py-4">
           <div>
             <p className="text-[11px] font-bold uppercase tracking-wide text-teal-700">Preparar WhatsApp</p>
-            <h2 className="text-base font-bold text-gray-900">Confirmación SD</h2>
+            <h2 className="text-base font-bold text-gray-900">{campaignLabel(campaign)}</h2>
             <p className="text-[11px] text-gray-500 mt-0.5">
               Solo crea un borrador. No se envía ningún mensaje en este paso.
             </p>
@@ -142,6 +160,44 @@ export function BroadcastPrepareModal({
         </div>
 
         <div className="space-y-4 px-5 py-4">
+          {/* Tipo de campaña / segmento / ventana */}
+          <div className="space-y-2 rounded-xl border border-gray-100 p-3">
+            <ChipRow label="Tipo" disabled={creating || !!created} options={[
+              { key: 'coordination', label: 'Coordinar pedido', active: campaign.type === 'coordination',
+                onClick: () => setCampaign({ type: 'coordination', segment: 'pending' }) },
+              { key: 'repurchase', label: 'Recompra', active: campaign.type === 'repurchase',
+                onClick: () => setCampaign({ type: 'repurchase', window_days: 30 }) },
+            ]} />
+            {campaign.type === 'coordination' ? (
+              <ChipRow label="Audiencia" disabled={creating || !!created} options={[
+                { key: 'pending', label: 'Pendientes', active: campaign.segment === 'pending',
+                  onClick: () => setCampaign({ type: 'coordination', segment: 'pending' }) },
+                { key: 'confirmed_unpaid', label: 'Confirmados sin pagar', active: campaign.segment === 'confirmed_unpaid',
+                  onClick: () => setCampaign({ type: 'coordination', segment: 'confirmed_unpaid', route: 'all' }) },
+              ]} />
+            ) : null}
+            {campaign.type === 'coordination' && campaign.segment === 'confirmed_unpaid' ? (
+              <ChipRow label="Ruta" disabled={creating || !!created} options={([
+                ['all', 'Todos'], ['not_in_route', 'Sin ruta'], ['in_route', 'Ya en ruta'],
+              ] as Array<[RouteFilter, string]>).map(([r, label]) => ({
+                key: r, label, active: (campaign.route ?? 'all') === r,
+                onClick: () => setCampaign({ type: 'coordination', segment: 'confirmed_unpaid', route: r }),
+              }))} />
+            ) : null}
+            {campaign.type === 'repurchase' && (
+              <>
+                <ChipRow label="Pagaron hace" disabled={creating || !!created} options={REPURCHASE_WINDOWS.map(w => ({
+                  key: String(w), label: `${w}+ días`, active: campaign.window_days === w,
+                  onClick: () => setCampaign({ type: 'repurchase', window_days: w }),
+                }))} />
+                <p className="text-[11px] text-gray-500">
+                  Recompra evalúa todos los clientes SD con compra Pagada — no usa la selección ni los filtros de la pestaña.
+                  Oferta estándar para todos: 2 LÜMA Teeth, sin cepillo, 10% de descuento.
+                </p>
+              </>
+            )}
+          </div>
+
           {loading && (
             <div className="flex items-center justify-center gap-2 py-12 text-sm text-gray-500">
               <Spinner className="h-5 w-5 text-teal-600" /> Revalidando elegibilidad en el servidor…
@@ -178,10 +234,14 @@ export function BroadcastPrepareModal({
                 </div>
               )}
 
-              {warningCount > 0 && (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  {warningCount} elegible(s) con ubicación recibida que siguen pendientes — normalmente debieron auto-confirmarse. Revisar.
+              {warningCounts.length > 0 && (
+                <div className="space-y-0.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {warningCounts.map(([w, n]) => (
+                    <p key={w} className="flex items-start gap-1.5">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span><b className="tabular-nums">{n}</b> — {BROADCAST_WARNING_LABELS[w] ?? w}</span>
+                    </p>
+                  ))}
                 </div>
               )}
 
@@ -201,8 +261,26 @@ export function BroadcastPrepareModal({
                       </select>
                     )}
                   </div>
+                  <div className={`mb-2 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs
+                    ${sample.media.status === 'approved' ? 'border-teal-200 bg-teal-50 text-teal-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                    <ImageIcon className="h-4 w-4 shrink-0" />
+                    <span>
+                      Imagen: <b>{sample.media.label}</b> ·{' '}
+                      {sample.media.status === 'approved'
+                        ? 'creatividad aprobada (se sube a Meta en Sprint C)'
+                        : 'asset pendiente — no se usará otra imagen en su lugar'}
+                    </span>
+                  </div>
                   <div className="rounded-lg bg-[#e7f8dc] px-3 py-2 text-sm text-gray-800 whitespace-pre-wrap">
                     {sample.message_preview}
+                  </div>
+                  <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                    {preview.buttons.map(b => (
+                      <div key={b}>
+                        <span className="block rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-center text-xs font-semibold text-teal-700">{b}</span>
+                        <span className="mt-0.5 block text-[10px] leading-tight text-gray-400">{BROADCAST_BUTTON_HINTS[b]}</span>
+                      </div>
+                    ))}
                   </div>
                   <p className="mt-1.5 text-[10px] text-gray-400">
                     Copy de preview (template interno <span className="font-mono">{preview.template_name}</span>) — aún no es un template aprobado por Meta.
@@ -261,7 +339,8 @@ export function BroadcastPrepareModal({
           </button>
           {!created && (
             <button onClick={createDraft}
-              disabled={loading || creating || !preview || preview.eligible_count === 0}
+              title={preview && !preview.can_create_draft ? 'Recompra: solo preview hasta la migración 066 (Sprint C)' : undefined}
+              disabled={loading || creating || !preview || preview.eligible_count === 0 || !preview.can_create_draft}
               className="flex items-center gap-1.5 rounded-lg bg-teal-600 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-40">
               {creating ? <Spinner className="h-4 w-4" /> : null}
               {creating ? 'Creando…' : 'Crear borrador'}
@@ -269,6 +348,25 @@ export function BroadcastPrepareModal({
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+function ChipRow({ label, options, disabled }: {
+  label: string
+  disabled?: boolean
+  options: Array<{ key: string; label: string; active: boolean; onClick: () => void }>
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="w-24 shrink-0 text-[11px] font-semibold text-gray-500">{label}</span>
+      {options.map(o => (
+        <button key={o.key} onClick={o.onClick} disabled={disabled}
+          className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50
+            ${o.active ? 'border-teal-600 bg-teal-600 text-white' : 'border-gray-200 bg-white text-gray-600 hover:border-teal-400'}`}>
+          {o.label}
+        </button>
+      ))}
     </div>
   )
 }

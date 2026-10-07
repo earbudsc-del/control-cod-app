@@ -3,8 +3,9 @@ import crypto                   from 'crypto'
 import { createServiceClient }  from '@/lib/supabase/server'
 import { normalizePhoneRD }     from '@/lib/normalize-phone'
 import { applyConfirmationAction, type ConfirmAction } from '@/lib/orders/confirmation'
+import { findActiveSdOrdersByPhone } from '@/lib/deliveries/active-sd-orders-by-phone'
+import { decideContactOrderLink, isLinkedOrderStillActive, resolveContactOrderByPhone } from '@/lib/whatsapp/contact-order'
 import { maybeGenesisRespond }  from '@/lib/genesis/respond'
-import { isSantoDomingoOrder }  from '@/lib/alert-helpers'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -390,8 +391,9 @@ async function processInboundMessage(
   let contact = existingContact
 
   if (!contact) {
-    // Contacto nuevo — intentar vincular pedido activo por teléfono
-    const orderId = await findOrderByPhone(supabase, storeId, phoneNormalized)
+    // Contacto nuevo — vincular solo si hay UN pedido activo (B.2.3:
+    // lookup dirigido, sin ambigüedad ni históricos — ver contact-order.ts).
+    const orderId = (await resolveContactOrderByPhone(supabase, storeId, phoneNormalized)).orderId
 
     const { data: newContact, error: insertContactErr } = await supabase
       .from('wa_contacts')
@@ -432,9 +434,13 @@ async function processInboundMessage(
     // Contacto existente — actualizar last_seen_at y vincular pedido si falta
     const updates: Record<string, unknown> = { last_seen_at: sentAt }
     if (displayName)        updates.display_name = displayName
-    if (!contact.order_id) {
-      const orderId = await findOrderByPhone(supabase, storeId, phoneNormalized)
-      if (orderId) updates.order_id = orderId
+    // B.2.3: (re)vincular si falta o si el pedido vinculado ya no está activo
+    // y existe UN pedido activo. Nunca se borra un vínculo ni se elige a ciegas.
+    const stillActive = contact.order_id ? await isLinkedOrderStillActive(supabase, contact.order_id) : false
+    if (!contact.order_id || !stillActive) {
+      const resolution = await resolveContactOrderByPhone(supabase, storeId, phoneNormalized)
+      const newOrderId = decideContactOrderLink(contact.order_id, stillActive, resolution)
+      if (newOrderId) updates.order_id = newOrderId
     }
     const { error: updateContactErr } = await supabase
       .from('wa_contacts').update(updates).eq('id', contact.id)
@@ -713,79 +719,10 @@ async function resolveOrderIdFromLastTemplate(
   return orderId
 }
 
-// ── Helper: buscar pedido activo por teléfono ─────────────────────────────────
-// Mismo patrón que la recuperación de carritos en el webhook de Shopify:
-// fetch con filtro amplio, normalizar en JS para manejar distintos formatos.
-//
-// Meta envía con código de país: "18091234567"
-// DB puede tener: "809-123-4567" | "8091234567" | "+18091234567"
-// Estrategia: comparar sufijos de ≥7 dígitos para absorber diferencias de
-// formato y presencia/ausencia del código de país.
+// ── Lookups por teléfono ─────────────────────────────────────────────────────
+// findOrderByPhone (últimos 200 pedidos de la tienda) fue reemplazado en B.2.3
+// por resolveContactOrderByPhone — src/lib/whatsapp/contact-order.ts.
 
-async function findOrderByPhone(
-  supabase:        ServiceClient,
-  storeId:         string,
-  phoneNormalized: string,
-): Promise<string | null> {
-  if (phoneNormalized.length < 7) return null
-
-  const { data: orders } = await supabase
-    .from('orders')
-    .select('id, customer_phone')
-    .eq('store_id', storeId)
-    .not('customer_phone', 'is', null)
-    .not('normalized_status', 'in', '(delivered,returned)')
-    .order('created_at', { ascending: false })
-    .limit(200)
-
-  if (!orders?.length) return null
-
-  const match = orders.find(o => {
-    if (!o.customer_phone) return false
-    const stored  = o.customer_phone.replace(/\D/g, '')
-    const shorter = stored.length <= phoneNormalized.length ? stored : phoneNormalized
-    const longer  = stored.length <= phoneNormalized.length ? phoneNormalized : stored
-    // "18091234567".endsWith("8091234567") → true
-    // Mínimo 7 dígitos para evitar falsos positivos con números muy cortos
-    return longer.endsWith(shorter) && shorter.length >= 7
-  })
-
-  return match?.id ?? null
-}
-
-// ── Helper: pedidos SD activos y compatibles con un teléfono (Sprint 3A) ──────
-// Mismo criterio de matching por sufijo que findOrderByPhone, pero devuelve
-// TODOS los candidatos activos (no solo el primero) para que el llamador
-// pueda decidir si hay ambigüedad. "Compatible" = cobertura interna SD,
-// sin guía EFI (tracking_number NULL) y no en estado terminal. Ordenado por
-// created_at DESC — candidates[0] es siempre el pedido más reciente.
-async function findActiveSdOrdersByPhone(
-  supabase:        ServiceClient,
-  storeId:         string,
-  phoneNormalized: string,
-): Promise<{ id: string; created_at: string }[]> {
-  if (phoneNormalized.length < 7) return []
-
-  const { data: orders } = await supabase
-    .from('orders')
-    .select('id, customer_phone, customer_address, city, province, tracking_number, normalized_status, created_at')
-    .eq('store_id', storeId)
-    .not('customer_phone', 'is', null)
-    .is('tracking_number', null)
-    .not('normalized_status', 'in', '(delivered,returned,cancelled)')
-    .order('created_at', { ascending: false })
-    .limit(200)
-
-  if (!orders?.length) return []
-
-  return orders
-    .filter(o => {
-      if (!o.customer_phone) return false
-      const stored  = o.customer_phone.replace(/\D/g, '')
-      const shorter = stored.length <= phoneNormalized.length ? stored : phoneNormalized
-      const longer  = stored.length <= phoneNormalized.length ? phoneNormalized : stored
-      if (!(longer.endsWith(shorter) && shorter.length >= 7)) return false
-      return isSantoDomingoOrder(o.city, o.province, o.customer_address)
-    })
-    .map(o => ({ id: o.id, created_at: o.created_at }))
-}
+// findActiveSdOrdersByPhone vive en src/lib/deliveries/active-sd-orders-by-phone.ts
+// (B.2.2): lookup dirigido por teléfono + tienda + estados activos, sin el
+// límite global de "últimos 200 pedidos de la tienda".

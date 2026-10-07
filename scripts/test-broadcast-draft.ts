@@ -31,85 +31,7 @@ function check(label: string, pass: boolean, detail?: unknown) {
   console.log(`${pass ? '✅' : '❌'} ${label}${!pass && detail !== undefined ? ' — ' + JSON.stringify(detail) : ''}`)
 }
 
-// ── DB en memoria ────────────────────────────────────────────────────────────
-
-type Row = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
-type Filter = { op: 'eq' | 'in' | 'is' | 'gte' | 'lt' | 'lte'; col: string; val: unknown }
-
-function getPath(row: Row, col: string): unknown {
-  const m = col.match(/^(\w+)->>(\w+)$/)
-  if (m) { const obj = row[m[1]]; return obj == null ? null : (obj[m[2]] ?? null) }
-  return row[col]
-}
-
-class FakeDb {
-  tables: Record<string, Row[]> = { orders: [], wa_template_queue: [], wa_broadcasts: [] }
-  queries: Array<{ table: string; op: 'select' | 'insert'; filters: Filter[] }> = []
-  writes:  Array<{ table: string; op: string }> = []
-  // Hook para simular una request concurrente que inserta justo antes.
-  beforeInsert: ((table: string, payload: Row) => void) | null = null
-
-  from(table: string) {
-    const db = this
-    const state = { table, op: 'select' as 'select' | 'insert', filters: [] as Filter[], payload: null as Row | null,
-      orderCol: null as string | null, asc: true, rangeFrom: 0, rangeTo: Infinity, lim: Infinity, mode: 'many' as 'many' | 'single' | 'maybe' }
-    const run = () => {
-      db.queries.push({ table, op: state.op, filters: state.filters })
-      if (state.op === 'insert') {
-        db.writes.push({ table, op: 'insert' })
-        if (db.beforeInsert) { const h = db.beforeInsert; db.beforeInsert = null; h(table, state.payload!) }
-        // UNIQUE (store_id, request_key) — migración 065.
-        if (table === 'wa_broadcasts' && db.tables.wa_broadcasts.some(r =>
-          r.store_id === state.payload!.store_id && r.request_key === state.payload!.request_key)) {
-          return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "wa_broadcasts_store_request_key_key"' } }
-        }
-        const row = { id: randomUUID(), created_at: new Date().toISOString(), ...state.payload }
-        db.tables[table].push(row)
-        return { data: row, error: null }
-      }
-      let rows = (db.tables[table] ?? []).filter(r => state.filters.every(f => {
-        const v = getPath(r, f.col)
-        switch (f.op) {
-          case 'eq':  return v === f.val
-          case 'in':  return (f.val as unknown[]).includes(v)
-          case 'is':  return v === null || v === undefined
-          case 'gte': return v != null && String(v) >= String(f.val)
-          case 'lt':  return v != null && String(v) <  String(f.val)
-          case 'lte': return v != null && Date.parse(String(v)) <= Date.parse(String(f.val))
-        }
-      }))
-      if (state.orderCol) {
-        const c = state.orderCol
-        rows = [...rows].sort((a, b) => (String(a[c]) < String(b[c]) ? -1 : String(a[c]) > String(b[c]) ? 1 : 0) * (state.asc ? 1 : -1))
-      }
-      rows = rows.slice(state.rangeFrom, state.rangeTo + 1).slice(0, state.lim)
-      if (state.mode === 'single' || state.mode === 'maybe') return { data: rows[0] ?? null, error: null }
-      return { data: rows, error: null }
-    }
-    const b: any = { // eslint-disable-line @typescript-eslint/no-explicit-any
-      select: () => b,
-      insert: (payload: Row) => { state.op = 'insert'; state.payload = payload; return b },
-      update: () => { db.writes.push({ table, op: 'update' }); throw new Error('update no permitido en Sprint B') },
-      upsert: () => { db.writes.push({ table, op: 'upsert' }); throw new Error('upsert no permitido en Sprint B') },
-      delete: () => { db.writes.push({ table, op: 'delete' }); throw new Error('delete no permitido en Sprint B') },
-      eq:  (col: string, val: unknown) => { state.filters.push({ op: 'eq', col, val }); return b },
-      in:  (col: string, val: unknown[]) => { state.filters.push({ op: 'in', col, val }); return b },
-      is:  (col: string, val: unknown) => { state.filters.push({ op: 'is', col, val }); return b },
-      gte: (col: string, val: unknown) => { state.filters.push({ op: 'gte', col, val }); return b },
-      lt:  (col: string, val: unknown) => { state.filters.push({ op: 'lt', col, val }); return b },
-      lte: (col: string, val: unknown) => { state.filters.push({ op: 'lte', col, val }); return b },
-      order: (col: string, o?: { ascending?: boolean }) => { state.orderCol = col; state.asc = o?.ascending !== false; return b },
-      range: (a: number, z: number) => { state.rangeFrom = a; state.rangeTo = z; return b },
-      limit: (n: number) => { state.lim = n; return b },
-      single:      () => { state.mode = 'single'; return b },
-      maybeSingle: () => { state.mode = 'maybe'; return b },
-      then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
-        try { return Promise.resolve(run()).then(res, rej) } catch (e) { return Promise.reject(e).then(res, rej) }
-      },
-    }
-    return b
-  }
-}
+import { FakeDb, type Row } from './lib/broadcast-fake-db'
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -160,6 +82,7 @@ function seed() {
 
 const ctx: BroadcastAdminContext = { userId: 'admin-1', storeId: S1 }
 const NOW = new Date().toISOString()
+const PENDING = { type: 'coordination', segment: 'pending' } as const
 const reasonOf = (p: Awaited<ReturnType<typeof computeBroadcastAudience>>, id: string) =>
   p.excluded.find(x => x.order_id === id)?.excluded_reason ?? (p.eligible.some(e => e.order_id === id) ? 'ELIGIBLE' : 'MISSING')
 
@@ -169,7 +92,7 @@ async function main() {
   {
     const { db, o } = seed()
     const ghost = randomUUID()
-    const sel: BroadcastSelection = { mode: 'selected_ids', order_ids: [
+    const sel: BroadcastSelection = { campaign: PENDING, mode: 'selected_ids', order_ids: [
       o.eligible.id, o.confirmed.id, o.cancelled.id, o.delivered.id, o.returned.id, o.paid.id, o.tracking.id,
       o.badPhone.id, o.dupA.id, o.dupB.id, o.alreadyBc.id, o.santiago.id, o.poolSel.id, o.otherStore.id,
       o.location.id, o.old.id, ghost,
@@ -183,7 +106,7 @@ async function main() {
     check('A. ubicación recibida + pending → elegible con warning', !!loc && loc.warnings.includes('location_received_but_pending'))
     check('A. preview individual renderiza valores reales',
       p.eligible.find(e => e.order_id === o.eligible.id)?.message_preview === renderBroadcastPreview({ customer_name: 'Ana Pérez', product_summary: 'LÜMA Teeth', cod_amount: 1990 })
-      && /Hola Ana Pérez 😊/.test(renderBroadcastPreview({ customer_name: 'Ana Pérez', product_summary: 'LÜMA Teeth', cod_amount: 1990 }))
+      && /Hola, Ana Pérez 😊/.test(renderBroadcastPreview({ customer_name: 'Ana Pérez', product_summary: 'LÜMA Teeth', cod_amount: 1990 }))
       && /RD\$1,990/.test(renderBroadcastPreview({ customer_name: 'Ana Pérez', product_summary: 'LÜMA Teeth', cod_amount: 1990 })))
 
     console.log('\n=== G. Exclusiones + reasons ===\n')
@@ -223,7 +146,7 @@ async function main() {
   console.log('\n=== B. Preview filtered ===\n')
   {
     const { db, o } = seed()
-    const pPending = await computeBroadcastAudience(db, ctx, ({ mode: 'filtered', filters: {
+    const pPending = await computeBroadcastAudience(db, ctx, ({ campaign: PENDING, mode: 'filtered', filters: {
       scope: 'santo_domingo', status: 'pending', payment: 'todos', date_from: null, date_to: null, search: null } }), NOW)
     const ids = new Set([...pPending.eligible, ...pPending.excluded].map(x => x.order_id))
     check('B. status=pending incluye SD pending sin intentos', ids.has(o.eligible.id) && ids.has(o.old.id))
@@ -234,21 +157,21 @@ async function main() {
     check('B. filtered también detecta teléfonos duplicados', reasonOf(pPending, o.poolSel.id) === 'multiple_active_orders_same_phone'
       && reasonOf(pPending, o.poolOther.id) === 'multiple_active_orders_same_phone')
 
-    const pRetry = await computeBroadcastAudience(db, ctx, ({ mode: 'filtered', filters: {
+    const pRetry = await computeBroadcastAudience(db, ctx, ({ campaign: PENDING, mode: 'filtered', filters: {
       scope: 'santo_domingo', status: 'reintentar', payment: 'todos', date_from: null, date_to: null, search: null } }), NOW)
     check('B. status=reintentar → solo attempts>0', pRetry.candidate_count === 1 && reasonOf(pRetry, o.retry.id) === 'ELIGIBLE')
 
-    const pSearch = await computeBroadcastAudience(db, ctx, ({ mode: 'filtered', filters: {
+    const pSearch = await computeBroadcastAudience(db, ctx, ({ campaign: PENDING, mode: 'filtered', filters: {
       scope: 'santo_domingo', status: '', payment: 'todos', date_from: null, date_to: null, search: 'ana perez' } }), NOW)
     check('B. búsqueda (sin acentos) resuelve en servidor', pSearch.candidate_count === 1 && reasonOf(pSearch, o.eligible.id) === 'ELIGIBLE')
 
-    const pDate = await computeBroadcastAudience(db, ctx, ({ mode: 'filtered', filters: {
+    const pDate = await computeBroadcastAudience(db, ctx, ({ campaign: PENDING, mode: 'filtered', filters: {
       scope: 'santo_domingo', status: 'pending', payment: 'todos', date_from: '2026-01-01T00:00:00.000Z', date_to: '2026-02-01T00:00:00.000Z', search: null } }), NOW)
     check('B. rango de fecha', pDate.candidate_count === 1 && reasonOf(pDate, o.old.id) === 'ELIGIBLE')
 
     // Localidad que SD_FILTER pierde (province vacía) — la resolución canónica la incluye.
     db.tables.orders.push(mkOrder({ id: 'boca-chica', city: 'Boca Chica', province: null, customer_phone: '849-321-0000' }))
-    const pBoca = await computeBroadcastAudience(db, ctx, ({ mode: 'filtered', filters: {
+    const pBoca = await computeBroadcastAudience(db, ctx, ({ campaign: PENDING, mode: 'filtered', filters: {
       scope: 'santo_domingo', status: 'pending', payment: 'todos', date_from: null, date_to: null, search: 'boca chica' } }), NOW)
     check('B. Boca Chica sin province (omitida por SD_FILTER) SÍ es candidata', reasonOf(pBoca, 'boca-chica') === 'ELIGIBLE')
   }
@@ -256,13 +179,13 @@ async function main() {
   // ── E: allowlist / no confiar en frontend ─────────────────────────────────
   console.log('\n=== E. Elegibilidad solo server-side / allowlist ===\n')
   {
-    check('E. filtro desconocido rechazado', !parseBroadcastSelection({ mode: 'filtered', filters: { scope: 'santo_domingo', sql: 'drop' } }).ok)
-    check('E. expresión PostgREST como filtro rechazada', !parseBroadcastSelection({ mode: 'filtered', filters: { scope: 'santo_domingo', or: 'id.neq.0' } }).ok)
-    check('E. status fuera de allowlist rechazado', !parseBroadcastSelection({ mode: 'filtered', filters: { scope: 'santo_domingo', status: 'delivered' } }).ok)
-    check('E. scope ≠ santo_domingo rechazado', !parseBroadcastSelection({ mode: 'filtered', filters: { scope: 'all' } }).ok)
-    check('E. order_ids no-UUID rechazados', !parseBroadcastSelection({ mode: 'selected_ids', order_ids: ["1' OR 1=1"] }).ok)
+    check('E. filtro desconocido rechazado', !parseBroadcastSelection({ campaign: PENDING, mode: 'filtered', filters: { scope: 'santo_domingo', sql: 'drop' } }).ok)
+    check('E. expresión PostgREST como filtro rechazada', !parseBroadcastSelection({ campaign: PENDING, mode: 'filtered', filters: { scope: 'santo_domingo', or: 'id.neq.0' } }).ok)
+    check('E. status fuera de allowlist rechazado', !parseBroadcastSelection({ campaign: PENDING, mode: 'filtered', filters: { scope: 'santo_domingo', status: 'delivered' } }).ok)
+    check('E. scope ≠ santo_domingo rechazado', !parseBroadcastSelection({ campaign: PENDING, mode: 'filtered', filters: { scope: 'all' } }).ok)
+    check('E. order_ids no-UUID rechazados', !parseBroadcastSelection({ campaign: PENDING, mode: 'selected_ids', order_ids: ["1' OR 1=1"] }).ok)
     check('E. >500 ids rechazado', !parseBroadcastSelection({ mode: 'selected_ids', order_ids: Array.from({ length: 501 }, () => randomUUID()) }).ok)
-    const dedup = parseBroadcastSelection({ mode: 'selected_ids', order_ids: ['AAAAAAAA-0000-0000-0000-000000000000', 'aaaaaaaa-0000-0000-0000-000000000000'] })
+    const dedup = parseBroadcastSelection({ campaign: PENDING, mode: 'selected_ids', order_ids: ['AAAAAAAA-0000-0000-0000-000000000000', 'aaaaaaaa-0000-0000-0000-000000000000'] })
     check('E. ids deduplicados (case-insensitive)', dedup.ok && dedup.selection.mode === 'selected_ids' && dedup.selection.order_ids.length === 1)
 
     const ui = ['src/components/broadcast/BroadcastPrepareModal.tsx', 'src/components/broadcast/BroadcastHistoryModal.tsx', 'src/app/(app)/confirmacion/page.tsx']
@@ -304,7 +227,7 @@ async function main() {
   console.log('\n=== H/I/J/K/L. Crear draft ===\n')
   {
     const { db, o } = seed()
-    const sel: BroadcastSelection = { mode: 'selected_ids', order_ids: [o.eligible.id, o.location.id, o.confirmed.id, o.dupA.id, o.dupB.id] }
+    const sel: BroadcastSelection = { campaign: PENDING, mode: 'selected_ids', order_ids: [o.eligible.id, o.location.id, o.confirmed.id, o.dupA.id, o.dupB.id] }
     const preview = await computeBroadcastAudience(db, ctx, sel, NOW)
     check('H. preview: 2 elegibles', preview.eligible_count === 2, preview.eligible_count)
 
@@ -326,7 +249,7 @@ async function main() {
       check('J. status = draft', b.status === 'draft')
       check('J. template_name = sd_broadcast_confirmation', b.template_name === 'sd_broadcast_confirmation')
       check('J. store_id/created_by de la sesión', b.store_id === S1 && b.created_by === 'admin-1')
-      check('J. eligibility_rule_version', b.eligibility_rule_version === 'sd_standard_v1')
+      check('J. eligibility_rule_version (coordinación v2)', b.eligibility_rule_version === 'sd_coordination_v2')
       check('J. conteos consistentes', b.candidate_count === 5 && b.eligible_count + b.excluded_count === b.candidate_count, b)
       check('J. excluded_by_reason correcto', b.excluded_by_reason.confirmed === 2 && b.excluded_by_reason.multiple_active_orders_same_phone === 2, b.excluded_by_reason)
 
@@ -347,14 +270,14 @@ async function main() {
     }
 
     // Filtered draft guarda filtros, no ids.
-    const rf = await createBroadcastDraft(db, ctx, { mode: 'filtered', filters: {
+    const rf = await createBroadcastDraft(db, ctx, { campaign: PENDING, mode: 'filtered', filters: {
       scope: 'santo_domingo', status: 'pending', payment: 'todos', date_from: null, date_to: null, search: null } }, randomUUID())
     const sff = rf.ok ? rf.broadcast.selection_filter as Row : {}
     check('K. filtered: guarda filtros allowlisted, no ids', rf.ok && sff.mode === 'filtered' && sff.filters?.scope === 'santo_domingo' && !('order_ids' in sff))
 
     // 0 elegibles → no se crea draft.
     const before0 = db.tables.wa_broadcasts.length
-    const r0 = await createBroadcastDraft(db, ctx, { mode: 'selected_ids', order_ids: [o.confirmed.id] }, randomUUID())
+    const r0 = await createBroadcastDraft(db, ctx, { campaign: PENDING, mode: 'selected_ids', order_ids: [o.confirmed.id] }, randomUUID())
     check('H. 0 elegibles → 422 y sin draft', !r0.ok && r0.status === 422 && db.tables.wa_broadcasts.length === before0)
     check('I. en todo el flujo: wa_template_queue intacta', db.tables.wa_template_queue.length === queueBefore)
 
@@ -389,7 +312,7 @@ async function main() {
   {
     const { db, o } = seed()
     const queueBefore = db.tables.wa_template_queue.length
-    const filtered: BroadcastSelection = { mode: 'filtered', filters: {
+    const filtered: BroadcastSelection = { campaign: PENDING, mode: 'filtered', filters: {
       scope: 'santo_domingo', status: 'pending', payment: 'todos', date_from: null, date_to: null, search: null } }
 
     const r = await createBroadcastDraft(db, ctx, filtered, randomUUID())
@@ -441,7 +364,7 @@ async function main() {
   console.log('\n=== B.1 F. selected_ids: los ids son la frontera ===\n')
   {
     const { db, o } = seed()
-    const sel: BroadcastSelection = { mode: 'selected_ids', order_ids: [o.eligible.id, o.location.id, o.confirmed.id] }
+    const sel: BroadcastSelection = { campaign: PENDING, mode: 'selected_ids', order_ids: [o.eligible.id, o.location.id, o.confirmed.id] }
     const r = await createBroadcastDraft(db, ctx, sel, randomUUID())
     if (!r.ok) throw new Error('no draft')
     db.tables.orders.push(mkOrder({ customer_phone: '849-700-0001', created_at: new Date(Date.now() + 60_000).toISOString() }))
@@ -454,9 +377,9 @@ async function main() {
 
     let threw = 0
     for (const bad of [
-      { mode: 'filtered', filters: { scope: 'santo_domingo', sql: 'x' }, resolved_at: NOW },
-      { mode: 'selected_ids', order_ids: [o.eligible.id] },  // sin resolved_at
-      { mode: 'selected_ids', order_ids: ['no-uuid'], resolved_at: NOW },
+      { campaign: PENDING, mode: 'filtered', filters: { scope: 'santo_domingo', sql: 'x' }, resolved_at: NOW },
+      { campaign: PENDING, mode: 'selected_ids', order_ids: [o.eligible.id] },  // sin resolved_at
+      { campaign: PENDING, mode: 'selected_ids', order_ids: ['no-uuid'], resolved_at: NOW },
     ]) { try { audienceFromDraft(bad) } catch { threw++ } }
     check('F. selection_filter manipulado/incompleto → revalidación rechaza', threw === 3)
     let other = false
@@ -467,7 +390,7 @@ async function main() {
   console.log('\n=== B.1 G/H/I. Idempotencia por (store_id, request_key) ===\n')
   {
     const { db, o } = seed()
-    const sel: BroadcastSelection = { mode: 'selected_ids', order_ids: [o.eligible.id] }
+    const sel: BroadcastSelection = { campaign: PENDING, mode: 'selected_ids', order_ids: [o.eligible.id] }
     const key = randomUUID()
     const a = await createBroadcastDraft(db, ctx, sel, key)
     const b = await createBroadcastDraft(db, ctx, sel, key)
@@ -503,7 +426,7 @@ async function main() {
 
     // I. Misma key en otra tienda no colisiona.
     const ctx2: BroadcastAdminContext = { userId: 'admin-2', storeId: S2 }
-    const i2 = await createBroadcastDraft(db, ctx2, { mode: 'selected_ids', order_ids: [o.otherStore.id] }, key)
+    const i2 = await createBroadcastDraft(db, ctx2, { campaign: PENDING, mode: 'selected_ids', order_ids: [o.otherStore.id] }, key)
     check('I. misma request_key en otra tienda → draft propio (no replay)', i2.ok && !i2.replay && i2.broadcast.store_id === S2 && i2.broadcast.id !== (a.ok ? a.broadcast.id : ''))
     check('I. el replay busca por store_id + request_key',
       db.queries.some(q => q.table === 'wa_broadcasts' && q.filters.some(f => f.col === 'request_key') && q.filters.some(f => f.col === 'store_id')))
@@ -514,10 +437,10 @@ async function main() {
   {
     check('J. renderer usa cod_amount (2500 → RD$2,500)', renderBroadcastPreview({ customer_name: 'X', product_summary: 'Y', cod_amount: 2500 }).includes('RD$2,500'))
     check('J. renderer con decimales (1490.5 → RD$1,490.5)', renderBroadcastPreview({ customer_name: 'X', product_summary: 'Y', cod_amount: 1490.5 }).includes('RD$1,490.5'))
-    check('J. cod_amount null → RD$0 (no inventa precio)', renderBroadcastPreview({ customer_name: 'X', product_summary: 'Y', cod_amount: null }).includes('RD$0\n'))
+    check('J. cod_amount null → RD$0 (no inventa precio)', renderBroadcastPreview({ customer_name: 'X', product_summary: 'Y', cod_amount: null }).includes('RD$0*'))
     const { db, o } = seed()
     db.tables.orders.find(x => x.id === o.eligible.id)!.cod_amount = 3450
-    const p = await computeBroadcastAudience(db, ctx, { mode: 'selected_ids', order_ids: [o.eligible.id] }, NOW)
+    const p = await computeBroadcastAudience(db, ctx, { campaign: PENDING, mode: 'selected_ids', order_ids: [o.eligible.id] }, NOW)
     check('J. preview del servidor usa orders.cod_amount del pedido (3450)', p.eligible[0]?.message_preview.includes('RD$3,450') === true)
 
     const code = ['src/lib/broadcast/message-preview.ts', 'src/lib/broadcast/broadcast-service.ts', 'src/lib/broadcast/selection.ts',
@@ -525,7 +448,7 @@ async function main() {
       'src/app/api/admin/broadcasts/preview/route.ts', 'src/components/broadcast/BroadcastPrepareModal.tsx',
       'src/components/broadcast/BroadcastHistoryModal.tsx'].map(f => readFileSync(join(__dirname, '..', f), 'utf8')).join('\n')
     check('K. sin 1990 / 1,990 en código Broadcast', !/1[,.]?990/.test(code))
-    check('K. sin montos RD$ literales (solo el placeholder RD${{3}})', !/RD\$ ?\d/.test(code) && code.includes('RD${{3}}'))
+    check('K. sin montos RD$ literales (precio siempre vía formatCodAmount)', !/RD\$ ?\d/.test(code) && code.includes('RD$${formatCodAmount(v.cod_amount)}'))
   }
 
   console.log('\n=== B.1 Migración 065 (estática, NO aplicada) ===\n')

@@ -2,8 +2,10 @@ import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
 import { corsHeaders } from '@/lib/cors'
 import { getBearerToken, authenticateDeliveryRequest } from '@/lib/deliveries/auth'
-import { checkConversationOrderAccess } from '@/lib/deliveries/conversations'
-import type { SdOrderRow } from '@/lib/deliveries/sd-status'
+import {
+  ACCESS_ORDER_COLUMNS, decideConversationAccess, loadActiveSdOrdersIndex,
+  type AccessOrderRow, type ListOrderRow,
+} from '@/lib/deliveries/conversations'
 
 // GET /api/v1/deliveries/conversations
 //
@@ -62,35 +64,45 @@ export async function GET(request: Request) {
     }
 
     const rows = (convRows ?? []) as unknown as ConversationRow[]
-    const withOrder = rows
+    const withContact = rows
       .map(row => ({ row, contact: Array.isArray(row.contact) ? row.contact[0] : row.contact }))
-      .filter((r): r is { row: ConversationRow; contact: ContactRow } => Boolean(r.contact?.order_id))
+      .filter((r): r is { row: ConversationRow; contact: ContactRow } => Boolean(r.contact))
 
-    const orderIds = [...new Set(withOrder.map(r => r.contact.order_id as string))]
-    if (orderIds.length === 0) {
-      return NextResponse.json({ conversations: [], serverTime: new Date().toISOString() }, { status: 200, headers })
-    }
-
-    const { data: orderRows, error: orderError } = await supabase
-      .from('orders')
-      .select('id, order_number, customer_name, customer_phone, customer_address, city, province, tracking_number, normalized_status, confirmation_status, assigned_to, cod_amount')
-      .in('id', orderIds)
-
-    if (orderError) {
-      console.error('[deliveries/conversations] orders query error', orderError.message)
+    // B.2.4: el acceso se decide con los pedidos SD ACTIVOS actuales del
+    // teléfono de cada contacto (no con wa_contacts.order_id). Una sola carga.
+    let activeFor: (phone: string | null) => ListOrderRow[]
+    try {
+      activeFor = await loadActiveSdOrdersIndex(supabase, profile.store_id)
+    } catch (e) {
+      console.error('[deliveries/conversations] active orders error', e)
       return NextResponse.json({ error: 'Error interno' }, { status: 500, headers })
     }
 
-    type OrderRow = SdOrderRow & { order_number: string | null; customer_name: string | null; cod_amount: number | null }
-    const orderById = new Map<string, OrderRow>()
-    for (const o of (orderRows ?? []) as OrderRow[]) orderById.set(o.id, o)
+    // Admin: el vínculo guardado solo sirve como fallback de un pedido SD
+    // histórico cuando el contacto no tiene pedidos activos.
+    const linkedById = new Map<string, ListOrderRow>()
+    if (profile.role === 'admin') {
+      const linkedIds = [...new Set(withContact.map(r => r.contact.order_id).filter((x): x is string => !!x))]
+      if (linkedIds.length) {
+        const { data: linkedRows, error: linkedErr } = await supabase.from('orders')
+          .select(`${ACCESS_ORDER_COLUMNS}, customer_phone, order_number, customer_name, cod_amount, created_at`)
+          .eq('store_id', profile.store_id).in('id', linkedIds)
+        if (linkedErr) {
+          console.error('[deliveries/conversations] linked orders error', linkedErr.message)
+          return NextResponse.json({ error: 'Error interno' }, { status: 500, headers })
+        }
+        for (const o of (linkedRows ?? []) as ListOrderRow[]) linkedById.set(o.id, o)
+      }
+    }
 
     const conversations = []
-    for (const { row, contact } of withOrder) {
-      const order = orderById.get(contact.order_id as string)
+    for (const { row, contact } of withContact) {
+      const active = activeFor(contact.phone_normalized)
+      const linked = contact.order_id ? linkedById.get(contact.order_id) ?? null : null
+      const decision = decideConversationAccess(active as AccessOrderRow[], linked, userId, profile.role)
+      if (!decision.allowed) continue
+      const order = active.find(o => o.id === decision.orderId) ?? linked
       if (!order) continue
-      const access = checkConversationOrderAccess(order, userId, profile.role)
-      if (!access.allowed) continue
 
       conversations.push({
         id: row.id,

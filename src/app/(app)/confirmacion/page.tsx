@@ -26,7 +26,7 @@ import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabe
 import { ExportOrdersButton } from '@/components/selection/ExportOrdersButton'
 import { BroadcastPrepareModal, PrepareWhatsappSelectedButton } from '@/components/broadcast/BroadcastPrepareModal'
 import { BroadcastHistoryModal } from '@/components/broadcast/BroadcastHistoryModal'
-import type { BroadcastSelection } from '@/lib/broadcast/selection'
+import type { BroadcastAudienceBase } from '@/lib/broadcast/selection'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -695,7 +695,7 @@ export default function ConfirmacionPage() {
   // ── Broadcast WhatsApp (Sprint B — solo preparación/borrador, sin envío) ─────
   // La UI solo describe la selección; el servidor decide elegibilidad.
   const isAdmin = currentUserRole === 'admin'
-  const [broadcastSelection, setBroadcastSelection] = useState<BroadcastSelection | null>(null)
+  const [broadcastSelection, setBroadcastSelection] = useState<BroadcastAudienceBase | null>(null)
   const [showBroadcastHistory, setShowBroadcastHistory] = useState(false)
 
   // ── Reabrir pedido (modal) ───────────────────────────────────────────────────

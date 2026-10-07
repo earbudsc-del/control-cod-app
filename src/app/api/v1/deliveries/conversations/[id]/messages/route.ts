@@ -2,48 +2,13 @@ import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
 import { corsHeaders } from '@/lib/cors'
 import { getBearerToken, authenticateDeliveryRequest } from '@/lib/deliveries/auth'
-import { checkConversationOrderAccess } from '@/lib/deliveries/conversations'
-import type { SdOrderRow } from '@/lib/deliveries/sd-status'
+import { loadConversationForMessenger } from '@/lib/deliveries/conversations'
 import { buildSenderIdentity } from '@/lib/whatsapp/sender-identity'
 import { sendWhatsAppText } from '@/lib/whatsapp/send-text'
 
-type ServiceClient = Awaited<ReturnType<typeof createServiceClient>>
 
 const DEFAULT_LIMIT = 50
 const MAX_LIMIT = 100
-
-async function loadConversationForMessenger(
-  supabase: ServiceClient,
-  conversationId: string,
-  storeId: string,
-  userId: string,
-  role: string,
-) {
-  const { data: conv } = await supabase
-    .from('wa_conversations')
-    .select('id, store_id, contact:wa_contacts(order_id, wa_id, phone_normalized)')
-    .eq('id', conversationId)
-    .maybeSingle()
-
-  if (!conv || conv.store_id !== storeId) return { kind: 'not_found' as const }
-
-  type ContactRow = { order_id: string | null; wa_id: string | null; phone_normalized: string | null }
-  const contact = (Array.isArray(conv.contact) ? conv.contact[0] : conv.contact) as ContactRow | null
-  if (!contact?.order_id) return { kind: 'not_found' as const }
-
-  const { data: order } = await supabase
-    .from('orders')
-    .select('id, city, province, customer_address, tracking_number, normalized_status, confirmation_status, assigned_to')
-    .eq('id', contact.order_id)
-    .maybeSingle()
-
-  if (!order) return { kind: 'not_found' as const }
-
-  const access = checkConversationOrderAccess(order as SdOrderRow, userId, role)
-  if (!access.allowed) return { kind: 'forbidden' as const }
-
-  return { kind: 'ok' as const, contact, storeId: conv.store_id as string }
-}
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const origin = request.headers.get('origin')

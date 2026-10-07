@@ -2,8 +2,7 @@ import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
 import { corsHeaders } from '@/lib/cors'
 import { getBearerToken, authenticateDeliveryRequest } from '@/lib/deliveries/auth'
-import { checkConversationOrderAccess, resolveOrCreateConversationForOrder } from '@/lib/deliveries/conversations'
-import type { SdOrderRow } from '@/lib/deliveries/sd-status'
+import { checkConversationOrderAccess, resolveOrCreateConversationForOrder, type AccessOrderRow } from '@/lib/deliveries/conversations'
 
 // GET /api/v1/deliveries/orders/[id]/conversation
 //
@@ -30,16 +29,18 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 
     const { data: order, error: orderError } = await supabase
       .from('orders')
-      .select('id, store_id, customer_name, customer_phone, city, province, customer_address, tracking_number, normalized_status, confirmation_status, assigned_to')
+      .select('id, store_id, customer_name, customer_phone, city, province, customer_address, tracking_number, normalized_status, confirmation_status, assigned_to, payment_status, is_test, archived_at')
       .eq('id', orderId)
       .maybeSingle()
 
     if (orderError || !order) return NextResponse.json({ error: 'Pedido no encontrado' }, { status: 404, headers })
-    if (order.store_id !== profile.store_id && profile.role !== 'admin') {
+    // B.2.4: aislamiento por tienda también para admin.
+    if (order.store_id !== profile.store_id) {
       return NextResponse.json({ error: 'Pedido fuera de tu tienda' }, { status: 403, headers })
     }
 
-    const access = checkConversationOrderAccess(order as SdOrderRow, userId, profile.role)
+    // B.2.4: exige pedido SD operativamente activo (admin: también histórico SD).
+    const access = checkConversationOrderAccess(order as AccessOrderRow, userId, profile.role)
     if (!access.allowed) {
       return NextResponse.json({ error: 'No tienes acceso a la conversación de este pedido' }, { status: 403, headers })
     }

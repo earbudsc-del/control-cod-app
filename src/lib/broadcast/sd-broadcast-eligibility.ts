@@ -65,8 +65,21 @@ export type BroadcastExcludedReason =
   | 'broadcast_already_sent'
   | 'broadcast_previous_attempt'
   | 'multiple_active_orders_same_phone'
+  | 'confirmation_pending'   // B.2: segmento confirmed_unpaid y el pedido sigue pendiente
 
-export type BroadcastWarning = 'location_received_but_pending'
+export type BroadcastWarning = 'location_received_but_pending' | 'already_in_route'
+
+// B.2 — segmento de la campaña de coordinación.
+//   pending          : comportamiento sd_standard_v1 (default, sin cambios).
+//   confirmed_unpaid : confirmation_status='confirmed' y aún NO Pagado.
+// "confirmed" NO es compra completada: la compra completada es
+// payment_status='paid' (ver auditoría B.2). Ambos segmentos siguen
+// excluyendo paid/delivered/returned/cancelled/tracking/no-SD/teléfono inválido.
+export type CoordinationSegmentRule = 'pending' | 'confirmed_unpaid'
+
+export interface EligibilityOptions {
+  segment?: CoordinationSegmentRule
+}
 
 export type OrderEligibility =
   | { eligible: true;  phone_normalized: string; warnings: BroadcastWarning[] }
@@ -98,7 +111,9 @@ export function normalizeBroadcastPhone(raw: string | null | undefined): string 
 export function evaluateOrderEligibility(
   order: BroadcastCandidateOrder,
   existingRow: ExistingBroadcastQueueRow | null,
+  opts: EligibilityOptions = {},
 ): OrderEligibility {
+  const segment = opts.segment ?? 'pending'
   // 1. Pedido Shopify real.
   if (order.source !== 'shopify_webhook' || isBlank(order.shopify_order_id)) {
     return { eligible: false, reason: 'not_shopify_order' }
@@ -107,10 +122,14 @@ export function evaluateOrderEligibility(
     return { eligible: false, reason: 'test_or_archived' }
   }
 
-  // 2. Confirmación: solo pending.
+  // 2. Confirmación según segmento (pending | confirmed_unpaid).
   switch (order.confirmation_status) {
-    case 'pending':     break
-    case 'confirmed':   return { eligible: false, reason: 'confirmed' }
+    case 'pending':
+      if (segment === 'confirmed_unpaid') return { eligible: false, reason: 'confirmation_pending' }
+      break
+    case 'confirmed':
+      if (segment === 'pending') return { eligible: false, reason: 'confirmed' }
+      break
     case 'cancelled':   return { eligible: false, reason: 'cancelled' }
     case 'unreachable': return { eligible: false, reason: 'unreachable' }
     default:            return { eligible: false, reason: 'confirmation_not_pending' }
@@ -146,8 +165,24 @@ export function evaluateOrderEligibility(
 
   // Ubicación recibida + pending: se permite, pero se marca — normalmente
   // debió auto-confirmarse.
-  const warnings: BroadcastWarning[] = order.sd_location_received_at ? ['location_received_but_pending'] : []
+  const warnings: BroadcastWarning[] = []
+  if (segment === 'pending' && order.sd_location_received_at) warnings.push('location_received_but_pending')
+  // Confirmado y ya despachado al mensajero SD: elegible, pero se marca.
+  if (segment === 'confirmed_unpaid' && order.normalized_status === 'en_reparto') warnings.push('already_in_route')
   return { eligible: true, phone_normalized: phone, warnings }
+}
+
+/**
+ * Teléfono normalizado si el pedido es un pedido ACTIVO coordinable (pasa
+ * todas las reglas de pending o de confirmed_unpaid, ignorando contactos
+ * broadcast previos); null si no.
+ */
+export function activeCoordinationPhone(o: BroadcastCandidateOrder): string | null {
+  for (const segment of ['pending', 'confirmed_unpaid'] as const) {
+    const r = evaluateOrderEligibility(o, null, { segment })
+    if (r.eligible) return r.phone_normalized
+  }
+  return null
 }
 
 export interface BroadcastEligibleOrder {
@@ -187,6 +222,7 @@ export function classifyBroadcastCandidates(
   orders: BroadcastCandidateOrder[],
   existingRows: ExistingBroadcastQueueRow[],
   contextOrders: BroadcastCandidateOrder[] = [],
+  opts: EligibilityOptions & { crossSegmentAmbiguity?: boolean } = {},
 ): BroadcastClassification {
   const rowByOrder = new Map(existingRows.map(r => [r.order_id, r]))
 
@@ -197,7 +233,7 @@ export function classifyBroadcastCandidates(
   for (const o of orders) {
     if (seen.has(o.id)) continue // id duplicado en la entrada: se evalúa una sola vez
     seen.add(o.id)
-    const r = evaluateOrderEligibility(o, rowByOrder.get(o.id) ?? null)
+    const r = evaluateOrderEligibility(o, rowByOrder.get(o.id) ?? null, opts)
     if (r.eligible) {
       individuallyEligible.push({ order_id: o.id, store_id: o.store_id, phone_normalized: r.phone_normalized, warnings: r.warnings })
     } else {
@@ -206,14 +242,27 @@ export function classifyBroadcastCandidates(
   }
 
   const countByPhone = new Map<string, number>()
-  for (const e of individuallyEligible) {
-    countByPhone.set(e.phone_normalized, (countByPhone.get(e.phone_normalized) ?? 0) + 1)
-  }
-  for (const o of contextOrders) {
-    if (seen.has(o.id)) continue // ya contado como candidato
-    seen.add(o.id)
-    const r = evaluateOrderEligibility(o, rowByOrder.get(o.id) ?? null)
-    if (r.eligible) countByPhone.set(r.phone_normalized, (countByPhone.get(r.phone_normalized) ?? 0) + 1)
+  if (opts.crossSegmentAmbiguity) {
+    // B.2: un teléfono es ambiguo si tiene 2+ pedidos ACTIVOS de coordinación
+    // en CUALQUIER segmento (pending o confirmed_unpaid), haya o no recibido
+    // broadcast. Más estricto que v1: nunca más laxo.
+    const counted = new Set<string>()
+    for (const o of [...orders, ...contextOrders]) {
+      if (counted.has(o.id)) continue
+      counted.add(o.id)
+      const phone = activeCoordinationPhone(o)
+      if (phone) countByPhone.set(phone, (countByPhone.get(phone) ?? 0) + 1)
+    }
+  } else {
+    for (const e of individuallyEligible) {
+      countByPhone.set(e.phone_normalized, (countByPhone.get(e.phone_normalized) ?? 0) + 1)
+    }
+    for (const o of contextOrders) {
+      if (seen.has(o.id)) continue // ya contado como candidato
+      seen.add(o.id)
+      const r = evaluateOrderEligibility(o, rowByOrder.get(o.id) ?? null, opts)
+      if (r.eligible) countByPhone.set(r.phone_normalized, (countByPhone.get(r.phone_normalized) ?? 0) + 1)
+    }
   }
 
   const eligible: BroadcastEligibleOrder[] = []

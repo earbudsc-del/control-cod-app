@@ -5,7 +5,12 @@
 export const BROADCAST_REASON_LABELS: Record<string, string> = {
   not_shopify_order:                 'No es pedido Shopify',
   test_or_archived:                  'Pedido de prueba o archivado',
-  confirmed:                         'Ya confirmado',
+  confirmed:                         'Ya confirmado (usar "Confirmados sin pagar")',
+  confirmation_pending:              'Pendiente de confirmar (usar "Pendientes")',
+  recent_purchase:                   'Compra Pagada dentro de la ventana',
+  active_order_in_progress:          'Tiene un pedido activo en curso',
+  repurchase_already_contacted:      'Ya contactado para recompra por esta compra',
+  route_filter_mismatch:             'Fuera del filtro de ruta elegido',
   cancelled:                         'Cancelado',
   unreachable:                       'Inalcanzable',
   confirmation_not_pending:          'Ya confirmado/no pendiente',
@@ -28,6 +33,9 @@ export function broadcastReasonLabel(reason: string): string {
 
 export const BROADCAST_WARNING_LABELS: Record<string, string> = {
   location_received_but_pending: 'Ubicación recibida pero sigue pendiente (revisar)',
+  already_in_route:              'Confirmado y ya en ruta del mensajero',
+  requires_template_variables:   'Su oferta no calza con el texto fijo del template (requiere variables)',
+  media_asset_pending:           'Imagen de su oferta aún no existe',
 }
 
 export const BROADCAST_STATUS_LABELS: Record<string, string> = {
@@ -36,4 +44,12 @@ export const BROADCAST_STATUS_LABELS: Record<string, string> = {
   processing: 'Procesando',
   completed:  'Completado',
   cancelled:  'Cancelado',
+}
+
+// B.2.1 — qué hará cada quick reply (diseño Sprint C; nada conectado aún).
+export const BROADCAST_BUTTON_HINTS: Record<string, string> = {
+  'Sí, confirmar':         'Confirma si está pendiente; si ya estaba confirmado, solo continúa la coordinación. Pide ubicación solo si falta.',
+  'Ya no lo deseo':        'No cancela: Génesis intenta entender y recuperar. Cancela solo ante un "no" inequívoco.',
+  'Sí, quiero aprovechar': 'Crea un pedido NUEVO de recompra (2 LÜMA Teeth, sin cepillo) sin volver a preguntar.',
+  'Ahora no':              'Cierra esta oportunidad. No toca el pedido histórico.',
 }

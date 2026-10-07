@@ -21,6 +21,8 @@
 // Shopify después del draft trae una fecha comercial anterior, pero no existía
 // para nosotros al preparar el draft → queda fuera, que es lo correcto).
 //
+// Recompra (B.2): misma frontera, por cliente — ver computeRepurchaseAudience.
+//
 // Preview, create y revalidación usan EXACTAMENTE la misma función
 // (computeBroadcastAudience) — no hay segunda implementación.
 //
@@ -29,15 +31,20 @@
 
 import { isSantoDomingoOrder } from '@/lib/alert-helpers'
 import {
-  SD_BROADCAST_ELIGIBILITY_RULE_VERSION,
-  SD_BROADCAST_TEMPLATE_NAME,
+  activeCoordinationPhone,
   classifyBroadcastCandidates,
+  normalizeBroadcastPhone,
   type BroadcastCandidateOrder,
   type BroadcastExcludedReason,
   type BroadcastWarning,
   type ExistingBroadcastQueueRow,
 } from './sd-broadcast-eligibility'
-import { renderBroadcastPreview } from './message-preview'
+import { renderCoordinationMessage, renderRepurchaseMessage } from './message-preview'
+import { MEDIA_ASSETS, resolveCommercialOffer, type BroadcastMediaAssetKey, type OfferKind } from './offer'
+import {
+  campaignButtons, campaignCanCreateDraft, campaignRuleVersion, campaignTemplateName,
+  type BroadcastCampaign,
+} from './campaign'
 import { parseBroadcastSelection, type BroadcastFilters, type BroadcastSelection } from './selection'
 
 export const DRAFT_REQUIRES_REVALIDATION_BEFORE_SEND = true
@@ -190,25 +197,60 @@ export async function resolveBroadcastCandidates(
   return { orders: rows.filter(o => matchesBroadcastFilters(o, f, resolvedAt)), not_found_ids: [] }
 }
 
-/** Pool activo de la tienda para detectar ambigüedad de teléfono. */
+/**
+ * Pool de pedidos ACTIVOS coordinables de la tienda (pending o confirmed, sin
+ * pagar, sin tracking). Se usa para la ambigüedad de teléfono entre segmentos
+ * y, en recompra, para no ofrecer recompra a quien tiene un pedido en curso.
+ */
 async function loadActivePool(db: SupabaseLike, storeId: string): Promise<BroadcastOrderRow[]> {
   return fetchAll<BroadcastOrderRow>(() => db.from('orders').select(BROADCAST_ORDER_COLUMNS)
     .eq('store_id', storeId).eq('source', 'shopify_webhook')
-    .eq('confirmation_status', 'pending').is('tracking_number', null), 'orders(pool)')
+    .in('confirmation_status', ['pending', 'confirmed']).eq('payment_status', 'pending')
+    .is('tracking_number', null), 'orders(pool)')
 }
 
-async function loadExistingBroadcastRows(db: SupabaseLike, storeId: string): Promise<ExistingBroadcastQueueRow[]> {
-  return fetchAll<ExistingBroadcastQueueRow>(() => db.from('wa_template_queue').select('id, order_id, status')
-    .eq('store_id', storeId).eq('template_name', SD_BROADCAST_TEMPLATE_NAME), 'wa_template_queue(broadcast)')
+/** Pedidos Pagados de la tienda (compras completadas para recompra). */
+async function loadPaidOrders(db: SupabaseLike, storeId: string): Promise<BroadcastOrderRow[]> {
+  return fetchAll<BroadcastOrderRow>(() => db.from('orders').select(BROADCAST_ORDER_COLUMNS)
+    .eq('store_id', storeId).eq('source', 'shopify_webhook').eq('payment_status', 'paid'), 'orders(paid)')
+}
+
+type QueueRowWithTemplate = ExistingBroadcastQueueRow & { template_name: string }
+
+async function loadExistingBroadcastRows(db: SupabaseLike, storeId: string, templateName: string): Promise<QueueRowWithTemplate[]> {
+  return fetchAll<QueueRowWithTemplate>(() => db.from('wa_template_queue').select('id, order_id, status, template_name')
+    .eq('store_id', storeId).eq('template_name', templateName), 'wa_template_queue(broadcast)')
 }
 
 // ── Audiencia (única implementación: preview, create y revalidación) ─────────
 
-export type BroadcastPreviewExcludedReason = BroadcastExcludedReason | 'not_found'
+export type BroadcastPreviewExcludedReason =
+  | BroadcastExcludedReason
+  | 'not_found'
+  | 'recent_purchase'               // recompra: pagó dentro de la ventana
+  | 'active_order_in_progress'      // recompra: tiene un pedido activo en curso
+  | 'repurchase_already_contacted'  // recompra: ya contactado por esta compra
+  | 'route_filter_mismatch'         // confirmed_unpaid: fuera del sub-filtro de ruta elegido
+
+// requires_template_variables: el copy real del pedido no calza con el texto
+// fijo del template aprobado (2×1 + cepillo GRATIS + envío gratis). Sprint C
+// debe registrar variables en el template o excluir ese pedido — nunca enviar
+// el texto fijo a un pedido incompatible.
+export type BroadcastPreviewWarning = BroadcastWarning | 'media_asset_pending' | 'requires_template_variables'
+
+export interface BroadcastPreviewMedia {
+  type:      'image'
+  asset_key: BroadcastMediaAssetKey
+  label:     string
+  status:    'approved' | 'pending_asset'
+}
 
 export interface BroadcastPreview {
-  template_name:            typeof SD_BROADCAST_TEMPLATE_NAME
+  campaign:                 BroadcastCampaign
+  template_name:            string
   eligibility_rule_version: string
+  buttons:                  [string, string]
+  can_create_draft:         boolean
   resolved_at:              string
   candidate_count:          number
   eligible_count:           number
@@ -216,7 +258,8 @@ export interface BroadcastPreview {
   excluded_by_reason:       Partial<Record<BroadcastPreviewExcludedReason, number>>
   eligible: Array<{
     order_id: string; order_number: string | null; customer_name: string | null
-    phone_normalized: string; warnings: BroadcastWarning[]; message_preview: string
+    phone_normalized: string; warnings: BroadcastPreviewWarning[]; message_preview: string
+    offer_kind: OfferKind | 'repurchase_standard'; media: BroadcastPreviewMedia
   }>
   excluded: Array<{
     order_id: string; order_number: string | null; customer_name: string | null
@@ -227,46 +270,44 @@ export interface BroadcastPreview {
   revalidation_required_before_send: boolean
 }
 
-export async function computeBroadcastAudience(
-  db: SupabaseLike,
-  ctx: BroadcastAdminContext,
-  selection: BroadcastSelection,
-  resolvedAt: string,
-): Promise<BroadcastPreview> {
-  const [{ orders, not_found_ids }, pool, existing] = await Promise.all([
-    resolveBroadcastCandidates(db, ctx.storeId, selection, resolvedAt),
-    loadActivePool(db, ctx.storeId),
-    loadExistingBroadcastRows(db, ctx.storeId),
-  ])
+type EligibleItem = BroadcastPreview['eligible'][number]
+type ExcludedItem = BroadcastPreview['excluded'][number]
 
-  const cls = classifyBroadcastCandidates(orders, existing, pool)
-  const byId = new Map(orders.map(o => [o.id, o]))
+function mediaOf(asset_key: BroadcastMediaAssetKey): BroadcastPreviewMedia {
+  const info = MEDIA_ASSETS[asset_key]
+  return { type: 'image', asset_key, label: info.label, status: info.status }
+}
 
-  const excluded_by_reason: Partial<Record<BroadcastPreviewExcludedReason, number>> = { ...cls.excluded_by_reason }
-  if (not_found_ids.length) excluded_by_reason.not_found = not_found_ids.length
+function mediaFor(o: BroadcastOrderRow): { offer_kind: OfferKind; media: BroadcastPreviewMedia; fitsFixedTemplate: boolean } {
+  const offer = resolveCommercialOffer(o.product_summary, o.cod_amount)
+  // Texto fijo aprobado: "Tu tratamiento 2×1… cepillo antibacterial GRATIS… Envío gratis".
+  const fitsFixedTemplate = offer.kind === 'personal' && offer.brushMentioned && offer.brushFree
+    && (offer.brushCount === null || offer.brushCount === 1) && !offer.shippingCharged
+  return { offer_kind: offer.kind, media: mediaOf(offer.media.asset_key), fitsFixedTemplate }
+}
 
-  const eligibleAll = cls.eligible.map(e => {
-    const o = byId.get(e.order_id)!
-    return {
-      order_id: e.order_id, order_number: o.order_number, customer_name: o.customer_name,
-      phone_normalized: e.phone_normalized, warnings: e.warnings,
-      message_preview: renderBroadcastPreview(o),
-    }
-  })
-  const excludedAll = [
-    ...cls.excluded.map(x => {
-      const o = byId.get(x.order_id)
-      return { order_id: x.order_id, order_number: o?.order_number ?? null, customer_name: o?.customer_name ?? null,
-               excluded_reason: x.excluded_reason as BroadcastPreviewExcludedReason }
-    }),
-    ...not_found_ids.map(id => ({ order_id: id, order_number: null, customer_name: null, excluded_reason: 'not_found' as const })),
-  ]
+function routeMatches(c: BroadcastCampaign, o: BroadcastOrderRow): boolean {
+  if (c.type !== 'coordination' || c.segment !== 'confirmed_unpaid') return true
+  const r = c.route ?? 'all'
+  if (r === 'in_route')     return o.normalized_status === 'en_reparto'
+  if (r === 'not_in_route') return o.normalized_status !== 'en_reparto'
+  return true
+}
 
+function packPreview(
+  campaign: BroadcastCampaign, resolvedAt: string, candidate_count: number,
+  eligibleAll: EligibleItem[], excludedAll: ExcludedItem[],
+): BroadcastPreview {
+  const excluded_by_reason: Partial<Record<BroadcastPreviewExcludedReason, number>> = {}
+  for (const x of excludedAll) excluded_by_reason[x.excluded_reason] = (excluded_by_reason[x.excluded_reason] ?? 0) + 1
   return {
-    template_name:            SD_BROADCAST_TEMPLATE_NAME,
-    eligibility_rule_version: SD_BROADCAST_ELIGIBILITY_RULE_VERSION,
+    campaign,
+    template_name:            campaignTemplateName(campaign),
+    eligibility_rule_version: campaignRuleVersion(campaign),
+    buttons:                  campaignButtons(campaign),
+    can_create_draft:         campaignCanCreateDraft(campaign),
     resolved_at:              resolvedAt,
-    candidate_count:          orders.length + not_found_ids.length,
+    candidate_count,
     eligible_count:           eligibleAll.length,
     excluded_count:           excludedAll.length,
     excluded_by_reason,
@@ -276,6 +317,142 @@ export async function computeBroadcastAudience(
     excluded_truncated:       excludedAll.length > PREVIEW_LIST_LIMIT,
     revalidation_required_before_send: DRAFT_REQUIRES_REVALIDATION_BEFORE_SEND,
   }
+}
+
+function withMediaWarning(w: BroadcastPreviewWarning[], m: BroadcastPreviewMedia): BroadcastPreviewWarning[] {
+  return m.status === 'pending_asset' ? [...w, 'media_asset_pending'] : w
+}
+
+async function computeCoordinationAudience(
+  db: SupabaseLike, ctx: BroadcastAdminContext, selection: BroadcastSelection & { campaign: { type: 'coordination' } }, resolvedAt: string,
+): Promise<BroadcastPreview> {
+  const campaign = selection.campaign
+  const [{ orders, not_found_ids }, pool, existing] = await Promise.all([
+    resolveBroadcastCandidates(db, ctx.storeId, selection, resolvedAt),
+    loadActivePool(db, ctx.storeId),
+    loadExistingBroadcastRows(db, ctx.storeId, campaignTemplateName(campaign)),
+  ])
+
+  const cls = classifyBroadcastCandidates(orders, existing, pool, { segment: campaign.segment, crossSegmentAmbiguity: true })
+  const byId = new Map(orders.map(o => [o.id, o]))
+
+  // Sub-filtro de ruta (confirmed_unpaid): se aplica DESPUÉS de la
+  // elegibilidad y de la ambigüedad — nunca relaja reglas, solo acota.
+  const routeOut = cls.eligible.filter(e => !routeMatches(campaign, byId.get(e.order_id)!))
+  const eligibleAll: EligibleItem[] = cls.eligible.filter(e => routeMatches(campaign, byId.get(e.order_id)!)).map(e => {
+    const o = byId.get(e.order_id)!
+    const { offer_kind, media, fitsFixedTemplate } = mediaFor(o)
+    const warnings = withMediaWarning(e.warnings, media)
+    return {
+      order_id: e.order_id, order_number: o.order_number, customer_name: o.customer_name,
+      phone_normalized: e.phone_normalized,
+      warnings: fitsFixedTemplate ? warnings : [...warnings, 'requires_template_variables'],
+      message_preview: renderCoordinationMessage(o), offer_kind, media,
+    }
+  })
+  const excludedAll: ExcludedItem[] = [
+    ...routeOut.map(e => {
+      const o = byId.get(e.order_id)!
+      return { order_id: e.order_id, order_number: o.order_number, customer_name: o.customer_name, excluded_reason: 'route_filter_mismatch' as const }
+    }),
+    ...cls.excluded.map(x => {
+      const o = byId.get(x.order_id)
+      return { order_id: x.order_id, order_number: o?.order_number ?? null, customer_name: o?.customer_name ?? null,
+               excluded_reason: x.excluded_reason as BroadcastPreviewExcludedReason }
+    }),
+    ...not_found_ids.map(id => ({ order_id: id, order_number: null, customer_name: null, excluded_reason: 'not_found' as const })),
+  ]
+  return packPreview(campaign, resolvedAt, orders.length + not_found_ids.length, eligibleAll, excludedAll)
+}
+
+/** Compra completada = Pagado (payment_status='paid'), no devuelta, Shopify real. */
+export function isCompletedPurchase(o: BroadcastOrderRow): boolean {
+  return o.payment_status === 'paid' && !!o.paid_at && o.normalized_status !== 'returned'
+    && o.source === 'shopify_webhook' && !!o.shopify_order_id && o.is_test !== true && o.archived_at == null
+}
+
+/**
+ * RECOMPRA — unidad = cliente (teléfono normalizado). Frontera congelada:
+ *   - candidatos: clientes con ≥1 compra completada que ya existía y estaba
+ *     pagada en resolved_at (created_at <= T0 y paid_at <= T0);
+ *   - ventana anclada a T0: la última compra debe ser <= T0 − window_days.
+ *     Revalidar mañana NO hace cruzar la ventana a nadie nuevo.
+ *   - el estado ACTUAL solo puede excluir: una compra nueva posterior →
+ *     recent_purchase; un pedido activo en curso → active_order_in_progress.
+ * Un pedido cancelled NO veta al cliente (solo cuentan compras completadas y
+ * pedidos activos). Pedido ancla = última compra completada (identidad para
+ * UNIQUE(order_id, template_name) en Sprint C). El ancla NO define la oferta:
+ * B.2.1 usa la oferta estándar REPURCHASE_OFFER para todos.
+ */
+async function computeRepurchaseAudience(
+  db: SupabaseLike, ctx: BroadcastAdminContext, campaign: BroadcastCampaign & { type: 'repurchase' }, resolvedAt: string,
+): Promise<BroadcastPreview> {
+  const [paid, pool, existing] = await Promise.all([
+    loadPaidOrders(db, ctx.storeId),
+    loadActivePool(db, ctx.storeId),
+    loadExistingBroadcastRows(db, ctx.storeId, campaignTemplateName(campaign)),
+  ])
+  const t0 = Date.parse(resolvedAt)
+  const windowLimit = t0 - campaign.window_days * 24 * 60 * 60 * 1000
+  const contactedAnchors = new Set(existing.map(r => r.order_id))
+  const activePhones = new Set(pool.map(activeCoordinationPhone).filter((p): p is string => !!p))
+
+  const completed = paid.filter(isCompletedPurchase)
+  const atT0 = completed.filter(o => existedAt(o, resolvedAt) && Date.parse(o.paid_at!) <= t0)
+
+  const byPhone = new Map<string, BroadcastOrderRow[]>()   // todas las compras completadas actuales
+  for (const o of completed) {
+    const phone = normalizeBroadcastPhone(o.customer_phone)
+    if (!phone) continue
+    byPhone.set(phone, [...(byPhone.get(phone) ?? []), o])
+  }
+
+  const eligibleAll: EligibleItem[] = []
+  const excludedAll: ExcludedItem[] = []
+  const candidatePhones = new Set<string>()
+  let candidates = 0
+
+  for (const o of atT0) {
+    const phone = normalizeBroadcastPhone(o.customer_phone)
+    if (!phone) {
+      candidates++
+      excludedAll.push({ order_id: o.id, order_number: o.order_number, customer_name: o.customer_name, excluded_reason: 'invalid_phone' })
+      continue
+    }
+    if (candidatePhones.has(phone)) continue
+    candidatePhones.add(phone)
+    candidates++
+
+    const anchor = [...byPhone.get(phone)!].sort((a, b) => Date.parse(b.paid_at!) - Date.parse(a.paid_at!))[0]
+    const ex = (reason: BroadcastPreviewExcludedReason) =>
+      excludedAll.push({ order_id: anchor.id, order_number: anchor.order_number, customer_name: anchor.customer_name, excluded_reason: reason })
+
+    if (!isSantoDomingoOrder(anchor.city, anchor.province, anchor.customer_address)) { ex('not_santo_domingo'); continue }
+    if (Date.parse(anchor.paid_at!) > windowLimit) { ex('recent_purchase'); continue }
+    if (activePhones.has(phone)) { ex('active_order_in_progress'); continue }
+    if (contactedAnchors.has(anchor.id)) { ex('repurchase_already_contacted'); continue }
+
+    // Oferta estándar de recompra (no la compra histórica) + su imagen propia.
+    const media = mediaOf('luma_repurchase')
+    eligibleAll.push({
+      order_id: anchor.id, order_number: anchor.order_number, customer_name: anchor.customer_name,
+      phone_normalized: phone, warnings: withMediaWarning([], media),
+      message_preview: renderRepurchaseMessage(anchor), offer_kind: 'repurchase_standard', media,
+    })
+  }
+  return packPreview(campaign, resolvedAt, candidates, eligibleAll, excludedAll)
+}
+
+export async function computeBroadcastAudience(
+  db: SupabaseLike,
+  ctx: BroadcastAdminContext,
+  selection: BroadcastSelection,
+  resolvedAt: string,
+): Promise<BroadcastPreview> {
+  if (selection.campaign.type === 'repurchase') {
+    return computeRepurchaseAudience(db, ctx, selection.campaign, resolvedAt)
+  }
+  return computeCoordinationAudience(db, ctx, selection as BroadcastSelection & { campaign: { type: 'coordination' } }, resolvedAt)
 }
 
 // ── Draft ────────────────────────────────────────────────────────────────────
@@ -299,8 +476,8 @@ export type CreateDraftResult =
  */
 export function buildSelectionFilter(selection: BroadcastSelection, resolvedAt: string) {
   return selection.mode === 'selected_ids'
-    ? { mode: 'selected_ids', order_ids: selection.order_ids, resolved_at: resolvedAt }
-    : { mode: 'filtered', filters: selection.filters, resolved_at: resolvedAt }
+    ? { mode: 'selected_ids', order_ids: selection.order_ids, campaign: selection.campaign, resolved_at: resolvedAt }
+    : { mode: 'filtered', filters: selection.filters, campaign: selection.campaign, resolved_at: resolvedAt }
 }
 
 /** Reconstruye la selección + cutoff guardados en un draft (validados de nuevo). */
@@ -309,10 +486,11 @@ export function audienceFromDraft(selectionFilter: Record<string, unknown>): { s
   if (typeof resolvedAt !== 'string' || Number.isNaN(Date.parse(resolvedAt))) {
     throw new Error('draft sin resolved_at válido')
   }
+  // Drafts B/B.1 no tienen campaign → coordinación/pendientes.
   const parsed = parseBroadcastSelection(
     selectionFilter.mode === 'selected_ids'
-      ? { mode: 'selected_ids', order_ids: selectionFilter.order_ids }
-      : { mode: selectionFilter.mode, filters: selectionFilter.filters },
+      ? { mode: 'selected_ids', order_ids: selectionFilter.order_ids, campaign: selectionFilter.campaign }
+      : { mode: selectionFilter.mode, filters: selectionFilter.filters, campaign: selectionFilter.campaign },
   )
   if (!parsed.ok) throw new Error(`selection_filter inválido: ${parsed.error}`)
   return { selection: parsed.selection, resolvedAt }
@@ -357,6 +535,12 @@ export async function createBroadcastDraft(
   selection: BroadcastSelection,
   requestKey: string,
 ): Promise<CreateDraftResult> {
+  // Recompra: solo preview en B.2 — los CHECK de 064 aún no aceptan
+  // 'sd_broadcast_repurchase' (propuesta migración 066, Sprint C).
+  if (!campaignCanCreateDraft(selection.campaign)) {
+    return { ok: false, status: 422, error: 'Recompra: solo preview por ahora — crear borrador requiere la migración 066 (Sprint C)' }
+  }
+
   const prior = await findDraftByRequestKey(db, ctx.storeId, requestKey)
   if (prior) return replayOf(prior, ctx)
 
@@ -371,10 +555,10 @@ export async function createBroadcastDraft(
     store_id:                 ctx.storeId,
     created_by:               ctx.userId,
     request_key:              requestKey,
-    template_name:            SD_BROADCAST_TEMPLATE_NAME,
+    template_name:            campaignTemplateName(selection.campaign),
     status:                   'draft',
     selection_filter:         buildSelectionFilter(selection, resolvedAt),
-    eligibility_rule_version: SD_BROADCAST_ELIGIBILITY_RULE_VERSION,
+    eligibility_rule_version: campaignRuleVersion(selection.campaign),
     candidate_count:          audience.candidate_count,
     eligible_count:           audience.eligible_count,
     excluded_count:           audience.excluded_count,

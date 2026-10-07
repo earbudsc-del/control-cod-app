@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 import { Spinner } from '@/components/ui/spinner'
 import { broadcastReasonLabel, BROADCAST_STATUS_LABELS } from '@/lib/broadcast/labels'
+import { DEFAULT_CAMPAIGN, campaignLabel, type BroadcastCampaign } from '@/lib/broadcast/campaign'
 
 interface BroadcastRow {
   id: string
@@ -17,7 +18,7 @@ interface BroadcastRow {
   eligible_count: number
   excluded_count: number
   excluded_by_reason: Record<string, number>
-  selection_filter: { mode?: string; order_ids?: string[]; filters?: Record<string, unknown>; resolved_at?: string }
+  selection_filter: { mode?: string; order_ids?: string[]; filters?: Record<string, unknown>; campaign?: unknown; resolved_at?: string }
   eligibility_rule_version: string
   creator: { full_name: string | null } | null
 }
@@ -29,6 +30,12 @@ function fmt(iso: string): string {
 }
 
 function selectionSummary(sf: BroadcastRow['selection_filter']): string {
+  // Drafts B/B.1 no tienen campaign → coordinación/pendientes.
+  const camp = campaignLabel((sf.campaign as BroadcastCampaign | undefined) ?? DEFAULT_CAMPAIGN)
+  return `${camp} — ${audienceSummary(sf)}`
+}
+
+function audienceSummary(sf: BroadcastRow['selection_filter']): string {
   if (sf.mode === 'selected_ids') return `Selección manual · ${sf.order_ids?.length ?? 0} pedidos`
   if (sf.mode === 'filtered') {
     const f = sf.filters ?? {}
