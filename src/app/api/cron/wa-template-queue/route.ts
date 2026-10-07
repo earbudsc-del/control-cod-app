@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
-import { SD_LOCATION_REQUEST_TEMPLATE_NAME } from '@/lib/deliveries/sd-location-request'
 import { isWaAutomationsEnabled } from '@/lib/config/wa-automations'
+import { fetchAutomationJobs, getAutomationTemplate } from '@/lib/wa-queue/automation-queue'
 
 type ServiceClient = Awaited<ReturnType<typeof createServiceClient>>
 
@@ -13,6 +13,7 @@ type Job = {
   phone_normalized: string
   created_at: string
   attempt_count: number
+  broadcast_id: string | null
 }
 
 function makePreview(text: string): string {
@@ -38,13 +39,9 @@ export async function GET(request: Request) {
 
   const supabase = await createServiceClient()
 
-  const { data: jobs, error: fetchError } = await supabase
-    .from('wa_template_queue')
-    .select('id, store_id, order_id, template_name, phone_normalized, created_at, attempt_count')
-    .eq('status', 'pending')
-    .lte('scheduled_at', new Date().toISOString())
-    .order('scheduled_at', { ascending: true })
-    .limit(50)
+  // Solo filas de automation: broadcast_id IS NULL + allowlist de templates.
+  // Ver src/lib/wa-queue/automation-queue.ts (aislamiento de Broadcast).
+  const { data: jobs, error: fetchError } = await fetchAutomationJobs(supabase, new Date().toISOString())
 
   if (fetchError) {
     console.error('[cron/wa-template-queue] fetch error', fetchError)
@@ -52,18 +49,19 @@ export async function GET(request: Request) {
   }
 
   if (!jobs || jobs.length === 0) {
-    return NextResponse.json({ processed: 0, sent: 0, skipped: 0, failed: 0 })
+    return NextResponse.json({ processed: 0, sent: 0, skipped: 0, failed: 0, ignored: 0 })
   }
 
-  let sent = 0, skipped = 0, failed = 0
+  let sent = 0, skipped = 0, failed = 0, ignored = 0
   for (const job of jobs) {
     const result = await processJob(supabase, job as Job)
     if (result === 'sent') sent++
     else if (result === 'skipped') skipped++
     else if (result === 'failed') failed++
+    else if (result === 'ignored') ignored++
   }
 
-  return NextResponse.json({ processed: jobs.length, sent, skipped, failed })
+  return NextResponse.json({ processed: jobs.length, sent, skipped, failed, ignored })
 }
 
 // Dispatcher — reclama el job atómicamente (evita doble procesamiento entre
@@ -75,7 +73,20 @@ export async function GET(request: Request) {
 async function processJob(
   supabase: ServiceClient,
   job: Job,
-): Promise<'sent' | 'skipped' | 'failed' | 'unclaimed'> {
+): Promise<'sent' | 'skipped' | 'failed' | 'unclaimed' | 'ignored'> {
+  // Barrera de dispatch (la query ya filtra; esto protege ante un cambio
+  // futuro de la query). Fila de Broadcast o template fuera de la allowlist:
+  // NO se reclama, NO se envía, NO se cambia su estado — no es de este
+  // processor. Nunca hay fallback a order_confirmation_cod.
+  const template = getAutomationTemplate(job.template_name)
+  if (job.broadcast_id !== null || !template) {
+    console.warn(
+      `[WA_AUTOMATION_IGNORED] job=${job.id} template=${job.template_name} ` +
+      `reason=${job.broadcast_id !== null ? 'broadcast_row' : 'template_not_in_automation_allowlist'}`,
+    )
+    return 'ignored'
+  }
+
   const nowStr = new Date().toISOString()
 
   const { data: claimed } = await supabase
@@ -92,10 +103,11 @@ async function processJob(
 
   if (!claimed) return 'unclaimed'
 
-  if (job.template_name === SD_LOCATION_REQUEST_TEMPLATE_NAME) {
-    return runSdLocationRequestJob(supabase, job, nowStr)
+  // Dispatch explícito por allowlist — exhaustivo, sin default.
+  switch (template) {
+    case 'order_confirmation_cod': return runOrderConfirmationJob(supabase, job, nowStr)
+    case 'sd_location_request':    return runSdLocationRequestJob(supabase, job, nowStr)
   }
-  return runOrderConfirmationJob(supabase, job, nowStr)
 }
 
 // ── Template histórico: order_confirmation_cod (FASE 6A, sin cambios de comportamiento) ──
