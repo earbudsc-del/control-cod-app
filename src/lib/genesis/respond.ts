@@ -14,6 +14,8 @@
 // comportamiento comercial de Génesis no cambian.
 //
 // Condiciones para responder (todas deben cumplirse):
+//   - GENESIS_ENABLED = 'true' (Sprint G2.0) — chequeado al inicio y de
+//     nuevo, junto con ai_agent_config.is_active/mode, justo antes de Meta
 //   - provider = 'openai' (gemini queda como TODO controlado) — chequeo
 //     previo al claim, claim_genesis_run no conoce el proveedor
 //   - api_key_ref configurado y la env var correspondiente existe — idem
@@ -46,6 +48,7 @@ import { derivePlanConstraints } from './decision-plan'
 import { buildPlannerContext, generateDecisionPlan } from './planner'
 import { validateResponse } from './response-validator'
 import { detectHardEscalationSignal, detectInboundAdverseReactionSignal } from './hard-escalation'
+import { isGenesisEnabled } from '@/lib/config/genesis'
 
 type ServiceClient = Awaited<ReturnType<typeof createServiceClient>>
 
@@ -515,6 +518,7 @@ async function finishRun(
     meta_message_id:     string
     outbound_message_id: string
     failure_code:        string
+    failure_detail:      Record<string, unknown>
   }> = {},
 ): Promise<void> {
   const { data, error } = await supabase
@@ -525,7 +529,7 @@ async function finishRun(
       p_meta_message_id:     opts.meta_message_id ?? null,
       p_outbound_message_id: opts.outbound_message_id ?? null,
       p_failure_code:        opts.failure_code ?? null,
-      p_failure_detail:      null,
+      p_failure_detail:      opts.failure_detail ?? null,
     })
     .single<FinishGenesisRunRow>()
 
@@ -538,6 +542,35 @@ async function finishRun(
   // porque la llamada no lanzó. Se loguea siempre el valor REAL devuelto.
   const matched = data?.outcome === outcome
   console.log(`[genesis] finish_genesis_run → ${data?.outcome ?? '(sin resultado)'}${matched ? '' : ' ⚠ distinto del solicitado (' + outcome + ')'} | run: ${runId}`)
+}
+
+// Sprint G2.0 — puerta de activación previa al envío por Meta.
+// begin_genesis_send() (migración 058) re-verifica el estado de la
+// CONVERSACIÓN pero no ai_agent_config — sin esta relectura, apagar
+// is_active mientras OpenAI genera no impediría el envío de un run ya
+// reclamado. Exige ambos: GENESIS_ENABLED='true' y la configuración de la
+// tienda activa (is_active=true, mode='auto' — mismo criterio que
+// claim_genesis_run). Fail-closed: un error de lectura también bloquea.
+type SendGateResult =
+  | { ok: true }
+  | { ok: false; reason: 'genesis_flag_off' | 'config_inactive' | 'config_read_error'; detail: string }
+
+async function checkGenesisSendGate(supabase: ServiceClient, storeId: string): Promise<SendGateResult> {
+  if (!isGenesisEnabled()) {
+    return { ok: false, reason: 'genesis_flag_off', detail: "GENESIS_ENABLED distinto de 'true'" }
+  }
+  const { data, error } = await supabase
+    .from('ai_agent_config')
+    .select('is_active, mode')
+    .eq('store_id', storeId)
+    .maybeSingle()
+  if (error) {
+    return { ok: false, reason: 'config_read_error', detail: error.message }
+  }
+  if (data?.is_active !== true || data?.mode !== 'auto') {
+    return { ok: false, reason: 'config_inactive', detail: `is_active=${data?.is_active ?? 'null'} mode=${data?.mode ?? 'null'}` }
+  }
+  return { ok: true }
 }
 
 // Punto de entrada. Recibe el cliente de servicio ya creado por el webhook
@@ -560,6 +593,15 @@ export async function maybeGenesisRespond(
   const sendTextFn = deps.sendWhatsAppText ?? sendWhatsAppTextReal
 
   try {
+    // ── 0. Kill switch global (Sprint G2.0) ─────────────────────────────────
+    // Antes de cualquier lectura o claim: sin GENESIS_ENABLED='true' no se
+    // crea ningún run ni se toca la conversación. Independiente de
+    // WA_AUTOMATIONS_ENABLED.
+    if (!isGenesisEnabled()) {
+      console.log("[genesis] abortado — GENESIS_ENABLED distinto de 'true' | conv:", conversationId)
+      return
+    }
+
     console.log('[genesis] inicio — conversationId:', conversationId, '| storeId:', storeId, '| inboundMessageId:', inboundMessageId)
 
     // ── 1. Pre-chequeos existentes (conversación, config, provider, api_key, waId) ──
@@ -976,6 +1018,24 @@ export async function maybeGenesisRespond(
       // begin_genesis_send lo rechazó de todas formas — lock realmente
       // perdido/expirado. Lo cerramos nosotros.
       await finishRun(supabase, runId, lockToken, 'failed_terminal', { failure_code: 'lock_lost' })
+      return
+    }
+
+    // ── 7b. Puerta de activación (Sprint G2.0) — última relectura antes de Meta ──
+    // Cubre la carrera "Génesis se apagó mientras este run generaba": el run
+    // ya está en 'sending' (begin_genesis_send lo aprobó), así que se cierra
+    // explícitamente como failed_terminal — libera el lock de la
+    // conversación y nunca se reclama para reintento. failure_code queda
+    // NULL (el CHECK de la migración 056 no tiene un valor para esto); el
+    // motivo viaja en failure_detail.
+    const gate = await checkGenesisSendGate(supabase, storeId)
+    if (!gate.ok) {
+      console.log('[genesis] envío bloqueado por puerta de activación —', gate.reason, '|', gate.detail, '| run:', runId)
+      await finishRun(
+        supabase, runId, lockToken,
+        gate.reason === 'config_read_error' ? 'failed_retryable' : 'failed_terminal',
+        { failure_detail: { reason: gate.reason, detail: gate.detail } },
+      )
       return
     }
 

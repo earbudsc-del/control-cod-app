@@ -17,6 +17,7 @@
     "test:genesis-decision-plan": "tsx scripts/test-genesis-decision-plan.ts",
     "test:genesis-hard-escalation": "tsx scripts/test-genesis-hard-escalation.ts",
     "test:genesis-simulator-isolation": "tsx scripts/test-genesis-simulator-isolation.ts",
+    "test:genesis-kill-switch": "tsx scripts/test-genesis-kill-switch.ts",
     "sync:genesis-luma-knowledge": "tsx scripts/sync-genesis-luma-knowledge.ts",
     "audit:wa-template-queue": "tsx scripts/audit-wa-template-queue.ts"
   },
