@@ -6,6 +6,11 @@ import { isWaBroadcastEnabled } from '@/lib/config/wa-broadcast'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// Válido en todos los planes de Vercel. La preparación de filas se corta
+// antes (LAUNCH_TIME_BUDGET_MS) y responde 202 para continuar con la misma
+// clave: no depende de que esta duración alcance para lotes grandes.
+export const maxDuration = 60
+
 /**
  * POST /api/admin/broadcasts/[id]/launch — encola la campaña (draft → queued).
  *
@@ -16,6 +21,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *   el lote recalculado (si cambió: 409 + current_count).
  * - Idempotente por launch_request_key. No envía nada por sí mismo: el
  *   envío lo hace el processor (/api/cron/wa-broadcast-queue).
+ * - 202 { partial: true, prepared, target }: preparación incompleta (la
+ *   campaña sigue en borrador, nada se envía). Repetir con la MISMA clave.
  */
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -37,6 +44,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const r = await launchBroadcast(await createServiceClient(), auth.ctx,
       { broadcastId: id, launchRequestKey: key, sendLimit, confirmCount }, isWaBroadcastEnabled())
     if (!r.ok) return NextResponse.json({ error: r.error, current_count: r.current_count }, { status: r.status })
+    if (r.partial) {
+      console.log(`[broadcast] launch partial broadcast=${r.broadcast_id} prepared=${r.prepared}/${r.target} by=${auth.ctx.userId}`)
+      return NextResponse.json(r, { status: 202 })
+    }
     console.log(`[broadcast] launch broadcast=${r.broadcast_id} queued=${r.queued} replay=${r.replay} by=${auth.ctx.userId}`)
     return NextResponse.json(r, { status: r.replay ? 200 : 201 })
   } catch (err) {

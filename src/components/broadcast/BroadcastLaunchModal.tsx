@@ -5,6 +5,10 @@
 // (send_limit), escribir la cantidad exacta y marcar la advertencia. La
 // clave de lanzamiento es fija por apertura del modal (doble clic / recarga
 // → el servidor devuelve el mismo lanzamiento).
+// C.1.4: con WA_BROADCAST_ENABLED apagado el modal abre en SOLO LECTURA
+// (vista previa del lote, sin controles de envío; el servidor además
+// responde 403). Si la preparación responde 202 (parcial), se repite
+// automáticamente con la MISMA clave hasta encolar.
 
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
@@ -15,6 +19,8 @@ import { PERSONAL_BUNDLE_PRICE } from '@/lib/broadcast/catalog'
 import { formatCodAmount } from '@/lib/broadcast/message-preview'
 
 type Preview = LaunchPreview & { broadcast_enabled: boolean }
+
+const MAX_PREP_ROUNDS = 10
 
 export function BroadcastLaunchModal({ broadcastId, onClose, onLaunched }: {
   broadcastId: string; onClose: () => void; onLaunched: () => void
@@ -27,6 +33,7 @@ export function BroadcastLaunchModal({ broadcastId, onClose, onLaunched }: {
   const [typed, setTyped] = useState('')
   const [ack, setAck] = useState(false)
   const [launching, setLaunching] = useState(false)
+  const [progress, setProgress] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -49,15 +56,20 @@ export function BroadcastLaunchModal({ broadcastId, onClose, onLaunched }: {
 
   async function launch() {
     if (!canLaunch) return
-    setLaunching(true); setError(null)
+    setLaunching(true); setError(null); setProgress(null)
     try {
-      const r = await fetch(`/api/admin/broadcasts/${broadcastId}/launch`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ launch_request_key: launchKey, send_limit: limit, confirm_count: count, acknowledge_real_messages: true }),
-      })
-      const body = await r.json().catch(() => ({}))
-      if (!r.ok) { setError(body.error ?? `Error ${r.status}`); return }
-      onLaunched()
+      for (let round = 0; round < MAX_PREP_ROUNDS; round++) {
+        const r = await fetch(`/api/admin/broadcasts/${broadcastId}/launch`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ launch_request_key: launchKey, send_limit: limit, confirm_count: count, acknowledge_real_messages: true }),
+        })
+        const body = await r.json().catch(() => ({}))
+        if (!r.ok) { setError(body.error ?? `Error ${r.status}`); return }
+        if (r.status !== 202) { onLaunched(); return }
+        // Preparación parcial (nada se envía aún): continuar con la misma clave.
+        setProgress(`Preparando destinatarios… ${body.prepared ?? 0} de ${body.target ?? count}`)
+      }
+      setError('La preparación no terminó — vuelve a pulsar: continúa donde quedó (misma clave)')
     } catch {
       setError('Error de red — vuelve a pulsar: el lanzamiento es idempotente')
     } finally {
@@ -83,6 +95,7 @@ export function BroadcastLaunchModal({ broadcastId, onClose, onLaunched }: {
           </label>
 
           {loading && <div className="flex justify-center py-6"><Spinner className="h-5 w-5 text-teal-600" /></div>}
+          {progress && <p className="rounded-lg bg-teal-50 px-3 py-2 text-teal-800">{progress}</p>}
           {error && <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-red-700"><AlertTriangle className="h-4 w-4" />{error}</div>}
 
           {preview && !loading && (
@@ -116,9 +129,17 @@ export function BroadcastLaunchModal({ broadcastId, onClose, onLaunched }: {
                 </details>
               )}
 
-              {!preview.broadcast_enabled && <p className="rounded-lg bg-amber-50 px-3 py-2 text-amber-800">Broadcast está desactivado (WA_BROADCAST_ENABLED). No se puede lanzar.</p>}
+              {preview.preparation === 'in_progress' && (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-amber-800">Hay otra preparación de este envío en curso ({preview.prepared_count} destinatarios preparados). Espera unos minutos antes de lanzar.</p>
+              )}
+              {preview.preparation === 'interrupted' && (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-amber-800">Un intento anterior quedó a medias: {preview.prepared_count} destinatarios ya preparados (incluidos primero en este lote). Nada se ha enviado.</p>
+              )}
+              {!preview.broadcast_enabled && <p className="rounded-lg bg-amber-50 px-3 py-2 text-amber-800">Vista previa de solo lectura — Broadcast está desactivado (WA_BROADCAST_ENABLED). No se puede lanzar.</p>}
               {!preview.template_ready && <p className="rounded-lg bg-amber-50 px-3 py-2 text-amber-800">Template sin configurar: {preview.template_missing.join(', ')}</p>}
+              {preview.template_ready && <p className="text-xs text-teal-700">Template configurado (imagen del encabezado presente).</p>}
 
+              {preview.broadcast_enabled && (
               <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-red-800 space-y-2">
                 <p className="font-semibold">Se enviarán {count} mensajes REALES de WhatsApp a clientes. No se pueden retirar una vez aceptados por Meta.</p>
                 <label className="flex items-center gap-2"><input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} /> Entiendo y el equipo puede atender las respuestas.</label>
@@ -126,15 +147,18 @@ export function BroadcastLaunchModal({ broadcastId, onClose, onLaunched }: {
                   <input value={typed} onChange={e => setTyped(e.target.value)} className="w-20 rounded-md border border-red-300 px-2 py-1" />
                 </label>
               </div>
+              )}
             </>
           )}
         </div>
         <div className="sticky bottom-0 flex justify-end gap-2 border-t border-gray-100 bg-white px-5 py-3">
-          <button onClick={onClose} disabled={launching} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700">Cancelar</button>
-          <button onClick={launch} disabled={!canLaunch}
-            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-40">
-            {launching ? 'Encolando…' : `Enviar a ${count}`}
-          </button>
+          <button onClick={onClose} disabled={launching} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700">{preview?.broadcast_enabled ? 'Cancelar' : 'Cerrar'}</button>
+          {preview?.broadcast_enabled && (
+            <button onClick={launch} disabled={!canLaunch}
+              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-40">
+              {launching ? 'Encolando…' : `Enviar a ${count}`}
+            </button>
+          )}
         </div>
       </div>
     </div>

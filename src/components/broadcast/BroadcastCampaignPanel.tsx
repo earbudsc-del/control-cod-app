@@ -5,7 +5,7 @@
 // entregado; "Quiere confirmar" (intención) ≠ confirmación atribuible.
 
 import { useCallback, useEffect, useState } from 'react'
-import { Pause, Play, Send } from 'lucide-react'
+import { Ban, Eye, Pause, Play, Send } from 'lucide-react'
 import { Spinner } from '@/components/ui/spinner'
 import { BROADCAST_INTENT_LABELS, BROADCAST_QUEUE_STATUS_LABELS, BROADCAST_STATUS_LABELS } from '@/lib/broadcast/labels'
 import type { BroadcastMetrics } from '@/lib/broadcast/metrics'
@@ -35,15 +35,23 @@ export function BroadcastCampaignPanel({ broadcastId, onChanged }: { broadcastId
 
   useEffect(() => { void load() }, [load])
 
-  async function control(action: 'pause' | 'resume') {
+  async function control(action: 'pause' | 'resume' | 'cancel') {
     if (action === 'resume' && !window.confirm('¿Reanudar el envío de mensajes REALES de esta campaña?')) return
+    if (action === 'cancel' && !window.confirm(
+      '¿Cancelar esta campaña?\n\nNo se enviarán más mensajes. Los ya enviados, fallidos o inciertos se conservan en el historial. '
+      + 'Los destinatarios pendientes (nunca enviados) se liberan y podrán incluirse en campañas futuras. No se puede deshacer.')) return
     setBusy(true)
     try {
       const r = await fetch(`/api/admin/broadcasts/${broadcastId}/${action}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: action === 'resume' ? JSON.stringify({ acknowledge_real_messages: true }) : undefined,
+        body: action === 'resume' ? JSON.stringify({ acknowledge_real_messages: true })
+          : action === 'cancel' ? JSON.stringify({ acknowledge_cancel: true }) : undefined,
       })
-      if (!r.ok) setError((await r.json().catch(() => ({}))).error ?? `Error ${r.status}`)
+      const body = await r.json().catch(() => ({})) as { error?: string; in_flight_unsettled?: number }
+      if (!r.ok) setError(body.error ?? `Error ${r.status}`)
+      else if (action === 'cancel' && (body.in_flight_unsettled ?? 0) > 0) {
+        setError(`Cancelada. ${body.in_flight_unsettled} envío(s) seguían en curso con Meta y pueden haber salido; quedan excluidos de campañas futuras.`)
+      }
       await load(); onChanged()
     } finally { setBusy(false) }
   }
@@ -56,13 +64,18 @@ export function BroadcastCampaignPanel({ broadcastId, onChanged }: { broadcastId
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-semibold">Estado: {BROADCAST_STATUS_LABELS[s] ?? s}</span>
-        {s === 'draft' && (
-          <button onClick={() => setLaunchOpen(true)} disabled={!d.broadcast_enabled}
-            title={d.broadcast_enabled ? undefined : 'WA_BROADCAST_ENABLED desactivado'}
-            className="flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 font-semibold text-white disabled:opacity-40">
+        {s === 'draft' && (d.broadcast_enabled ? (
+          <button onClick={() => setLaunchOpen(true)}
+            className="flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 font-semibold text-white">
             <Send className="h-3 w-3" /> Preparar envío
           </button>
-        )}
+        ) : (
+          // F3: con el flag apagado solo se consulta (el servidor rechaza lanzar).
+          <button onClick={() => setLaunchOpen(true)} title="WA_BROADCAST_ENABLED desactivado — solo vista previa"
+            className="flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2.5 py-1 font-semibold">
+            <Eye className="h-3 w-3" /> Ver vista previa del envío
+          </button>
+        ))}
         {(s === 'queued' || s === 'processing') && (
           <button onClick={() => control('pause')} disabled={busy} className="flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2.5 py-1 font-semibold">
             <Pause className="h-3 w-3" /> Pausar
@@ -71,6 +84,16 @@ export function BroadcastCampaignPanel({ broadcastId, onChanged }: { broadcastId
         {s === 'paused' && (
           <button onClick={() => control('resume')} disabled={busy || !d.broadcast_enabled} className="flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2.5 py-1 font-semibold disabled:opacity-40">
             <Play className="h-3 w-3" /> Reanudar
+          </button>
+        )}
+        {(s === 'draft' || s === 'queued' || s === 'processing' || s === 'paused') && (
+          <button onClick={() => control('cancel')} disabled={busy} className="flex items-center gap-1 rounded-md border border-red-200 bg-white px-2.5 py-1 font-semibold text-red-700">
+            <Ban className="h-3 w-3" /> Cancelar campaña
+          </button>
+        )}
+        {s === 'cancelled' && m && m.pending > 0 && (
+          <button onClick={() => control('cancel')} disabled={busy} className="flex items-center gap-1 rounded-md border border-red-200 bg-white px-2.5 py-1 font-semibold text-red-700">
+            <Ban className="h-3 w-3" /> Liberar {m.pending} pendientes
           </button>
         )}
         {!d.broadcast_enabled && <span className="text-amber-700">Broadcast desactivado — solo lectura</span>}

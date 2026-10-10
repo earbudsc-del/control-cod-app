@@ -22,6 +22,11 @@
 //        ambiguous    → 'send_unknown' — NUNCA se reintenta solo
 //   5. Fila 'processing' abandonada (worker muerto a mitad de envío) →
 //      'send_unknown', nunca se reenvía automáticamente.
+//   6. C.1.4: solo ve campañas queued/processing. El lanzamiento inserta
+//      todas las filas mientras la campaña sigue en 'draft' (launch.ts), así
+//      que nunca puede marcar 'completed' una campaña a medio preparar. Si un
+//      admin la cancela a mitad de lote, la fila devuelta a 'pending' se
+//      libera (cancel.ts) en vez de quedar huérfana.
 //
 // Nada de esto confirma, cancela ni modifica pedidos.
 
@@ -34,6 +39,7 @@ import {
   type ConfirmationOrderFields, type TemplateSendConfig,
 } from './templates'
 import { loadOptedOutPhones } from './suppression'
+import { releaseUnsentRecipients } from './cancel'
 import { ensureContactAndConversation } from '@/lib/whatsapp/ensure-conversation'
 import { sendWhatsAppTemplate, type SendTemplateRequest, type SendTemplateResult } from '@/lib/whatsapp/send-template'
 
@@ -169,6 +175,18 @@ async function processOneBroadcast(
       break
     }
     await d.sleep(SEND_SPACING_MS)
+  }
+
+  // Cancelada por un admin durante el lote: la fila que este worker devolvió
+  // a 'pending' (o reprogramó tras 429/5xx) se libera; no queda huérfana.
+  if (await readBroadcastStatus(db, b.id) === 'cancelled') {
+    try {
+      await releaseUnsentRecipients(db, b.store_id, b.id, null, d.now().toISOString())
+    } catch (err) {
+      // Sin rastro no se libera nada; el admin puede repetir "Liberar pendientes".
+      console.error('[broadcast] no se pudieron liberar pendientes de campaña cancelada:', b.id, err instanceof Error ? err.message : err)
+    }
+    return stopReason === 'rate_limited' || stopReason === 'disabled_mid_batch' || stopReason === 'disabled' ? stopReason : null
   }
 
   // 4. ¿Terminó? Sin pending/processing → completed.

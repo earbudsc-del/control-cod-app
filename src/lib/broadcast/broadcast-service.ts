@@ -215,11 +215,23 @@ async function loadPaidOrders(db: SupabaseLike, storeId: string): Promise<Broadc
     .eq('store_id', storeId).eq('source', 'shopify_webhook').eq('payment_status', 'paid'), 'orders(paid)')
 }
 
-type QueueRowWithTemplate = ExistingBroadcastQueueRow & { template_name: string }
+type QueueRowWithTemplate = ExistingBroadcastQueueRow & { template_name: string; broadcast_id: string | null }
 
-async function loadExistingBroadcastRows(db: SupabaseLike, storeId: string, templateName: string): Promise<QueueRowWithTemplate[]> {
-  return fetchAll<QueueRowWithTemplate>(() => db.from('wa_template_queue').select('id, order_id, status, template_name')
+/**
+ * Filas existentes del template. `ignoreBroadcastId`: las filas preparadas
+ * por ESE mismo borrador (lanzamiento en curso o interrumpido, F1/F5) no lo
+ * excluyen de su propia revalidación; para cualquier otra campaña sí cuentan.
+ */
+async function loadExistingBroadcastRows(
+  db: SupabaseLike, storeId: string, templateName: string, ignoreBroadcastId?: string,
+): Promise<QueueRowWithTemplate[]> {
+  const rows = await fetchAll<QueueRowWithTemplate>(() => db.from('wa_template_queue').select('id, order_id, status, template_name, broadcast_id')
     .eq('store_id', storeId).eq('template_name', templateName), 'wa_template_queue(broadcast)')
+  return ignoreBroadcastId ? rows.filter(r => r.broadcast_id !== ignoreBroadcastId) : rows
+}
+
+export interface AudienceOptions {
+  ignoreQueueRowsOfBroadcast?: string
 }
 
 // ── Audiencia (única implementación: preview, create y revalidación) ─────────
@@ -325,12 +337,13 @@ function withMediaWarning(w: BroadcastPreviewWarning[], m: BroadcastPreviewMedia
 
 async function computeCoordinationAudience(
   db: SupabaseLike, ctx: BroadcastAdminContext, selection: BroadcastSelection & { campaign: { type: 'coordination' } }, resolvedAt: string,
+  opts: AudienceOptions = {},
 ): Promise<BroadcastPreview> {
   const campaign = selection.campaign
   const [{ orders, not_found_ids }, pool, existing] = await Promise.all([
     resolveBroadcastCandidates(db, ctx.storeId, selection, resolvedAt),
     loadActivePool(db, ctx.storeId),
-    loadExistingBroadcastRows(db, ctx.storeId, campaignTemplateName(campaign)),
+    loadExistingBroadcastRows(db, ctx.storeId, campaignTemplateName(campaign), opts.ignoreQueueRowsOfBroadcast),
   ])
 
   const cls = classifyBroadcastCandidates(orders, existing, pool, { segment: campaign.segment, crossSegmentAmbiguity: true })
@@ -448,11 +461,12 @@ export async function computeBroadcastAudience(
   ctx: BroadcastAdminContext,
   selection: BroadcastSelection,
   resolvedAt: string,
+  opts: AudienceOptions = {},
 ): Promise<BroadcastPreview> {
   if (selection.campaign.type === 'repurchase') {
     return computeRepurchaseAudience(db, ctx, selection.campaign, resolvedAt)
   }
-  return computeCoordinationAudience(db, ctx, selection as BroadcastSelection & { campaign: { type: 'coordination' } }, resolvedAt)
+  return computeCoordinationAudience(db, ctx, selection as BroadcastSelection & { campaign: { type: 'coordination' } }, resolvedAt, opts)
 }
 
 // ── Draft ────────────────────────────────────────────────────────────────────
@@ -505,10 +519,11 @@ export async function revalidateDraftAudience(
   db: SupabaseLike,
   ctx: BroadcastAdminContext,
   draft: Pick<BroadcastDraftRow, 'store_id' | 'selection_filter'>,
+  opts: AudienceOptions = {},
 ): Promise<BroadcastPreview> {
   if (draft.store_id !== ctx.storeId) throw new Error('draft de otra tienda')
   const { selection, resolvedAt } = audienceFromDraft(draft.selection_filter)
-  return computeBroadcastAudience(db, ctx, selection, resolvedAt)
+  return computeBroadcastAudience(db, ctx, selection, resolvedAt, opts)
 }
 
 async function findDraftByRequestKey(db: SupabaseLike, storeId: string, requestKey: string): Promise<BroadcastDraftRow | null> {

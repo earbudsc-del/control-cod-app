@@ -43,6 +43,10 @@ const UNIQUES: Record<string, Unique[]> = {
 export class C1FakeDb {
   tables: Record<string, Row[]> = {}
   log: Array<{ table: string; op: string }> = []
+  // Ganchos de test: simular fallos de INSERT y ejecutar código (p.ej. el
+  // processor) justo después de un INSERT exitoso.
+  failInsert?: (table: string, payloads: Row[]) => { code: string; message: string } | null
+  afterInsert?: (table: string, rows: Row[]) => void
 
   t(name: string): Row[] { return (this.tables[name] ??= []) }
 
@@ -59,7 +63,7 @@ export class C1FakeDb {
   from(table: string) {
     const db = this
     const st = {
-      op: 'select' as 'select' | 'insert' | 'update' | 'upsert', cols: '*', filters: [] as Filter[],
+      op: 'select' as 'select' | 'insert' | 'update' | 'upsert' | 'delete', cols: '*', filters: [] as Filter[],
       payload: null as Row | Row[] | null, onConflict: null as string | null,
       orderCol: null as string | null, asc: true, from: 0, to: Infinity, lim: Infinity,
       mode: 'many' as 'many' | 'single' | 'maybe',
@@ -92,14 +96,27 @@ export class C1FakeDb {
       db.log.push({ table, op: st.op })
       if (st.op === 'insert') {
         const payloads = Array.isArray(st.payload) ? st.payload : [st.payload!]
+        const fail = db.failInsert?.(table, payloads)
+        if (fail) return { data: null, error: fail }
+        // Un INSERT multi-fila es UNA sentencia: todo o nada (igual que Postgres).
         const out: Row[] = []
+        const before = db.t(table).length
         for (const p of payloads) {
           const row = { id: randomUUID(), created_at: new Date().toISOString(), ...p }
           const v = db.violates(table, row)
-          if (v) return { data: null, error: { code: '23505', message: `duplicate key value violates unique constraint "${v}"` } }
+          if (v) {
+            db.t(table).splice(before)
+            return { data: null, error: { code: '23505', message: `duplicate key value violates unique constraint "${v}"` } }
+          }
           db.t(table).push(row); out.push(row)
         }
+        db.afterInsert?.(table, out)
         return shape(out)
+      }
+      if (st.op === 'delete') {
+        const gone = db.t(table).filter(matches)
+        db.tables[table] = db.t(table).filter(r => !gone.includes(r))
+        return shape(gone.map(r => ({ ...r })))
       }
       if (st.op === 'upsert') {
         const p = st.payload as Row
@@ -131,7 +148,7 @@ export class C1FakeDb {
       insert: (p: Row | Row[]) => { st.op = 'insert'; st.payload = p; return b },
       update: (p: Row) => { st.op = 'update'; st.payload = p; return b },
       upsert: (p: Row, o?: { onConflict?: string }) => { st.op = 'upsert'; st.payload = p; st.onConflict = o?.onConflict ?? null; return b },
-      delete: () => { throw new Error('delete no permitido') },
+      delete: () => { st.op = 'delete'; return b },
       eq:  (c: string, v: unknown) => { st.filters.push({ op: 'eq', col: c, val: v }); return b },
       neq: (c: string, v: unknown) => { st.filters.push({ op: 'neq', col: c, val: v }); return b },
       in:  (c: string, v: unknown[]) => { st.filters.push({ op: 'in', col: c, val: v }); return b },
