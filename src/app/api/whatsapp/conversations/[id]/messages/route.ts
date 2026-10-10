@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse }  from 'next/server'
+import { isWithinServiceWindow, lastInboundAt, OUTSIDE_WINDOW_ERROR } from '@/lib/whatsapp/conversation-window'
 
 const DEFAULT_LIMIT = 50
 const MAX_LIMIT     = 100
@@ -107,6 +108,12 @@ export async function POST(
     const contact = Array.isArray(typedConv.contact) ? typedConv.contact[0] : typedConv.contact
     const waId = contact?.wa_id ?? contact?.phone_normalized
     if (!waId) return NextResponse.json({ error: 'El contacto no tiene wa_id ni teléfono' }, { status: 422 })
+
+    // Sprint C.1 — ventana de 24 h de Meta: texto libre solo si el cliente
+    // escribió en las últimas 24 h (un template de Broadcast no la abre).
+    if (!isWithinServiceWindow(await lastInboundAt(supabase, id))) {
+      return NextResponse.json({ error: OUTSIDE_WINDOW_ERROR, code: 'outside_service_window' }, { status: 422 })
+    }
 
     const WA_API_VERSION    = process.env.WA_API_VERSION!
     const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID!

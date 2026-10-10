@@ -25,6 +25,11 @@ export const BROADCAST_REASON_LABELS: Record<string, string> = {
   broadcast_previous_attempt:        'Broadcast previo fallido/omitido',
   multiple_active_orders_same_phone: 'Múltiples pedidos pendientes para este teléfono',
   not_found:                         'Pedido no encontrado',
+  // C.1 — exclusiones propias del envío real (al lanzar / antes de cada envío)
+  offer_incompatible:                'Oferta distinta a la del template (no es el bundle Personal 2×1 con cepillo gratis y envío gratis)',
+  media_asset_pending:               'Imagen de su oferta aún no existe',
+  marketing_opt_out:                 'Pidió no recibir mensajes promocionales',
+  phone_already_contacted:           'Este número ya recibió esta campaña',
 }
 
 export function broadcastReasonLabel(reason: string): string {
@@ -42,14 +47,35 @@ export const BROADCAST_STATUS_LABELS: Record<string, string> = {
   draft:      'Borrador',
   queued:     'En cola',
   processing: 'Procesando',
+  paused:     'Pausado',
   completed:  'Completado',
   cancelled:  'Cancelado',
 }
 
-// B.2.1 — qué hará cada quick reply (diseño Sprint C; nada conectado aún).
+// C.1 — qué pasa con cada quick reply (atención humana; Génesis apagado).
 export const BROADCAST_BUTTON_HINTS: Record<string, string> = {
-  'Sí, confirmar':         'Confirma si está pendiente; si ya estaba confirmado, solo continúa la coordinación. Pide ubicación solo si falta.',
-  'Ya no lo deseo':        'No cancela: Génesis intenta entender y recuperar. Cancela solo ante un "no" inequívoco.',
-  'Sí, quiero aprovechar': 'Crea un pedido NUEVO de recompra (2 LÜMA Teeth, sin cepillo) sin volver a preguntar.',
-  'Ahora no':              'Cierra esta oportunidad. No toca el pedido histórico.',
+  'Sí, confirmar':         'Llega al Inbox como "Quiere confirmar". Un agente confirma con el flujo existente; no se confirma solo.',
+  'Ya no lo deseo':        'Llega al Inbox destacado. No cancela el pedido: un agente atiende y, si corresponde, cancela con el flujo existente.',
+  'Sí, quiero aprovechar': 'Registra interés de recompra. No crea pedidos automáticamente.',
+  'Ahora no':              'Registra que no le interesa ahora. No se insiste automáticamente.',
+}
+
+// C.1 — intención registrada al pulsar un botón. Intención ≠ acción: nada
+// se confirma ni se cancela automáticamente.
+export const BROADCAST_INTENT_LABELS: Record<string, string> = {
+  confirm_interest:    'Quiere confirmar',
+  decline_order:       'Ya no lo desea',
+  repurchase_interest: 'Quiere aprovechar la recompra',
+  repurchase_decline:  'Ahora no (recompra)',
+  unknown:             'Respuesta sin campaña identificable',
+}
+
+// C.1 — estado de cada destinatario en la cola.
+export const BROADCAST_QUEUE_STATUS_LABELS: Record<string, string> = {
+  pending:      'Pendiente',
+  processing:   'En proceso',
+  sent:         'Aceptado por Meta',
+  skipped:      'Omitido al revalidar',
+  failed:       'Fallido',
+  send_unknown: 'Resultado incierto — revisar',
 }

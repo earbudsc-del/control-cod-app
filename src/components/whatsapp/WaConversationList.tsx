@@ -148,8 +148,13 @@ export default function WaConversationList({ conversations, selectedId, loading,
                     )}
                   </div>
 
-                  <p className="text-[10px] text-gray-400 mt-0.5">
+                  <p className="text-[10px] text-gray-400 mt-0.5 flex items-center gap-1.5">
                     {conv.contact.phone_normalized}
+                    {(conv.broadcast_attention ?? 0) > 0 && (
+                      <span className="rounded-full bg-amber-100 px-1.5 py-px text-[10px] font-semibold text-amber-800">
+                        Campaña · atender
+                      </span>
+                    )}
                   </p>
                 </div>
               </button>

@@ -3,6 +3,10 @@
     {
       "path": "/api/tracking/auto",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/wa-broadcast-queue",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

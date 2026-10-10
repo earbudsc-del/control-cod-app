@@ -36,8 +36,24 @@ export async function GET(request: Request) {
     const { data, error, count } = await query
     if (error) throw error
 
+    // Sprint C.1 — respuestas de campaña sin atender (destacar en la lista).
+    // Si la tabla no existe todavía (066 sin aplicar) o RLS no la permite, se
+    // ignora: la lista funciona exactamente igual que antes.
+    const attention = new Map<string, number>()
+    const ids = (data ?? []).map((c: { id: string }) => c.id)
+    if (ids.length > 0) {
+      const { data: pending, error: pendingErr } = await supabase
+        .from('wa_broadcast_responses').select('conversation_id').in('conversation_id', ids).is('handled_at', null)
+      if (!pendingErr) {
+        for (const r of (pending ?? []) as Array<{ conversation_id: string }>) {
+          attention.set(r.conversation_id, (attention.get(r.conversation_id) ?? 0) + 1)
+        }
+      }
+    }
+    const withAttention = (data ?? []).map((c: { id: string }) => ({ ...c, broadcast_attention: attention.get(c.id) ?? 0 }))
+
     return NextResponse.json({
-      data,
+      data: withAttention,
       pagination: {
         page,
         limit,

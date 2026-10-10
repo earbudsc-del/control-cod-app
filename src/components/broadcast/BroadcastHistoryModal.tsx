@@ -1,13 +1,16 @@
 'use client'
 
-// Sprint Broadcast B — historial mínimo de broadcasts (solo lectura).
-// Sin acciones de envío/proceso/reintento en este sprint.
+// Sprint Broadcast B — historial de broadcasts.
+// C.1: cada campaña expandida muestra estado, métricas y controles
+// (Preparar envío / Pausar / Reanudar) vía BroadcastCampaignPanel; todas las
+// acciones de envío exigen WA_BROADCAST_ENABLED en el servidor.
 
 import { useEffect, useState } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 import { Spinner } from '@/components/ui/spinner'
 import { broadcastReasonLabel, BROADCAST_STATUS_LABELS } from '@/lib/broadcast/labels'
 import { DEFAULT_CAMPAIGN, campaignLabel, type BroadcastCampaign } from '@/lib/broadcast/campaign'
+import { BroadcastCampaignPanel } from './BroadcastCampaignPanel'
 
 interface BroadcastRow {
   id: string
@@ -55,6 +58,8 @@ export function BroadcastHistoryModal({ onClose }: { onClose: () => void }) {
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
   const [openId, setOpenId]   = useState<string | null>(null)
+  const [version, setVersion] = useState(0)
+  const reload = () => setVersion(v => v + 1)
 
   useEffect(() => {
     let cancelled = false
@@ -72,7 +77,7 @@ export function BroadcastHistoryModal({ onClose }: { onClose: () => void }) {
       }
     })()
     return () => { cancelled = true }
-  }, [])
+  }, [version])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onClose() }
@@ -142,6 +147,10 @@ export function BroadcastHistoryModal({ onClose }: { onClose: () => void }) {
                       <p className="text-gray-500">
                         Conteos al momento de preparar el borrador. Antes de cualquier envío la audiencia se revalida completa.
                       </p>
+                      {/* Sprint C.1 — estado, métricas y controles de envío */}
+                      <div className="border-t border-gray-200 pt-2">
+                        <BroadcastCampaignPanel broadcastId={r.id} onChanged={reload} />
+                      </div>
                     </div>
                   )}
                 </li>

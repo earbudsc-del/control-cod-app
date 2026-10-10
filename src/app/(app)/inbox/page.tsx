@@ -4,6 +4,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'next/navigation'
 import WaConversationList from '@/components/whatsapp/WaConversationList'
 import WaMessagePane    from '@/components/whatsapp/WaMessagePane'
+import BroadcastContextPanel from '@/components/whatsapp/BroadcastContextPanel'
+import LocationAssignmentPanel from '@/components/whatsapp/LocationAssignmentPanel'
 import type { WaConversation, WaMessage, WaAgentOption } from '@/components/whatsapp/types'
 import { createClient } from '@/lib/supabase/client'
 
@@ -411,9 +413,17 @@ export default function InboxPage() {
       </div>
 
       <div className={`
-        flex-1 min-w-0
+        flex-1 min-w-0 flex-col
         ${showPane ? 'flex' : 'hidden md:flex'}
       `}>
+        {/* Sprint C.1 — contexto de campaña Broadcast (se oculta si no aplica). */}
+        {/* C.1.3 — ubicación ambigua pendiente de asociar (se oculta si no aplica). */}
+        <LocationAssignmentPanel conversationId={selectedId} />
+        <BroadcastContextPanel
+          conversationId={selectedId}
+          onChanged={() => setConversations(prev => prev.map(c => c.id === selectedId ? { ...c, broadcast_attention: 0 } : c))}
+        />
+        <div className="flex-1 min-h-0 flex">
         <WaMessagePane
           conversation={selectedConv}
           messages={messages}
@@ -428,7 +438,7 @@ export default function InboxPage() {
           onRelease={handleReleaseConversation}
           onAssign={handleAssignConversation}
         />
-
+        </div>
       </div>
     </div>
   )

@@ -578,7 +578,9 @@ export async function createBroadcastDraft(
 
 export async function listBroadcasts(db: SupabaseLike, storeId: string, limit = 50) {
   const { data, error } = await db.from('wa_broadcasts')
-    .select('id, template_name, status, created_by, created_at, candidate_count, eligible_count, excluded_count, excluded_by_reason, selection_filter, eligibility_rule_version, creator:profiles(full_name)')
+    // FK explícita: desde 066 wa_broadcasts tiene varias FKs a profiles
+    // (launched_by/paused_by/resumed_by) y el embed sin nombre sería ambiguo.
+    .select('id, template_name, status, created_by, created_at, candidate_count, eligible_count, excluded_count, excluded_by_reason, selection_filter, eligibility_rule_version, creator:profiles!wa_broadcasts_created_by_fkey(full_name)')
     .eq('store_id', storeId).order('created_at', { ascending: false }).limit(limit)
   if (error) throw new Error(`wa_broadcasts(list): ${error.message ?? String(error)}`)
   return data ?? []

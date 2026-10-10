@@ -142,8 +142,10 @@ async function main() {
     check('I. webhook ya no tiene findOrderByPhone ni limit(200)', !/findOrderByPhone/.test(code) && !/limit\(200\)/.test(code))
     check('I. contacto nuevo usa resolveContactOrderByPhone', /order_id:\s+orderId/.test(code) && code.includes('(await resolveContactOrderByPhone(supabase, storeId, phoneNormalized)).orderId'))
     check('I. contacto existente re-vincula vía decideContactOrderLink', code.includes('decideContactOrderLink(contact.order_id, stillActive, resolution)'))
-    check('I. bloque 4b (ubicación) sigue con findActiveSdOrdersByPhone',
-      code.includes('await findActiveSdOrdersByPhone(supabase, storeId, phoneNormalized)'))
+    // C.1.2: el bloque 4b delega en inbound-location.ts, que usa el lookup canónico.
+    const loc = readFileSync(join(__dirname, '..', 'src/lib/whatsapp/inbound-location.ts'), 'utf8')
+    check('I. bloque 4b (ubicación) sigue con findActiveSdOrdersByPhone (vía inbound-location)',
+      code.includes('handleInboundLocation(supabase, {') && loc.includes('findActiveSdOrdersByPhone'))
   }
 
   console.log(`\n${failures === 0 ? '✅ TODOS LOS TESTS PASAN' : `❌ ${failures} FALLO(S)`}`)

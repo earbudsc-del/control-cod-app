@@ -357,7 +357,13 @@ async function main() {
       { cwd: join(__dirname, '..') }).toString().trim().split('\n').filter(Boolean)
       .filter(f => readFileSync(join(__dirname, '..', f), 'utf8').split('\n')
         .some(l => !l.trim().startsWith('//') && !l.trim().startsWith('*') && l.includes('sd_broadcast_coordination')))
-    check('no existe sd_broadcast_coordination en el código (solo en comentarios que lo descartan)', all.length === 0, all)
+    // C.1.1 (Graph API real): la recompra está aprobada en Meta como
+    // 'sd_broadcast_coordination'. Solo puede aparecer como NOMBRE EN META en
+    // el mapeo de templates.ts; nunca como identificador interno.
+    check('sd_broadcast_coordination solo como nombre en Meta (mapeo de templates.ts)',
+      all.join() === 'src/lib/broadcast/templates.ts'
+        && /sd_broadcast_repurchase:\s*\{\s*metaName: 'sd_broadcast_coordination'/.test(readFileSync(join(__dirname, '..', 'src/lib/broadcast/templates.ts'), 'utf8'))
+        && !(BROADCAST_TEMPLATES as readonly string[]).includes('sd_broadcast_coordination'), all)
     check('oferta recompra: 2 pastas, sin cepillo, 10%, 2100 → 1890',
       REPURCHASE_OFFER.pasteQty === 2 && !REPURCHASE_OFFER.includesBrush && REPURCHASE_OFFER.discountPct === 10 && REPURCHASE_OFFER.price === 1890)
     const msgs = ['', PERSONAL, FAMILIAR, 'SteriClean™ X', PERSONAL + ', Envio prioritario'].map(ps =>

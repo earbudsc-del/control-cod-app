@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse }  from 'next/server'
+import { aiEnabledForAssignment } from '@/lib/broadcast/conversation-guard'
 
 // PATCH — asigna una conversación a Génesis, a un agente específico, o la
 // deja sin asignar (modo manual sin IA). Reemplaza/complementa a take/release
@@ -52,9 +53,14 @@ export async function PATCH(
       if (!targetProfile) return NextResponse.json({ error: 'Agente inválido' }, { status: 400 })
     }
 
+    // C.1.3 — una conversación de Broadcast nunca vuelve a la IA por una
+    // asignación: si se pide ai_enabled=true, queda en false (atención
+    // humana). Conversaciones normales: exactamente lo solicitado.
+    const aiEnabled = await aiEnabledForAssignment(supabase, id, body.ai_enabled)
+
     const { data, error } = await supabase
       .from('wa_conversations')
-      .update({ assigned_to: assignedTo, ai_enabled: body.ai_enabled })
+      .update({ assigned_to: assignedTo, ai_enabled: aiEnabled })
       .eq('id', id)
       .select(
         `id, status, unread_count, last_message_at, last_message_preview,

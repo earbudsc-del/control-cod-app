@@ -19,6 +19,8 @@ export interface WaConversation {
   updated_at: string
   contact: WaContact
   assigned_agent?: { id: string; full_name: string } | null
+  // Sprint C.1 — respuestas de campaña Broadcast sin atender (0 si no hay).
+  broadcast_attention?: number
 }
 
 // Agente seleccionable en el dropdown "Asignar a:" del header del Inbox.

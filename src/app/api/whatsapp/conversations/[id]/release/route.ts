@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse }  from 'next/server'
+import { aiEnabledAfterRelease } from '@/lib/broadcast/conversation-guard'
 
 export async function PATCH(
   _request: Request,
@@ -21,9 +22,14 @@ export async function PATCH(
 
     const { id } = await params
 
+    // C.1.2 — liberar una conversación de Broadcast NO la devuelve a la IA:
+    // queda sin asignar pero con ai_enabled=false (atención humana). Las
+    // conversaciones normales mantienen el comportamiento previo (true).
+    const aiEnabled = await aiEnabledAfterRelease(supabase, id)
+
     const { data, error } = await supabase
       .from('wa_conversations')
-      .update({ assigned_to: null, ai_enabled: true })
+      .update({ assigned_to: null, ai_enabled: aiEnabled })
       .eq('id', id)
       .eq('assigned_to', user.id)
       .select(

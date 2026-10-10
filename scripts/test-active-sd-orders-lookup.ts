@@ -124,13 +124,18 @@ async function main() {
   {
     const webhook = readFileSync(join(__dirname, '..', 'src/app/api/webhooks/whatsapp/route.ts'), 'utf8')
     const lib = readFileSync(join(__dirname, '..', 'src/lib/deliveries/active-sd-orders-by-phone.ts'), 'utf8')
-    check('J. webhook usa el lookup canónico (import) y no conserva copia local',
-      webhook.includes("import { findActiveSdOrdersByPhone } from '@/lib/deliveries/active-sd-orders-by-phone'")
-        && !/async function findActiveSdOrdersByPhone/.test(webhook))
-    check('J. bloque 4b intacto: candidates[0] + ambiguous si > 1 + confirma solo si received',
-      webhook.includes('await findActiveSdOrdersByPhone(supabase, storeId, phoneNormalized)')
-        && webhook.includes("const locationStatus = candidates.length > 1 ? 'ambiguous' : 'received'")
-        && webhook.includes("if (locationStatus === 'received') {"))
+    // C.1.2: el bloque 4b vive en src/lib/whatsapp/inbound-location.ts.
+    const loc = readFileSync(join(__dirname, '..', 'src/lib/whatsapp/inbound-location.ts'), 'utf8')
+    check('J. ubicación usa el lookup canónico (import) y nadie conserva copia local',
+      loc.includes("import { findActiveSdOrdersByPhone } from '@/lib/deliveries/active-sd-orders-by-phone'")
+        && !/async function findActiveSdOrdersByPhone/.test(webhook) && !/async function findActiveSdOrdersByPhone/.test(loc)
+        && webhook.includes('handleInboundLocation('))
+    check('J. C.1.2: 1 candidato → received; >1 → no asigna; confirma solo con automations ON',
+      loc.includes('const candidates = await find(') && /if \(candidates\.length > 1\) \{[\s\S]{0,300}?location_assignment_status: 'ambiguous'[\s\S]{0,200}?return \{ outcome: 'ambiguous_not_assigned'/.test(loc)
+        && loc.includes("sd_location_status: 'received'")
+        && !/sd_location_status:\s*'ambiguous'/.test(loc.split('\n').filter(l => !l.trim().startsWith('//')).join('\n'))
+        && loc.includes("if (!deps.automationsEnabled()) return { outcome: 'saved_automations_off'")
+        && webhook.includes('automationsEnabled: isWaAutomationsEnabled'))
     const libCode = lib.split('\n').filter(l => !l.trim().startsWith('//')).join('\n')
     check('J. sin límite global de tienda (.limit(200))', !/limit\(200\)/.test(libCode))
   }

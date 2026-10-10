@@ -304,7 +304,11 @@ async function main() {
     check('M. únicas escrituras: insert en wa_broadcasts', (src.match(/\.(insert|upsert|update|delete)\(/g) ?? []).length === 1 && /from\('wa_broadcasts'\)\.insert\(/.test(src))
     check('M. no depende de WA_BROADCAST_ENABLED ni de AUTOMATIONS', !/WA_BROADCAST_ENABLED|WA_AUTOMATIONS_ENABLED/.test(src))
     const vercel = readFileSync(join(__dirname, '..', 'vercel.json'), 'utf8')
-    check('M. sin cron nuevo en vercel.json', !/broadcast/i.test(vercel))
+    // C.1.2: el ÚNICO cron de broadcast permitido es su processor propio
+    // (endpoint separado, fail-closed con WA_BROADCAST_ENABLED); nunca el de automations.
+    const crons = (JSON.parse(vercel) as { crons: Array<{ path: string }> }).crons.map(c => c.path)
+    check('M. vercel.json: solo tracking + processor de Broadcast (ningún cron de automations)',
+      crons.filter(c => /broadcast/i.test(c)).join() === '/api/cron/wa-broadcast-queue' && !crons.some(c => c.includes('wa-template-queue')))
   }
 
   // ── B.1: frontera de audiencia + idempotencia real ────────────────────────

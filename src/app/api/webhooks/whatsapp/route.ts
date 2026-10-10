@@ -3,9 +3,12 @@ import crypto                   from 'crypto'
 import { createServiceClient }  from '@/lib/supabase/server'
 import { normalizePhoneRD }     from '@/lib/normalize-phone'
 import { applyConfirmationAction, type ConfirmAction } from '@/lib/orders/confirmation'
-import { findActiveSdOrdersByPhone } from '@/lib/deliveries/active-sd-orders-by-phone'
 import { decideContactOrderLink, isLinkedOrderStillActive, resolveContactOrderByPhone } from '@/lib/whatsapp/contact-order'
 import { maybeGenesisRespond }  from '@/lib/genesis/respond'
+import { handleInboundLocation } from '@/lib/whatsapp/inbound-location'
+import { isWaAutomationsEnabled } from '@/lib/config/wa-automations'
+import { recordBroadcastButtonResponse } from '@/lib/broadcast/responses'
+import { isMarketingOptOutRequest, recordMarketingOptOut } from '@/lib/broadcast/suppression'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -547,75 +550,61 @@ async function processInboundMessage(
 
   console.log('[wa-diag] UPDATE wa_conversations → error:', updateConvErr?.message ?? null)
 
-  // ── 4b. Ubicación recibida — Ruta COD v1 Fase 5 (docs/IMPLEMENTATION_PLAN_
-  // RUTA_COD_V1.md). Asocia la coordenada al pedido SD activo más reciente y
-  // compatible de este teléfono (tracking_number NULL + no terminal). Si hay
-  // más de un pedido activo compatible, no se asigna a ciegas: se toma el más
-  // reciente igualmente (mejor esfuerzo) pero se marca
-  // sd_location_status='ambiguous' para que Ruta COD lo señale para revisión
-  // manual en vez de mostrar "Ubicación recibida" con confianza total — y,
-  // crucialmente, NO se confirma el pedido en ese caso (ver más abajo).
+  // ── 4a. Broadcast C.1 — intención de botón + baja promocional ─────────────
+  // Solo REGISTRA (wa_broadcast_responses / wa_contact_preferences) para que
+  // un agente humano atienda. Nunca confirma, cancela ni modifica pedidos.
+  // Aislado en try/catch: si las tablas de 066 no existen todavía o algo
+  // falla, el webhook sigue igual que antes (200 a Meta, mensaje guardado).
+  try {
+    if (content.messageType === 'button_reply' || content.messageType === 'interactive') {
+      const context = msg.context as { id?: string } | undefined
+      const recorded = await recordBroadcastButtonResponse(supabase, {
+        storeId, conversationId: conversation.id, inboundMessageId: newMsg.id, phoneNormalized,
+        buttonText:    (content.metadata?.button_reply_title as string | undefined) ?? null,
+        buttonPayload: (content.metadata?.button_reply_id as string | undefined) ?? null,
+        contextWamid:  context?.id ?? null,
+      })
+      if (recorded) {
+        console.log(`[wa-webhook] broadcast respuesta — intent=${recorded.intent} assoc=${recorded.association} broadcast=${recorded.broadcastId ?? '-'} dup=${recorded.duplicate}`)
+      }
+    }
+    if (content.messageType === 'text' && isMarketingOptOutRequest(body)) {
+      const r = await recordMarketingOptOut(supabase, {
+        storeId, phoneNormalized, source: 'customer_keyword', reason: (body ?? '').slice(0, 200), sourceMessageId: newMsg.id,
+      })
+      console.log(`[wa-webhook] baja promocional registrada — phone=${maskPhone(phoneNormalized)} ok=${r.ok}`)
+    }
+  } catch (bcErr) {
+    console.error('[wa-webhook] ⚠ registro de respuesta Broadcast falló (mensaje ya guardado):', bcErr instanceof Error ? bcErr.message : bcErr)
+  }
+
+  // ── 4b. Ubicación recibida — Ruta COD v1 Fase 5 / C.1.2 ───────────────────
+  // Lógica en src/lib/whatsapp/inbound-location.ts:
+  //   - 1 pedido SD activo: guarda la ubicación; confirma + autodespacha SOLO
+  //     con WA_AUTOMATIONS_ENABLED='true' (applyConfirmationAction guardAutomated).
+  //   - varios candidatos: no asigna a ninguno (la coordenada queda en el
+  //     metadata de este wa_message para resolución humana).
   if (content.messageType === 'location' && content.metadata) {
     const lat = content.metadata.latitude as number | undefined
     const lng = content.metadata.longitude as number | undefined
     if (typeof lat === 'number' && typeof lng === 'number') {
       console.log(`[wa-webhook] location conversación encontrada — conv=${conversation.id} coords≈(${maskCoord(lat)},${maskCoord(lng)})`)
-      const candidates = await findActiveSdOrdersByPhone(supabase, storeId, phoneNormalized)
-      console.log(`[wa-webhook] location candidatos de pedidos encontrados — count=${candidates.length}`)
-      if (candidates.length > 0) {
-        const target = candidates[0]
-        const locationStatus = candidates.length > 1 ? 'ambiguous' : 'received'
-        const { error: locErr } = await supabase
-          .from('orders')
-          .update({
-            sd_location_lat: lat,
-            sd_location_lng: lng,
-            sd_location_received_at: sentAt,
-            sd_location_status: locationStatus,
-            sd_location_wa_msg_id: msg.id,
-            sd_location_conversation_id: conversation.id,
-          })
-          .eq('id', target.id)
-
-        if (locErr) {
-          console.error('[wa-webhook] ✖ Error guardando ubicación SD (update de orders falló):', locErr.message)
-        } else {
-          console.log(
-            `[wa-webhook] ✓ pedido asignado (update de orders OK) — order=${target.id} status=${locationStatus} candidatos=${candidates.length}`,
-          )
-
-          // Ubicación válida y NO ambigua confirma y despacha — único punto
-          // de entrada autorizado (applyConfirmationAction, Principio 4 de
-          // ARCHITECTURE_RUTA_COD_V1.md). guardAutomated:true exige
-          // confirmation_status='pending' — si el pedido ya estaba
-          // 'confirmed' (ej. el cliente reenvía el pin, o un agente ya lo
-          // confirmó por llamada mientras tanto), devuelve 'not_pending' sin
-          // tocar nada: no hay reintento, no hay doble confirmación, no hay
-          // segunda fila de auditoría. Nunca se llama en el caso 'ambiguous'.
-          if (locationStatus === 'received') {
-            const confirmResult = await applyConfirmationAction({
-              supabase,
-              orderId: target.id,
-              action: 'confirmed',
-              method: 'whatsapp_location',
-              userId: null,
-              guardAutomated: true,
-            })
-
-            if (!confirmResult.ok) {
-              console.warn(
-                `[wa-webhook] ⚠ confirmación automática por ubicación omitida — order=${target.id} reason=${confirmResult.reason}`,
-              )
-            } else {
-              console.log(
-                `[wa-webhook] ✓ pedido confirmado y despachado por ubicación — order=${target.id} ` +
-                `auto_dispatched=${confirmResult.auto_dispatched} confirmation_status=${confirmResult.confirmation_status}`,
-              )
-            }
-          }
-        }
-      } else {
-        console.log('[wa-webhook] ubicación recibida sin pedido SD activo compatible — phone=', maskPhone(phoneNormalized))
+      const loc = await handleInboundLocation(supabase, {
+        inboundMessageId: newMsg.id, storeId, phoneNormalized, conversationId: conversation.id, waMsgId: msg.id, latitude: lat, longitude: lng, sentAt,
+      }, { automationsEnabled: isWaAutomationsEnabled })
+      switch (loc.outcome) {
+        case 'no_candidates':
+          console.log('[wa-webhook] ubicación recibida sin pedido SD activo compatible — phone=', maskPhone(phoneNormalized)); break
+        case 'ambiguous_not_assigned':
+          console.warn(`[wa-webhook] ⚠ ubicación ambigua — ${loc.candidates} pedidos activos; no se asigna a ninguno (pendiente de asociación manual en el Inbox) — phone=${maskPhone(phoneNormalized)}`); break
+        case 'save_error':
+          console.error('[wa-webhook] ✖ Error guardando ubicación SD (update de orders falló):', loc.error); break
+        case 'saved_automations_off':
+          console.log(`[WA_AUTOMATION_DISABLED] step=location_confirm — ubicación guardada, sin confirmación automática — order=${loc.orderId}`); break
+        case 'saved_confirmed':
+          console.log(`[wa-webhook] ✓ pedido confirmado y despachado por ubicación — order=${loc.orderId} auto_dispatched=${loc.autoDispatched}`); break
+        case 'saved_confirm_skipped':
+          console.warn(`[wa-webhook] ⚠ confirmación automática por ubicación omitida — order=${loc.orderId} reason=${loc.reason}`); break
       }
     }
   }
