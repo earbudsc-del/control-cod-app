@@ -54,10 +54,12 @@ import {
   type BroadcastDraftRow,
   type BroadcastPreview,
 } from './broadcast-service'
-import { audienceFromDraft } from './broadcast-service'
-import { campaignTemplateName, type BroadcastTemplateName } from './campaign'
-import { buildConfirmationBodyParams, resolveTemplateConfig } from './templates'
+import { audienceFromDraft, computeBroadcastAudience } from './broadcast-service'
+import { campaignLabel, campaignGroup, templateCompatibility, type BroadcastGroup, type BroadcastTemplateName } from './campaign'
+import { buildBodyParamsFor, buildConfirmationBodyParams, resolveTemplateConfig } from './templates'
+import { selectionTemplate, type BroadcastSelection } from './selection'
 import { loadOptedOutPhones } from './suppression'
+import { loadPhoneStatuses, type PhoneRestriction } from './phone-rules'
 import { releaseUnsentRecipients } from './cancel'
 
 interface SupabaseLike {
@@ -81,16 +83,28 @@ export const LAUNCH_PREP_STALE_MS = 2 * 60_000
 
 export type LaunchExcludedReason =
   | 'offer_incompatible' | 'media_asset_pending' | 'marketing_opt_out' | 'phone_already_contacted'
+  | PhoneRestriction
 
 export interface LaunchRecipient {
   order_id: string; order_number: string | null; customer_name: string | null
   phone_normalized: string; warnings: string[]
+  body_params: string[]                       // variables EXACTAS del template para este destinatario
+}
+
+export interface LaunchExcludedItem {
+  order_id: string; order_number: string | null; customer_name: string | null; reason: LaunchExcludedReason
 }
 
 export interface LaunchPreview {
   broadcast_id:   string
   template_name:  BroadcastTemplateName
+  group:          BroadcastGroup
   campaign_label: string
+  header_image_url: string | null           // imagen pública del encabezado (null si falta configurar)
+  launch_excluded: LaunchExcludedItem[]      // detalle de exclusiones propias del envío (máx. 300)
+  // C.2: destinatarios de la selección que dejaron de ser elegibles al revalidar
+  // (p.ej. un cliente elegido a mano que ya pagó). Se excluyen, nunca se sustituyen.
+  audience_excluded: Array<{ order_id: string; order_number: string | null; customer_name: string | null; reason: string }>
   revalidated:    Pick<BroadcastPreview, 'candidate_count' | 'eligible_count' | 'excluded_count' | 'excluded_by_reason' | 'resolved_at'>
   launch_excluded_by_reason: Partial<Record<LaunchExcludedReason, number>>
   sendable_count: number
@@ -179,9 +193,81 @@ async function phonesAlreadyContacted(db: SupabaseLike, storeId: string, templat
   return out
 }
 
+export interface SendableResult {
+  template:                  BroadcastTemplateName
+  group:                     BroadcastGroup
+  audience:                  BroadcastPreview
+  sendable:                  LaunchRecipient[]
+  launch_excluded_by_reason: Partial<Record<LaunchExcludedReason, number>>
+  launch_excluded:           LaunchExcludedItem[]
+  template_ready:            boolean
+  template_missing:          string[]
+  header_image_url:          string | null
+}
+
 /**
- * Lo que se enviaría AHORA. READ ONLY. Mismo cálculo que usa launchBroadcast
- * (que lo vuelve a ejecutar en el momento de lanzar).
+ * Enviables de una selección para su template — ÚNICA implementación, usada por
+ * la vista previa de lanzamiento (con borrador) y por el asistente (sin borrador).
+ * READ ONLY. Sobre la audiencia ya revalidada aplica, en orden:
+ *   1. regla comercial del template (recuperación: oferta 2×1 exacta; recompra:
+ *      la audiencia ya exige compra completada) e imagen aprobada;
+ *   2. baja promocional;
+ *   3. teléfono ya contactado con ESE template;
+ *   4. reglas por teléfono de todos los templates (131026, 131049, 7 días).
+ */
+export async function computeSendable(
+  db: SupabaseLike, ctx: BroadcastAdminContext, selection: BroadcastSelection, audience: BroadcastPreview,
+  o: { broadcastId?: string; frozen?: Set<string> | null } = {},
+  env: Record<string, string | undefined> = process.env, nowMs: () => number = Date.now,
+): Promise<SendableResult> {
+  const template = selectionTemplate(selection)
+  const phones = audience.eligible.map(e => e.phone_normalized)
+  const [optedOut, contacted, offers, phoneStatus] = await Promise.all([
+    loadOptedOutPhones(db, ctx.storeId, phones),
+    phonesAlreadyContacted(db, ctx.storeId, template, phones, o.broadcastId),
+    loadOfferFields(db, ctx.storeId, audience.eligible.map(e => e.order_id)),
+    loadPhoneStatuses(db, ctx.storeId, phones, { nowMs: nowMs(), excludeBroadcastId: o.broadcastId }),
+  ])
+
+  const launchExcluded: Partial<Record<LaunchExcludedReason, number>> = {}
+  const excludedItems: LaunchExcludedItem[] = []
+  const sendable: LaunchRecipient[] = []
+  for (const e of audience.eligible) {
+    if (o.frozen && !o.frozen.has(e.order_id)) continue   // fuera del lote confirmado: nunca entra
+    const exclude = (reason: LaunchExcludedReason) => {
+      launchExcluded[reason] = (launchExcluded[reason] ?? 0) + 1
+      if (excludedItems.length < 300) excludedItems.push({ order_id: e.order_id, order_number: e.order_number, customer_name: e.customer_name, reason })
+    }
+    const offerRow = offers.get(e.order_id)
+    if (template === 'sd_broadcast_confirmation'
+        && (e.warnings.includes('requires_template_variables') || !offerRow || !orderFitsConfirmationTemplate(offerRow))) {
+      exclude('offer_incompatible'); continue
+    }
+    if (e.media.status !== 'approved')                 { exclude('media_asset_pending'); continue }
+    if (optedOut.has(e.phone_normalized))              { exclude('marketing_opt_out'); continue }
+    if (contacted.has(e.phone_normalized))             { exclude('phone_already_contacted'); continue }
+    const restriction = phoneStatus.get(e.phone_normalized)?.restriction
+    if (restriction)                                   { exclude(restriction); continue }
+    const params = buildBodyParamsFor(template, {
+      customer_name: e.customer_name, product_summary: offerRow?.product_summary ?? null, cod_amount: offerRow?.cod_amount ?? null,
+    })
+    if (!params.ok)                                    { exclude('offer_incompatible'); continue }
+    sendable.push({ order_id: e.order_id, order_number: e.order_number, customer_name: e.customer_name,
+                    phone_normalized: e.phone_normalized, warnings: e.warnings, body_params: params.params })
+  }
+
+  const tpl = resolveTemplateConfig(template, env)
+  return {
+    template, group: campaignGroup(selection.campaign), audience, sendable,
+    launch_excluded_by_reason: launchExcluded, launch_excluded: excludedItems,
+    template_ready: tpl.ok, template_missing: tpl.ok ? [] : [...tpl.missing, ...tpl.invalid],
+    header_image_url: tpl.ok ? tpl.config.headerImageUrl : null,
+  }
+}
+
+/**
+ * Lo que se enviaría AHORA para un borrador. READ ONLY. Mismo cálculo que usa
+ * launchBroadcast (que lo vuelve a ejecutar en el momento de lanzar).
  */
 export async function computeLaunchPreview(
   db: SupabaseLike, ctx: BroadcastAdminContext, broadcastId: string, requestedLimit: number | null,
@@ -191,69 +277,64 @@ export async function computeLaunchPreview(
   if (!draft) return { ok: false, status: 404, error: 'Campaña no encontrada' }
 
   const { selection } = audienceFromDraft(draft.selection_filter)
-  if (selection.campaign.type !== 'coordination') {
-    return { ok: false, status: 422, error: 'Recompra preparada pero no habilitada para envío en C.1' }
-  }
-  const template = campaignTemplateName(selection.campaign)
+  const template = selectionTemplate(selection)
+  if (template !== draft.template_name) return { ok: false, status: 422, error: 'El template del borrador no coincide con su selección' }
+  const compat = templateCompatibility(template, selection.campaign)
+  if (!compat.ok) return { ok: false, status: 422, error: compat.reason }
   const limit = Math.min(Math.max(1, Math.floor(requestedLimit ?? PILOT_DEFAULT_LIMIT)), MAX_LAUNCH_SIZE)
 
   // Las filas que ESTE borrador ya preparó no lo excluyen de su revalidación.
-  const audience = await revalidateDraftAudience(db, ctx, draft, { ignoreQueueRowsOfBroadcast: draft.id })
-  const phones = audience.eligible.map(e => e.phone_normalized)
-  const [optedOut, contacted, offers, own] = await Promise.all([
-    loadOptedOutPhones(db, ctx.storeId, phones),
-    phonesAlreadyContacted(db, ctx.storeId, template, phones, draft.id),
-    loadOfferFields(db, ctx.storeId, audience.eligible.map(e => e.order_id)),
+  const [audience, own] = await Promise.all([
+    revalidateDraftAudience(db, ctx, draft, { ignoreQueueRowsOfBroadcast: draft.id, fullLists: true }),
     loadOwnRows(db, draft.id),
   ])
-
-  const launchExcluded: Partial<Record<LaunchExcludedReason, number>> = {}
-  const bump = (r: LaunchExcludedReason) => { launchExcluded[r] = (launchExcluded[r] ?? 0) + 1 }
-  const sendable: LaunchRecipient[] = []
   const frozen = frozenLaunchIds(draft)
-  for (const e of audience.eligible) {
-    if (frozen && !frozen.has(e.order_id)) continue   // fuera del lote confirmado: nunca entra
-    const offerRow = offers.get(e.order_id)
-    if (e.warnings.includes('requires_template_variables') || !offerRow || !orderFitsConfirmationTemplate(offerRow)) {
-      bump('offer_incompatible'); continue
-    }
-    if (e.media.status !== 'approved')                       { bump('media_asset_pending'); continue }
-    if (optedOut.has(e.phone_normalized))                    { bump('marketing_opt_out'); continue }
-    if (contacted.has(e.phone_normalized))                   { bump('phone_already_contacted'); continue }
-    sendable.push({ order_id: e.order_id, order_number: e.order_number, customer_name: e.customer_name,
-                    phone_normalized: e.phone_normalized, warnings: e.warnings })
-  }
+  const r = await computeSendable(db, ctx, selection, audience, { broadcastId: draft.id, frozen }, env, nowMs)
+  const sendable = r.sendable
 
   // Ya preparados primero (orden estable): retomar un lanzamiento converge
   // al mismo lote en vez de sumar destinatarios nuevos.
-  const ownOrders = new Set(own.map(r => r.order_id))
+  const ownOrders = new Set(own.map(x => x.order_id))
   sendable.sort((a, b) => Number(ownOrders.has(b.order_id)) - Number(ownOrders.has(a.order_id)))
 
-  const tpl = resolveTemplateConfig(template, env)
   return {
     ok: true,
     preview: {
       broadcast_id: draft.id,
       template_name: template,
-      campaign_label: selection.campaign.type === 'coordination' && selection.campaign.segment === 'confirmed_unpaid'
-        ? 'Coordinar pedido · Confirmados sin pagar' : 'Coordinar pedido · Pendientes',
+      group: r.group,
+      campaign_label: campaignLabel(selection.campaign),
+      header_image_url: r.header_image_url,
+      launch_excluded: r.launch_excluded,
+      audience_excluded: audience.excluded.slice(0, 300).map(x => ({
+        order_id: x.order_id, order_number: x.order_number, customer_name: x.customer_name, reason: x.excluded_reason,
+      })),
       revalidated: {
         candidate_count: audience.candidate_count, eligible_count: audience.eligible_count,
         excluded_count: audience.excluded_count, excluded_by_reason: audience.excluded_by_reason, resolved_at: audience.resolved_at,
       },
-      launch_excluded_by_reason: launchExcluded,
+      launch_excluded_by_reason: r.launch_excluded_by_reason,
       sendable_count: sendable.length,
       send_limit: limit,
       batch: sendable.slice(0, limit),
       not_in_batch: Math.max(0, sendable.length - limit),
-      template_ready: tpl.ok,
-      template_missing: tpl.ok ? [] : [...tpl.missing, ...tpl.invalid],
+      template_ready: r.template_ready,
+      template_missing: r.template_missing,
       eligible_list_truncated: audience.eligible_truncated,
       prepared_count: own.length,
       frozen_count: frozen ? frozen.size : null,
       preparation: preparationState(draft, own.length, nowMs()),
     },
   }
+}
+
+/** Asistente (sin borrador): enviables de una selección ahora mismo. READ ONLY. */
+export async function computeSelectionSendable(
+  db: SupabaseLike, ctx: BroadcastAdminContext, selection: BroadcastSelection,
+  env: Record<string, string | undefined> = process.env, nowMs: () => number = Date.now,
+): Promise<SendableResult> {
+  const audience = await computeBroadcastAudience(db, ctx, selection, new Date(nowMs()).toISOString(), { fullLists: true })
+  return computeSendable(db, ctx, selection, audience, {}, env, nowMs)
 }
 
 export interface LaunchInput {

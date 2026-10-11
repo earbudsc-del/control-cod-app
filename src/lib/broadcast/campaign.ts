@@ -77,15 +77,47 @@ export function campaignRuleVersion(c: BroadcastCampaign): string {
   return c.type === 'coordination' ? 'sd_coordination_v2' : 'sd_repurchase_v1'
 }
 
-// template_name interno (identidad en wa_template_queue: UNIQUE(order_id, template_name)).
-// 'sd_broadcast_repurchase' AÚN no es aceptado por los CHECK de 064 → ver
-// propuesta de migración 066 (Sprint C). Por eso repurchase es preview-only.
+// ── Grupos de clientes y matriz de compatibilidad (asistente C.2) ────────────
+// La segmentación decide a qué GRUPO pertenece cada cliente; el admin elige el
+// TEMPLATE. La matriz bloquea las combinaciones comercialmente incorrectas:
+//   Pendientes / Confirmados sin pagar → recuperación (sd_broadcast_confirmation)
+//   Pagados con compra completada      → recompra     (sd_broadcast_repurchase)
+// Un template futuro se agrega aquí (grupos permitidos) + en templates.ts
+// (contrato Meta) + al CHECK de la DB.
+export type BroadcastGroup = 'pending' | 'confirmed_unpaid' | 'paid'
+
+export function campaignGroup(c: BroadcastCampaign): BroadcastGroup {
+  return c.type === 'repurchase' ? 'paid' : c.segment
+}
+
+export const GROUP_LABELS: Record<BroadcastGroup, string> = {
+  pending:          'Pendientes',
+  confirmed_unpaid: 'Confirmados sin pagar',
+  paid:             'Pagados con compra completada',
+}
+
+export const TEMPLATE_ALLOWED_GROUPS: Record<BroadcastTemplateName, BroadcastGroup[]> = {
+  sd_broadcast_confirmation: ['pending', 'confirmed_unpaid'],
+  sd_broadcast_repurchase:   ['paid'],
+}
+
+const INCOMPATIBLE_REASON: Record<BroadcastTemplateName, string> = {
+  sd_broadcast_confirmation: 'Recuperación de pedidos: el cliente ya pagó su compra — este texto ("tu tratamiento está listo, ¿coordinamos tu entrega?") no corresponde.',
+  sd_broadcast_repurchase:   'Recompra: el cliente todavía no ha recibido ni pagado su pedido — una oferta para "renovar tu tratamiento" no corresponde.',
+}
+
+export function templateCompatibility(t: BroadcastTemplateName, c: BroadcastCampaign): { ok: true } | { ok: false; reason: string } {
+  return TEMPLATE_ALLOWED_GROUPS[t].includes(campaignGroup(c)) ? { ok: true } : { ok: false, reason: INCOMPATIBLE_REASON[t] }
+}
+
+/** Template por defecto del grupo (borradores B/C.1 sin template explícito). */
 export function campaignTemplateName(c: BroadcastCampaign): BroadcastTemplateName {
   return c.type === 'coordination' ? 'sd_broadcast_confirmation' : 'sd_broadcast_repurchase'
 }
 
-export function campaignCanCreateDraft(c: BroadcastCampaign): boolean {
-  return c.type === 'coordination'
+/** Desde 066 ambos templates son aceptados por la DB: todos los grupos admiten borrador. */
+export function campaignCanCreateDraft(_c: BroadcastCampaign): boolean {
+  return true
 }
 
 // Quick replies EXACTOS de los templates (B.2.1). Coordinación: SOLO dos, sin ubicación.

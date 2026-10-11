@@ -126,12 +126,13 @@ async function main() {
     check(`P2.1 ${handlers} handlers en 9 rutas: validación de permisos → return si falla → recién entonces cliente privilegiado`, bad.length === 0 && handlers === 11, bad)
     const detail = readFileSync('src/app/api/admin/broadcasts/[id]/route.ts', 'utf8')
     check('P2.2 detalle de campaña filtra por id + store_id del perfil', /\.eq\('id', id\)\.eq\('store_id', auth\.ctx\.storeId\)/.test(detail))
-    const changed = execSync('git diff --name-only 30af2ed -- src', { encoding: 'utf8' }).trim().split('\n').filter(Boolean).sort()
-    const expected = [...ADMIN_ROUTES, INBOX_ROUTE, 'src/lib/supabase/server.ts'].sort()
-    check('P2.3 solo cambian las 9 rutas + server.ts (nada fuera del alcance)', JSON.stringify(changed) === JSON.stringify(expected), changed)
-    const serverDiff = execSync('git diff 30af2ed -- src/lib/supabase/server.ts', { encoding: 'utf8' })
-    check('P2.4 server.ts: solo añadidos (createClient y createServiceClient intactos)',
-      !serverDiff.split('\n').some(l => l.startsWith('-') && !l.startsWith('---')), serverDiff.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')))
+    // El parche RLS quedó en a393861: desde ahí server.ts no cambia y ninguna de
+    // las 9 rutas vuelve a usar createServiceClient (P2.1).
+    const serverDiff = execSync('git diff a39386162a52d57602312ed7437f51d99dbc86a0 -- src/lib/supabase/server.ts', { encoding: 'utf8' })
+    check('P2.3 server.ts sin cambios desde el parche RLS (a393861)', serverDiff.trim() === '', serverDiff.slice(0, 200))
+    const rlsDiff = execSync('git diff 30af2ed a39386162a52d57602312ed7437f51d99dbc86a0 -- src/lib/supabase/server.ts', { encoding: 'utf8' })
+    check('P2.4 el parche RLS solo añadió código a server.ts (createClient y createServiceClient intactos)',
+      !rlsDiff.split('\n').some(l => l.startsWith('-') && !l.startsWith('---')), rlsDiff.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')))
     const remaining = execSync("grep -rl 'createServiceClient()' src || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean)
     check('P2.5 createServiceClient se conserva en los usos fuera del alcance (cron, webhooks y otros módulos)',
       remaining.includes('src/app/api/cron/wa-broadcast-queue/route.ts') && remaining.includes('src/app/api/webhooks/whatsapp/route.ts') && remaining.length >= 38, remaining.length)

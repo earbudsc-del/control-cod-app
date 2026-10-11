@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Ban, Eye, Pause, Play, Send } from 'lucide-react'
 import { Spinner } from '@/components/ui/spinner'
-import { BROADCAST_INTENT_LABELS, BROADCAST_QUEUE_STATUS_LABELS, BROADCAST_STATUS_LABELS } from '@/lib/broadcast/labels'
+import { BROADCAST_INTENT_LABELS, BROADCAST_QUEUE_STATUS_LABELS, BROADCAST_STATUS_LABELS, FAILURE_CATEGORY_LABELS, broadcastReasonLabel } from '@/lib/broadcast/labels'
 import type { BroadcastMetrics } from '@/lib/broadcast/metrics'
 import { BroadcastLaunchModal } from './BroadcastLaunchModal'
 
@@ -117,6 +117,12 @@ export function BroadcastCampaignPanel({ broadcastId, onChanged }: { broadcastId
             <Stat label="Sin atender" value={m.responses_unhandled} />
             <Stat label="Confirm. atribuibles" value={m.confirmations_attributable} />
           </div>
+          {Object.keys(m.skipped_by_reason ?? {}).length > 0 && (
+            <p className="text-gray-600">Omitidos por causa (revalidados antes de enviar, no se sustituyen): {Object.entries(m.skipped_by_reason).map(([k, n]) => `${broadcastReasonLabel(k)}: ${n}`).join(' · ')}</p>
+          )}
+          {Object.keys(m.failed_by_category ?? {}).length > 0 && (
+            <p className="text-gray-600">Fallidos por causa (ninguno se reintenta solo): {Object.entries(m.failed_by_category).map(([k, n]) => `${FAILURE_CATEGORY_LABELS[k] ?? k}: ${n}`).join(' · ')}</p>
+          )}
           {Object.keys(m.responses_by_intent).length > 0 && (
             <p className="text-gray-600">Respuestas: {Object.entries(m.responses_by_intent).map(([k, n]) => `${BROADCAST_INTENT_LABELS[k] ?? k}: ${n}`).join(' · ')}</p>
           )}

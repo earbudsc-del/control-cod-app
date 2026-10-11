@@ -9,6 +9,8 @@
 //   confirmación atribuible exige confirmation_status='confirmed' con
 //   customer_confirmed_at POSTERIOR al envío al pedido de esa fila.
 
+import { classifyMetaFailure, type FailureCategory } from './phone-rules'
+
 interface SupabaseLike {
   from: (table: string) => any // eslint-disable-line @typescript-eslint/no-explicit-any
 }
@@ -21,6 +23,10 @@ export interface BroadcastMetrics {
   delivered:     number
   read:          number
   failed:        number            // rechazo de Meta + agotó reintentos
+  // C.2 — fallos por categoría (ninguna se reintenta sola): número no
+  // disponible (131026), restricción de marketing (131049), configuración del
+  // template (132xxx), temporal agotado (429/5xx) u otro.
+  failed_by_category: Partial<Record<FailureCategory, number>>
   failed_after_accept: number      // Meta aceptó y luego reportó failed
   send_unknown:  number
   skipped:       number
@@ -45,14 +51,18 @@ export async function getBroadcastMetrics(db: SupabaseLike, storeId: string, bro
   const rows = (rowsData ?? []) as QueueRow[]
 
   const m: BroadcastMetrics = {
-    queued: rows.length, pending: 0, processing: 0, accepted: 0, delivered: 0, read: 0, failed: 0,
+    queued: rows.length, pending: 0, processing: 0, accepted: 0, delivered: 0, read: 0, failed: 0, failed_by_category: {},
     failed_after_accept: 0, send_unknown: 0, skipped: 0, skipped_by_reason: {}, responded: 0,
     responses_by_intent: {}, responses_unhandled: 0, confirmations_attributable: 0, errors: [],
   }
   for (const r of rows) {
     if (r.status === 'pending') m.pending++
     else if (r.status === 'processing') m.processing++
-    else if (r.status === 'failed') m.failed++
+    else if (r.status === 'failed') {
+      m.failed++
+      const cat = classifyMetaFailure(r.meta_error_code, r.error_message)
+      m.failed_by_category[cat] = (m.failed_by_category[cat] ?? 0) + 1
+    }
     else if (r.status === 'send_unknown') m.send_unknown++
     else if (r.status === 'skipped') {
       m.skipped++

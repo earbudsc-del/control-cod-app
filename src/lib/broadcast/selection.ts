@@ -16,7 +16,10 @@
 //     orders.created_at <= resolved_at (instante de alta en Control COD,
 //     inmutable). Pedidos posteriores que cumplan el filtro NO pertenecen.
 
-import { parseCampaign, type BroadcastCampaign } from './campaign'
+import {
+  BROADCAST_TEMPLATES, campaignTemplateName, parseCampaign, templateCompatibility,
+  type BroadcastCampaign, type BroadcastTemplateName,
+} from './campaign'
 
 export const MAX_SELECTED_IDS = 500
 export const MAX_SEARCH_LENGTH = 80
@@ -45,8 +48,16 @@ export type BroadcastAudienceBase =
   | { mode: 'selected_ids'; order_ids: string[] }
   | { mode: 'filtered';     filters: BroadcastFilters }
 
-// B.2 — selección completa = audiencia base + campaña explícita.
-export type BroadcastSelection = BroadcastAudienceBase & { campaign: BroadcastCampaign }
+// B.2 — selección completa = audiencia base + campaña (grupo) explícita.
+// C.2 — + template elegido por el admin (validado contra la matriz de
+// compatibilidad). Selecciones/borradores anteriores sin template usan el
+// template por defecto del grupo.
+export type BroadcastSelection = BroadcastAudienceBase & { campaign: BroadcastCampaign; template?: BroadcastTemplateName }
+
+/** Template efectivo de una selección (explícito o, si falta, el del grupo). */
+export function selectionTemplate(s: { campaign: BroadcastCampaign; template?: BroadcastTemplateName }): BroadcastTemplateName {
+  return s.template ?? campaignTemplateName(s.campaign)
+}
 
 export type ParseResult =
   | { ok: true;  selection: BroadcastSelection }
@@ -65,7 +76,7 @@ export const REPURCHASE_AUDIENCE_BASE: BroadcastAudienceBase = {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const FILTER_KEYS = new Set(['scope', 'status', 'payment', 'date_from', 'date_to', 'search'])
-const SELECTION_KEYS = new Set(['mode', 'order_ids', 'filters', 'campaign'])
+const SELECTION_KEYS = new Set(['mode', 'order_ids', 'filters', 'campaign', 'template'])
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -96,12 +107,21 @@ export function parseBroadcastSelection(input: unknown): ParseResult {
   const c = parseCampaign(input.campaign)
   if (!c.ok) return c
   if (c.campaign.type === 'repurchase') {
+    // Pagados: todo el segmento SD (filtros neutros) o clientes elegidos a mano
+    // (ids de su pedido ancla). Nunca los filtros de estado/pago/fecha de la pestaña.
     const b = base.base
     const neutral = b.mode === 'filtered' && b.filters.status === '' && b.filters.payment === 'todos'
       && b.filters.date_from === null && b.filters.date_to === null && b.filters.search === null
-    if (!neutral) return { ok: false, error: 'Recompra usa el segmento SD completo (sin ids ni filtros de la pestaña)' }
+    if (!neutral && b.mode !== 'selected_ids') return { ok: false, error: 'Recompra usa el segmento SD completo o clientes elegidos (sin filtros de la pestaña)' }
   }
-  return { ok: true, selection: { ...base.base, campaign: c.campaign } }
+  let template: BroadcastTemplateName = campaignTemplateName(c.campaign)
+  if (input.template !== undefined && input.template !== null) {
+    if (!(BROADCAST_TEMPLATES as readonly unknown[]).includes(input.template)) return { ok: false, error: 'template inválido' }
+    template = input.template as BroadcastTemplateName
+  }
+  const compat = templateCompatibility(template, c.campaign)
+  if (!compat.ok) return { ok: false, error: compat.reason }
+  return { ok: true, selection: { ...base.base, campaign: c.campaign, template } }
 }
 
 function parseAudienceBase(input: Record<string, unknown>): BaseParseResult {

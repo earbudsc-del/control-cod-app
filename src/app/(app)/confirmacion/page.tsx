@@ -24,7 +24,7 @@ import { SelectionHeaderCheckbox } from '@/components/selection/SelectionHeaderC
 import { SelectionBulkActionBar } from '@/components/selection/BulkActionBar'
 import { PrintCodLabelsBatchButton } from '@/components/order-label/PrintCodLabelsBatchButton'
 import { ExportOrdersButton } from '@/components/selection/ExportOrdersButton'
-import { BroadcastPrepareModal, PrepareWhatsappSelectedButton } from '@/components/broadcast/BroadcastPrepareModal'
+import { BroadcastWizard, PrepareWhatsappSelectedButton } from '@/components/broadcast/BroadcastWizard'
 import { BroadcastHistoryModal } from '@/components/broadcast/BroadcastHistoryModal'
 import type { BroadcastAudienceBase } from '@/lib/broadcast/selection'
 
@@ -2423,7 +2423,7 @@ export default function ConfirmacionPage() {
       </SelectionProvider>
 
       {broadcastSelection && (
-        <BroadcastPrepareModal
+        <BroadcastWizard
           selection={broadcastSelection}
           onClose={() => setBroadcastSelection(null)}
         />

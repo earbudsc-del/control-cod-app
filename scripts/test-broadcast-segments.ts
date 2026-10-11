@@ -158,7 +158,8 @@ async function main() {
     check('B.2.1 recompra: sin advertencia de precio histórico; media luma_repurchase; oferta estándar',
       p60.eligible.every(e => e.warnings.length === 0 && e.media.asset_key === 'luma_repurchase' && e.media.status === 'approved'
         && e.offer_kind === 'repurchase_standard'))
-    check('7. recompra: can_create_draft=false (requiere 066)', p60.can_create_draft === false && p60.template_name === 'sd_broadcast_repurchase')
+    // C.2: desde 066 la DB acepta sd_broadcast_repurchase → la recompra admite borrador.
+    check('7. recompra: can_create_draft=true (066 aplicada) y template de recompra', p60.can_create_draft === true && p60.template_name === 'sd_broadcast_repurchase')
   }
 
   // ── R. Audiencia congelada ────────────────────────────────────────────────
@@ -336,7 +337,8 @@ async function main() {
   console.log('\n=== DTO de campaña ===\n')
   {
     const neutral = REPURCHASE_AUDIENCE_BASE
-    check('recompra con ids → rechazada', !parseBroadcastSelection({ mode: 'selected_ids', order_ids: [randomUUID()], campaign: R(30) }).ok)
+    // C.2: Pagados admite clientes elegidos a mano (ids de su pedido ancla).
+    check('recompra con ids de clientes elegidos → aceptada', parseBroadcastSelection({ mode: 'selected_ids', order_ids: [randomUUID()], campaign: R(30) }).ok)
     check('recompra con filtros de la pestaña → rechazada',
       !parseBroadcastSelection({ mode: 'filtered', filters: { scope: 'santo_domingo', status: 'pending' }, campaign: R(30) }).ok)
     check('recompra neutra → ok', parseBroadcastSelection({ ...neutral, campaign: R(45) }).ok)
@@ -453,7 +455,7 @@ async function main() {
   {
     const files = ['src/lib/broadcast/offer.ts', 'src/lib/broadcast/campaign.ts', 'src/lib/broadcast/message-preview.ts', 'src/lib/broadcast/response-plan.ts',
       'src/lib/broadcast/broadcast-service.ts', 'src/lib/broadcast/selection.ts', 'src/lib/broadcast/labels.ts',
-      'src/lib/broadcast/sd-broadcast-eligibility.ts', 'src/components/broadcast/BroadcastPrepareModal.tsx',
+      'src/lib/broadcast/sd-broadcast-eligibility.ts', 'src/components/broadcast/BroadcastWizard.tsx',
       'src/components/broadcast/BroadcastHistoryModal.tsx']
     const strip = (t: string) => t.split('\n').filter(l => !l.trim().startsWith('//') && !l.trim().startsWith('*')).join('\n')
     const code = files.map(f => strip(readFileSync(join(__dirname, '..', f), 'utf8'))).join('\n')

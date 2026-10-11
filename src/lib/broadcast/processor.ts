@@ -31,14 +31,18 @@
 // Nada de esto confirma, cancela ni modifica pedidos.
 
 import { isWaBroadcastEnabled } from '@/lib/config/wa-broadcast'
-import { evaluateOrderEligibility, type BroadcastCandidateOrder } from './sd-broadcast-eligibility'
-import { audienceFromDraft, BROADCAST_ORDER_COLUMNS } from './broadcast-service'
-import { campaignTemplateName, type BroadcastTemplateName } from './campaign'
 import {
-  buildConfirmationBodyParams, buildTemplateComponents, renderConfirmationTemplateBody, resolveTemplateConfig,
+  activeCoordinationPhone, evaluateOrderEligibility, normalizeBroadcastPhone, type BroadcastCandidateOrder,
+} from './sd-broadcast-eligibility'
+import { audienceFromDraft, BROADCAST_ORDER_COLUMNS, isCompletedPurchase, type BroadcastOrderRow } from './broadcast-service'
+import { templateCompatibility, type BroadcastCampaign, type BroadcastTemplateName } from './campaign'
+import { selectionTemplate } from './selection'
+import {
+  buildBodyParamsFor, buildTemplateComponents, renderTemplateBody, resolveTemplateConfig,
   type ConfirmationOrderFields, type TemplateSendConfig,
 } from './templates'
 import { loadOptedOutPhones } from './suppression'
+import { loadPhoneStatuses } from './phone-rules'
 import { releaseUnsentRecipients } from './cancel'
 import { ensureContactAndConversation } from '@/lib/whatsapp/ensure-conversation'
 import { sendWhatsAppTemplate, type SendTemplateRequest, type SendTemplateResult } from '@/lib/whatsapp/send-template'
@@ -125,13 +129,14 @@ async function processOneBroadcast(
   d: { env: Record<string, string | undefined>; enabled: () => boolean; send: (r: SendTemplateRequest) => Promise<SendTemplateResult>; now: () => Date; sleep: (ms: number) => Promise<void> },
   summary: ProcessorSummary,
 ): Promise<string | null> {
-  const { selection } = audienceFromDraft(b.selection_filter)
-  const template = campaignTemplateName(selection.campaign) as BroadcastTemplateName
-  if (selection.campaign.type !== 'coordination' || template !== b.template_name) {
-    await db.from('wa_broadcasts').update({ last_error: 'campaña no habilitada para envío en C.1' }).eq('id', b.id)
+  const { selection, resolvedAt } = audienceFromDraft(b.selection_filter)
+  const template: BroadcastTemplateName = selectionTemplate(selection)
+  const compat = templateCompatibility(template, selection.campaign)
+  if (template !== b.template_name || !compat.ok) {
+    await db.from('wa_broadcasts').update({ last_error: compat.ok ? 'el template de la campaña no coincide con su selección' : compat.reason }).eq('id', b.id)
     return null
   }
-  const segment = selection.campaign.segment
+  const target: RowTarget = { template, campaign: selection.campaign, resolvedAt }
 
   // 1. Filas 'processing' abandonadas → send_unknown (jamás se reenvían).
   const staleBefore = new Date(d.now().getTime() - STALE_PROCESSING_MINUTES * 60_000).toISOString()
@@ -169,7 +174,7 @@ async function processOneBroadcast(
     if (!d.enabled()) { stopReason = 'disabled_mid_batch'; break }
     if (await readBroadcastStatus(db, b.id) !== 'processing') { stopReason = 'paused'; break }
 
-    const result = await processRow(db, b, row, tpl.config, segment, d, summary)
+    const result = await processRow(db, b, row, tpl.config, target, d, summary)
     if (result === 'stop_rate_limited' || result === 'stop_server_error' || result === 'stop_paused' || result === 'stop_disabled') {
       stopReason = result.replace('stop_', '')
       break
@@ -203,8 +208,35 @@ async function processOneBroadcast(
 type RowOutcome = 'sent' | 'skipped' | 'failed' | 'send_unknown' | 'retry' | 'unclaimed'
   | 'stop_rate_limited' | 'stop_server_error' | 'stop_paused' | 'stop_disabled'
 
+interface RowTarget { template: BroadcastTemplateName; campaign: BroadcastCampaign; resolvedAt: string }
+
+/**
+ * Recompra: el destinatario sigue siendo un cliente con compra completada cuyo
+ * pedido ancla es su ÚLTIMA compra, sin pedido activo en curso y fuera de la
+ * ventana (anclada al instante del borrador). Lee los pedidos de ese teléfono.
+ */
+async function revalidateRepurchase(
+  db: SupabaseLike, storeId: string, anchor: BroadcastOrderRow, phone: string, campaign: BroadcastCampaign, resolvedAt: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!isCompletedPurchase(anchor)) return { ok: false, reason: 'no_longer_eligible:not_completed_purchase' }
+  if (normalizeBroadcastPhone(anchor.customer_phone) !== phone) return { ok: false, reason: 'phone_changed' }
+  if (campaign.type === 'repurchase') {
+    const windowLimit = Date.parse(resolvedAt) - campaign.window_days * 24 * 60 * 60 * 1000
+    if (Date.parse(anchor.paid_at!) > windowLimit) return { ok: false, reason: 'no_longer_eligible:recent_purchase' }
+  }
+  const { data, error } = await db.from('orders').select(BROADCAST_ORDER_COLUMNS)
+    .eq('store_id', storeId).ilike('customer_phone', `%${phone.slice(-4)}`)
+  if (error) throw new Error(`orders(repurchase revalidation): ${error.message ?? String(error)}`)
+  for (const o of (data ?? []) as BroadcastOrderRow[]) {
+    if (o.id === anchor.id || normalizeBroadcastPhone(o.customer_phone) !== phone) continue
+    if (activeCoordinationPhone(o) === phone) return { ok: false, reason: 'no_longer_eligible:active_order_in_progress' }
+    if (isCompletedPurchase(o) && Date.parse(o.paid_at!) > Date.parse(anchor.paid_at!)) return { ok: false, reason: 'no_longer_eligible:recent_purchase' }
+  }
+  return { ok: true }
+}
+
 async function processRow(
-  db: SupabaseLike, b: BroadcastRow, row: QueueRow, cfg: TemplateSendConfig, segment: 'pending' | 'confirmed_unpaid',
+  db: SupabaseLike, b: BroadcastRow, row: QueueRow, cfg: TemplateSendConfig, target: RowTarget,
   d: { enabled: () => boolean; send: (r: SendTemplateRequest) => Promise<SendTemplateResult>; now: () => Date },
   summary: ProcessorSummary,
 ): Promise<RowOutcome> {
@@ -236,15 +268,25 @@ async function processRow(
   const { data: order } = await db.from('orders').select(BROADCAST_ORDER_COLUMNS)
     .eq('id', row.order_id).eq('store_id', b.store_id).maybeSingle()
   if (!order) return skip('order_not_found')
-  const elig = evaluateOrderEligibility(order as BroadcastCandidateOrder, null, { segment })
-  if (!elig.eligible) return skip(`no_longer_eligible:${elig.reason}`)
-  if (elig.phone_normalized !== row.phone_normalized) return skip('phone_changed')
-  // Parámetros del texto aprobado (5 variables) — solo si el pedido es
-  // exactamente la oferta anunciada; si no, no se envía.
-  const bodyParams = buildConfirmationBodyParams(order as ConfirmationOrderFields)
+  if (target.campaign.type === 'coordination') {
+    const elig = evaluateOrderEligibility(order as BroadcastCandidateOrder, null, { segment: target.campaign.segment })
+    if (!elig.eligible) return skip(`no_longer_eligible:${elig.reason}`)
+    if (elig.phone_normalized !== row.phone_normalized) return skip('phone_changed')
+  } else {
+    const rv = await revalidateRepurchase(db, b.store_id, order as BroadcastOrderRow, row.phone_normalized, target.campaign, target.resolvedAt)
+    if (!rv.ok) return skip(rv.reason)
+  }
+  // Variables del texto aprobado del template — si no se pueden construir
+  // (p.ej. la oferta ya no es la exacta del template), no se envía.
+  const bodyParams = buildBodyParamsFor(target.template, order as ConfirmationOrderFields)
   if (!bodyParams.ok) return skip(bodyParams.reason)
   const optedOut = await loadOptedOutPhones(db, b.store_id, [row.phone_normalized])
   if (optedOut.has(row.phone_normalized)) return skip('marketing_opt_out')
+  // Reglas por teléfono de TODOS los templates (131026, 131049, 7 días),
+  // excluyendo esta misma fila (ya está en 'processing').
+  const phoneStatus = (await loadPhoneStatuses(db, b.store_id, [row.phone_normalized],
+    { nowMs: d.now().getTime(), excludeQueueIds: new Set([row.id]) })).get(row.phone_normalized)
+  if (phoneStatus?.restriction) return skip(phoneStatus.restriction)
 
   // Última barrera justo antes de Meta: flag + pausa.
   if (!d.enabled()) { await release(); return 'stop_disabled' }
@@ -305,7 +347,7 @@ async function recordOutboundMessage(
   })
   // Copia de auditoría del texto aprobado con los parámetros enviados
   // (Meta compone el mensaje real; este string no se transmite).
-  const body = renderConfirmationTemplateBody(bodyParams)
+  const body = renderTemplateBody(cfg.name, bodyParams)
   const { error } = await db.from('wa_messages').insert({
     store_id: b.store_id, conversation_id: conversationId, wa_msg_id: wamid,
     direction: 'outbound', message_type: 'template', body, status: 'sent', sent_at: sentAt,

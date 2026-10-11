@@ -188,7 +188,7 @@ async function main() {
     const dedup = parseBroadcastSelection({ campaign: PENDING, mode: 'selected_ids', order_ids: ['AAAAAAAA-0000-0000-0000-000000000000', 'aaaaaaaa-0000-0000-0000-000000000000'] })
     check('E. ids deduplicados (case-insensitive)', dedup.ok && dedup.selection.mode === 'selected_ids' && dedup.selection.order_ids.length === 1)
 
-    const ui = ['src/components/broadcast/BroadcastPrepareModal.tsx', 'src/components/broadcast/BroadcastHistoryModal.tsx', 'src/app/(app)/confirmacion/page.tsx']
+    const ui = ['src/components/broadcast/BroadcastWizard.tsx', 'src/components/broadcast/BroadcastHistoryModal.tsx', 'src/app/(app)/confirmacion/page.tsx']
       .map(f => readFileSync(join(__dirname, '..', f), 'utf8')).join('\n')
     check('E. UI no importa el servicio de audiencia', !ui.includes('broadcast-service'))
     check('E. UI no importa reglas de elegibilidad (sd-broadcast-eligibility)', !ui.includes('sd-broadcast-eligibility'))
@@ -281,7 +281,7 @@ async function main() {
     check('H. 0 elegibles → 422 y sin draft', !r0.ok && r0.status === 422 && db.tables.wa_broadcasts.length === before0)
     check('I. en todo el flujo: wa_template_queue intacta', db.tables.wa_template_queue.length === queueBefore)
 
-    const modal = readFileSync(join(__dirname, '..', 'src/components/broadcast/BroadcastPrepareModal.tsx'), 'utf8')
+    const modal = readFileSync(join(__dirname, '..', 'src/components/broadcast/BroadcastWizard.tsx'), 'utf8')
     check('L. UI: botón deshabilitado mientras crea / ya creado', /disabled=\{loading \|\| creating/.test(modal) && /if \(creating \|\| created\) return/.test(modal))
     check('L. UI: request_key por apertura del modal', /useState\(newRequestKey\)/.test(modal))
   }
@@ -293,7 +293,7 @@ async function main() {
       'src/lib/broadcast/broadcast-service.ts', 'src/lib/broadcast/selection.ts', 'src/lib/broadcast/admin-context.ts',
       'src/lib/broadcast/labels.ts', 'src/lib/broadcast/message-preview.ts',
       'src/app/api/admin/broadcasts/route.ts', 'src/app/api/admin/broadcasts/preview/route.ts',
-      'src/components/broadcast/BroadcastPrepareModal.tsx', 'src/components/broadcast/BroadcastHistoryModal.tsx',
+      'src/components/broadcast/BroadcastWizard.tsx', 'src/components/broadcast/BroadcastHistoryModal.tsx',
     ]
     const strip = (s: string) => s.split('\n').filter(l => !l.trim().startsWith('//') && !l.trim().startsWith('*')).join('\n')
     const src = files.map(f => strip(readFileSync(join(__dirname, '..', f), 'utf8'))).join('\n')
@@ -449,7 +449,7 @@ async function main() {
 
     const code = ['src/lib/broadcast/message-preview.ts', 'src/lib/broadcast/broadcast-service.ts', 'src/lib/broadcast/selection.ts',
       'src/lib/broadcast/labels.ts', 'src/lib/broadcast/sd-broadcast-eligibility.ts', 'src/app/api/admin/broadcasts/route.ts',
-      'src/app/api/admin/broadcasts/preview/route.ts', 'src/components/broadcast/BroadcastPrepareModal.tsx',
+      'src/app/api/admin/broadcasts/preview/route.ts', 'src/components/broadcast/BroadcastWizard.tsx',
       'src/components/broadcast/BroadcastHistoryModal.tsx'].map(f => readFileSync(join(__dirname, '..', f), 'utf8')).join('\n')
     check('K. sin 1990 / 1,990 en código Broadcast', !/1[,.]?990/.test(code))
     check('K. sin montos RD$ literales (precio siempre vía formatCodAmount)', !/RD\$ ?\d/.test(code) && code.includes('RD$${formatCodAmount(v.cod_amount)}'))

@@ -32,7 +32,7 @@
 //
 // Puro (sin I/O).
 
-import { TEMPLATE_BUTTONS, type BroadcastTemplateName } from './campaign'
+import { REPURCHASE_OFFER, TEMPLATE_ALLOWED_GROUPS, TEMPLATE_BUTTONS, type BroadcastGroup, type BroadcastTemplateName } from './campaign'
 import { PERSONAL_BUNDLE_PRICE } from './catalog'
 import { resolveCommercialOffer } from './offer'
 import { formatCodAmount } from './message-preview'
@@ -167,6 +167,76 @@ export function renderConfirmationTemplateBody(params: string[]): string {
     `🚚 ${shipping} — pagas al recibir`, '',
     '*¿Coordinamos tu entrega?*',
   ].join('\n')
+}
+
+/**
+ * Copia de auditoría del texto aprobado de sd_broadcast_coordination (recompra).
+ * Precios derivados de REPURCHASE_OFFER (catálogo), nunca literales.
+ */
+export function renderRepurchaseTemplateBody(params: string[]): string {
+  const [n] = params
+  return [
+    '🎁 *Tenemos una oferta especial para ti!*', '',
+    `Hola, ${n} 😊`,
+    'Por ser cliente *LÜMA*, tienes un beneficio especial para renovar tu tratamiento 🦷✨', '',
+    `*${REPURCHASE_OFFER.pasteQty} LÜMA Teeth — ${REPURCHASE_OFFER.discountPct}% de descuento*`,
+    `Antes: RD$${formatCodAmount(REPURCHASE_OFFER.listPrice)}`,
+    `💙 Ahora: *RD$${formatCodAmount(REPURCHASE_OFFER.price)}*`,
+    '🚚 Envío gratis',
+    '💵 Pagas al recibir', '',
+    '*¿Quieres aprovechar tu precio especial?*',
+  ].join('\n')
+}
+
+// ── Registro de templates (asistente C.2) ────────────────────────────────────
+// Un template futuro: entrada aquí + META_TEMPLATE_CONTRACTS + grupos en
+// campaign.ts + CHECK de la DB + verificación contra la Graph API.
+
+export interface TemplateDefinition {
+  name:          BroadcastTemplateName
+  label:         string
+  purpose:       string
+  allowedGroups: BroadcastGroup[]
+  metaName:      string
+  language:      string
+  bodyParamCount: number
+  buttons:       [string, string]
+  variables:     string[]                       // significado de {{1}}…{{n}}
+}
+
+export const TEMPLATE_DEFINITIONS: Record<BroadcastTemplateName, TemplateDefinition> = {
+  sd_broadcast_confirmation: {
+    name: 'sd_broadcast_confirmation', label: 'Recuperación de pedido',
+    purpose: 'Coordinar la entrega de un pedido aún no pagado (oferta Personal 2×1 exacta).',
+    allowedGroups: TEMPLATE_ALLOWED_GROUPS.sd_broadcast_confirmation,
+    metaName: META_TEMPLATE_CONTRACTS.sd_broadcast_confirmation.metaName,
+    language: META_TEMPLATE_CONTRACTS.sd_broadcast_confirmation.language,
+    bodyParamCount: META_TEMPLATE_CONTRACTS.sd_broadcast_confirmation.bodyParamCount,
+    buttons: TEMPLATE_BUTTONS.sd_broadcast_confirmation,
+    variables: ['Nombre', 'Oferta', 'Regalo', 'Total', 'Envío'],
+  },
+  sd_broadcast_repurchase: {
+    name: 'sd_broadcast_repurchase', label: 'Oferta de recompra',
+    purpose: 'Ofrecer la recompra estándar a clientes con una compra completada (pagada).',
+    allowedGroups: TEMPLATE_ALLOWED_GROUPS.sd_broadcast_repurchase,
+    metaName: META_TEMPLATE_CONTRACTS.sd_broadcast_repurchase.metaName,
+    language: META_TEMPLATE_CONTRACTS.sd_broadcast_repurchase.language,
+    bodyParamCount: META_TEMPLATE_CONTRACTS.sd_broadcast_repurchase.bodyParamCount,
+    buttons: TEMPLATE_BUTTONS.sd_broadcast_repurchase,
+    variables: ['Nombre'],
+  },
+}
+
+export interface TemplateOrderFields extends ConfirmationOrderFields {}
+
+/** Variables del template para un destinatario (fuente única de verdad). */
+export function buildBodyParamsFor(t: BroadcastTemplateName, o: TemplateOrderFields): BodyParamsResult {
+  return t === 'sd_broadcast_confirmation' ? buildConfirmationBodyParams(o) : buildRepurchaseBodyParams(o)
+}
+
+/** Copia de auditoría del texto que Meta compone para ese template (no se transmite). */
+export function renderTemplateBody(t: BroadcastTemplateName, params: string[]): string {
+  return t === 'sd_broadcast_confirmation' ? renderConfirmationTemplateBody(params) : renderRepurchaseTemplateBody(params)
 }
 
 // ── Payload de botones ───────────────────────────────────────────────────────

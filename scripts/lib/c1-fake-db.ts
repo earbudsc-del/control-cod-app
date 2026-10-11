@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto'
 
 export type Row = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
-type Op = 'eq' | 'neq' | 'in' | 'is' | 'not_is' | 'gte' | 'lt' | 'lte' | 'match'
+type Op = 'eq' | 'neq' | 'in' | 'is' | 'not_is' | 'gte' | 'gt' | 'lt' | 'lte' | 'match' | 'ilike'
 type Filter = { op: Op; col: string; val: unknown }
 
 function getPath(row: Row, col: string): unknown {
@@ -77,6 +77,11 @@ export class C1FakeDb {
         case 'is':     return v === null || v === undefined
         case 'not_is': return v !== null && v !== undefined
         case 'gte':    return v != null && cmp(v, f.val) >= 0
+        case 'gt':     return v != null && cmp(v, f.val) > 0
+        case 'ilike': {
+          const re = new RegExp('^' + String(f.val).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.') + '$', 'i')
+          return v != null && re.test(String(v))
+        }
         case 'lt':     return v != null && cmp(v, f.val) < 0
         case 'lte':    return v != null && cmp(v, f.val) <= 0
         case 'match':  return v != null && new RegExp(String(f.val)).test(String(v))
@@ -158,6 +163,8 @@ export class C1FakeDb {
         st.filters.push({ op: 'not_is', col: c, val: null }); return b
       },
       gte: (c: string, v: unknown) => { st.filters.push({ op: 'gte', col: c, val: v }); return b },
+      gt:  (c: string, v: unknown) => { st.filters.push({ op: 'gt', col: c, val: v }); return b },
+      ilike: (c: string, v: unknown) => { st.filters.push({ op: 'ilike', col: c, val: v }); return b },
       lt:  (c: string, v: unknown) => { st.filters.push({ op: 'lt', col: c, val: v }); return b },
       lte: (c: string, v: unknown) => { st.filters.push({ op: 'lte', col: c, val: v }); return b },
       filter: (c: string, op: string, v: unknown) => {

@@ -29,7 +29,23 @@ export const BROADCAST_REASON_LABELS: Record<string, string> = {
   offer_incompatible:                'Oferta distinta a la del template (no es el bundle Personal 2×1 con cepillo gratis y envío gratis)',
   media_asset_pending:               'Imagen de su oferta aún no existe',
   marketing_opt_out:                 'Pidió no recibir mensajes promocionales',
-  phone_already_contacted:           'Este número ya recibió esta campaña',
+  phone_already_contacted:           'Este número ya recibió este template',
+  // C.2 — reglas por teléfono de todos los templates
+  phone_unavailable_whatsapp:        'No disponible en WhatsApp (Meta 131026) — sin evidencia posterior de validez',
+  marketing_restricted_recent:       'Restricción de marketing de Meta (131049) hace menos de 7 días',
+  frequency_cap_7d:                  'Ya recibió un Broadcast promocional en los últimos 7 días',
+  // Omisiones del processor justo antes de cada envío
+  no_longer_eligible:                'Dejó de ser elegible antes del envío',
+  order_not_found:                   'Pedido no encontrado al enviar',
+  phone_changed:                     'El teléfono del pedido cambió',
+}
+
+export const FAILURE_CATEGORY_LABELS: Record<string, string> = {
+  phone_unavailable:    'No disponible en WhatsApp (131026)',
+  marketing_restricted: 'Restricción de marketing del destinatario (131049)',
+  template_config:      'Configuración del template (132xxx)',
+  temporary_exhausted:  'Temporal agotado (429/5xx tras reintentos)',
+  other:                'Otro rechazo de Meta',
 }
 
 export function broadcastReasonLabel(reason: string): string {

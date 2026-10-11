@@ -42,10 +42,10 @@ import {
 import { renderCoordinationMessage, renderRepurchaseMessage } from './message-preview'
 import { MEDIA_ASSETS, resolveCommercialOffer, type BroadcastMediaAssetKey, type OfferKind } from './offer'
 import {
-  campaignButtons, campaignCanCreateDraft, campaignRuleVersion, campaignTemplateName,
-  type BroadcastCampaign,
+  TEMPLATE_BUTTONS, campaignCanCreateDraft, campaignRuleVersion,
+  type BroadcastCampaign, type BroadcastTemplateName,
 } from './campaign'
-import { parseBroadcastSelection, type BroadcastFilters, type BroadcastSelection } from './selection'
+import { parseBroadcastSelection, selectionTemplate, type BroadcastFilters, type BroadcastSelection } from './selection'
 
 export const DRAFT_REQUIRES_REVALIDATION_BEFORE_SEND = true
 
@@ -232,6 +232,9 @@ async function loadExistingBroadcastRows(
 
 export interface AudienceOptions {
   ignoreQueueRowsOfBroadcast?: string
+  // C.2: listas completas (sin el corte de PREVIEW_LIST_LIMIT) para el cálculo
+  // de enviables y la paginación del asistente. Los conteos no cambian.
+  fullLists?: boolean
 }
 
 // ── Audiencia (única implementación: preview, create y revalidación) ─────────
@@ -307,26 +310,27 @@ function routeMatches(c: BroadcastCampaign, o: BroadcastOrderRow): boolean {
 }
 
 function packPreview(
-  campaign: BroadcastCampaign, resolvedAt: string, candidate_count: number,
-  eligibleAll: EligibleItem[], excludedAll: ExcludedItem[],
+  campaign: BroadcastCampaign, template: BroadcastTemplateName, resolvedAt: string, candidate_count: number,
+  eligibleAll: EligibleItem[], excludedAll: ExcludedItem[], fullLists = false,
 ): BroadcastPreview {
+  const limit = fullLists ? Infinity : PREVIEW_LIST_LIMIT
   const excluded_by_reason: Partial<Record<BroadcastPreviewExcludedReason, number>> = {}
   for (const x of excludedAll) excluded_by_reason[x.excluded_reason] = (excluded_by_reason[x.excluded_reason] ?? 0) + 1
   return {
     campaign,
-    template_name:            campaignTemplateName(campaign),
+    template_name:            template,
     eligibility_rule_version: campaignRuleVersion(campaign),
-    buttons:                  campaignButtons(campaign),
+    buttons:                  TEMPLATE_BUTTONS[template],
     can_create_draft:         campaignCanCreateDraft(campaign),
     resolved_at:              resolvedAt,
     candidate_count,
     eligible_count:           eligibleAll.length,
     excluded_count:           excludedAll.length,
     excluded_by_reason,
-    eligible:                 eligibleAll.slice(0, PREVIEW_LIST_LIMIT),
-    excluded:                 excludedAll.slice(0, PREVIEW_LIST_LIMIT),
-    eligible_truncated:       eligibleAll.length > PREVIEW_LIST_LIMIT,
-    excluded_truncated:       excludedAll.length > PREVIEW_LIST_LIMIT,
+    eligible:                 eligibleAll.slice(0, limit),
+    excluded:                 excludedAll.slice(0, limit),
+    eligible_truncated:       eligibleAll.length > limit,
+    excluded_truncated:       excludedAll.length > limit,
     revalidation_required_before_send: DRAFT_REQUIRES_REVALIDATION_BEFORE_SEND,
   }
 }
@@ -343,7 +347,7 @@ async function computeCoordinationAudience(
   const [{ orders, not_found_ids }, pool, existing] = await Promise.all([
     resolveBroadcastCandidates(db, ctx.storeId, selection, resolvedAt),
     loadActivePool(db, ctx.storeId),
-    loadExistingBroadcastRows(db, ctx.storeId, campaignTemplateName(campaign), opts.ignoreQueueRowsOfBroadcast),
+    loadExistingBroadcastRows(db, ctx.storeId, selectionTemplate(selection), opts.ignoreQueueRowsOfBroadcast),
   ])
 
   const cls = classifyBroadcastCandidates(orders, existing, pool, { segment: campaign.segment, crossSegmentAmbiguity: true })
@@ -375,7 +379,7 @@ async function computeCoordinationAudience(
     }),
     ...not_found_ids.map(id => ({ order_id: id, order_number: null, customer_name: null, excluded_reason: 'not_found' as const })),
   ]
-  return packPreview(campaign, resolvedAt, orders.length + not_found_ids.length, eligibleAll, excludedAll)
+  return packPreview(campaign, selectionTemplate(selection), resolvedAt, orders.length + not_found_ids.length, eligibleAll, excludedAll, opts.fullLists)
 }
 
 /** Compra completada = Pagado (payment_status='paid'), no devuelta, Shopify real. */
@@ -398,12 +402,16 @@ export function isCompletedPurchase(o: BroadcastOrderRow): boolean {
  * B.2.1 usa la oferta estándar REPURCHASE_OFFER para todos.
  */
 async function computeRepurchaseAudience(
-  db: SupabaseLike, ctx: BroadcastAdminContext, campaign: BroadcastCampaign & { type: 'repurchase' }, resolvedAt: string,
+  db: SupabaseLike, ctx: BroadcastAdminContext, selection: BroadcastSelection, resolvedAt: string, opts: AudienceOptions = {},
 ): Promise<BroadcastPreview> {
+  const campaign = selection.campaign as BroadcastCampaign & { type: 'repurchase' }
+  // C.2: clientes elegidos a mano = ids de su pedido ancla. La frontera solo
+  // puede reducirse: un cliente no elegido nunca entra.
+  const chosen = selection.mode === 'selected_ids' ? new Set(selection.order_ids) : null
   const [paid, pool, existing] = await Promise.all([
     loadPaidOrders(db, ctx.storeId),
     loadActivePool(db, ctx.storeId),
-    loadExistingBroadcastRows(db, ctx.storeId, campaignTemplateName(campaign)),
+    loadExistingBroadcastRows(db, ctx.storeId, selectionTemplate(selection), opts.ignoreQueueRowsOfBroadcast),
   ])
   const t0 = Date.parse(resolvedAt)
   const windowLimit = t0 - campaign.window_days * 24 * 60 * 60 * 1000
@@ -428,11 +436,14 @@ async function computeRepurchaseAudience(
   for (const o of atT0) {
     const phone = normalizeBroadcastPhone(o.customer_phone)
     if (!phone) {
+      if (chosen && !chosen.has(o.id)) continue
       candidates++
       excludedAll.push({ order_id: o.id, order_number: o.order_number, customer_name: o.customer_name, excluded_reason: 'invalid_phone' })
       continue
     }
     if (candidatePhones.has(phone)) continue
+    // Cliente elegido a mano: alguna de sus compras completadas es la elegida.
+    if (chosen && !byPhone.get(phone)!.some(x => chosen.has(x.id))) continue
     candidatePhones.add(phone)
     candidates++
 
@@ -453,7 +464,7 @@ async function computeRepurchaseAudience(
       message_preview: renderRepurchaseMessage(anchor), offer_kind: 'repurchase_standard', media,
     })
   }
-  return packPreview(campaign, resolvedAt, candidates, eligibleAll, excludedAll)
+  return packPreview(campaign, selectionTemplate(selection), resolvedAt, candidates, eligibleAll, excludedAll, opts.fullLists)
 }
 
 export async function computeBroadcastAudience(
@@ -464,7 +475,7 @@ export async function computeBroadcastAudience(
   opts: AudienceOptions = {},
 ): Promise<BroadcastPreview> {
   if (selection.campaign.type === 'repurchase') {
-    return computeRepurchaseAudience(db, ctx, selection.campaign, resolvedAt)
+    return computeRepurchaseAudience(db, ctx, selection, resolvedAt, opts)
   }
   return computeCoordinationAudience(db, ctx, selection as BroadcastSelection & { campaign: { type: 'coordination' } }, resolvedAt, opts)
 }
@@ -490,8 +501,8 @@ export type CreateDraftResult =
  */
 export function buildSelectionFilter(selection: BroadcastSelection, resolvedAt: string) {
   return selection.mode === 'selected_ids'
-    ? { mode: 'selected_ids', order_ids: selection.order_ids, campaign: selection.campaign, resolved_at: resolvedAt }
-    : { mode: 'filtered', filters: selection.filters, campaign: selection.campaign, resolved_at: resolvedAt }
+    ? { mode: 'selected_ids', order_ids: selection.order_ids, campaign: selection.campaign, template: selectionTemplate(selection), resolved_at: resolvedAt }
+    : { mode: 'filtered', filters: selection.filters, campaign: selection.campaign, template: selectionTemplate(selection), resolved_at: resolvedAt }
 }
 
 /** Reconstruye la selección + cutoff guardados en un draft (validados de nuevo). */
@@ -500,11 +511,12 @@ export function audienceFromDraft(selectionFilter: Record<string, unknown>): { s
   if (typeof resolvedAt !== 'string' || Number.isNaN(Date.parse(resolvedAt))) {
     throw new Error('draft sin resolved_at válido')
   }
-  // Drafts B/B.1 no tienen campaign → coordinación/pendientes.
+  // Drafts B/B.1 no tienen campaign → coordinación/pendientes. Drafts sin
+  // template (anteriores a C.2) → template por defecto del grupo.
   const parsed = parseBroadcastSelection(
     selectionFilter.mode === 'selected_ids'
-      ? { mode: 'selected_ids', order_ids: selectionFilter.order_ids, campaign: selectionFilter.campaign }
-      : { mode: selectionFilter.mode, filters: selectionFilter.filters, campaign: selectionFilter.campaign },
+      ? { mode: 'selected_ids', order_ids: selectionFilter.order_ids, campaign: selectionFilter.campaign, template: selectionFilter.template }
+      : { mode: selectionFilter.mode, filters: selectionFilter.filters, campaign: selectionFilter.campaign, template: selectionFilter.template },
   )
   if (!parsed.ok) throw new Error(`selection_filter inválido: ${parsed.error}`)
   return { selection: parsed.selection, resolvedAt }
@@ -550,10 +562,8 @@ export async function createBroadcastDraft(
   selection: BroadcastSelection,
   requestKey: string,
 ): Promise<CreateDraftResult> {
-  // Recompra: solo preview en B.2 — los CHECK de 064 aún no aceptan
-  // 'sd_broadcast_repurchase' (propuesta migración 066, Sprint C).
   if (!campaignCanCreateDraft(selection.campaign)) {
-    return { ok: false, status: 422, error: 'Recompra: solo preview por ahora — crear borrador requiere la migración 066 (Sprint C)' }
+    return { ok: false, status: 422, error: 'Este grupo no admite borradores' }
   }
 
   const prior = await findDraftByRequestKey(db, ctx.storeId, requestKey)
@@ -570,7 +580,7 @@ export async function createBroadcastDraft(
     store_id:                 ctx.storeId,
     created_by:               ctx.userId,
     request_key:              requestKey,
-    template_name:            campaignTemplateName(selection.campaign),
+    template_name:            selectionTemplate(selection),
     status:                   'draft',
     selection_filter:         buildSelectionFilter(selection, resolvedAt),
     eligibility_rule_version: campaignRuleVersion(selection.campaign),

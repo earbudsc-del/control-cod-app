@@ -9,7 +9,8 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 import { Spinner } from '@/components/ui/spinner'
 import { broadcastReasonLabel, BROADCAST_STATUS_LABELS } from '@/lib/broadcast/labels'
-import { DEFAULT_CAMPAIGN, campaignLabel, type BroadcastCampaign } from '@/lib/broadcast/campaign'
+import { DEFAULT_CAMPAIGN, GROUP_LABELS, campaignGroup, campaignTemplateName, type BroadcastCampaign, type BroadcastTemplateName } from '@/lib/broadcast/campaign'
+import { TEMPLATE_DEFINITIONS } from '@/lib/broadcast/templates'
 import { BroadcastCampaignPanel } from './BroadcastCampaignPanel'
 
 interface BroadcastRow {
@@ -21,7 +22,7 @@ interface BroadcastRow {
   eligible_count: number
   excluded_count: number
   excluded_by_reason: Record<string, number>
-  selection_filter: { mode?: string; order_ids?: string[]; filters?: Record<string, unknown>; campaign?: unknown; resolved_at?: string }
+  selection_filter: { mode?: string; order_ids?: string[]; filters?: Record<string, unknown>; campaign?: unknown; template?: string; resolved_at?: string }
   eligibility_rule_version: string
   creator: { full_name: string | null } | null
 }
@@ -32,23 +33,37 @@ function fmt(iso: string): string {
   })
 }
 
+// C.2: grupo · template · destinatarios, con los mismos nombres del asistente.
+// Drafts B/B.1 no tienen campaign → Pendientes; drafts C.1 sin template → el del grupo.
+function draftCampaign(sf: BroadcastRow['selection_filter']): BroadcastCampaign {
+  return (sf.campaign as BroadcastCampaign | undefined) ?? DEFAULT_CAMPAIGN
+}
+
+function templateSummary(r: BroadcastRow): string {
+  const name = (r.selection_filter.template ?? r.template_name ?? campaignTemplateName(draftCampaign(r.selection_filter))) as BroadcastTemplateName
+  const def = TEMPLATE_DEFINITIONS[name]
+  return def ? `${def.label} (Meta: ${def.metaName})` : name
+}
+
 function selectionSummary(sf: BroadcastRow['selection_filter']): string {
-  // Drafts B/B.1 no tienen campaign → coordinación/pendientes.
-  const camp = campaignLabel((sf.campaign as BroadcastCampaign | undefined) ?? DEFAULT_CAMPAIGN)
-  return `${camp} — ${audienceSummary(sf)}`
+  const c = draftCampaign(sf)
+  const route = c.type === 'coordination' && c.segment === 'confirmed_unpaid' && c.route && c.route !== 'all'
+    ? (c.route === 'not_in_route' ? ' · sin ruta' : ' · ya en ruta') : ''
+  return `${GROUP_LABELS[campaignGroup(c)]}${route} — ${audienceSummary(sf)}`
 }
 
 function audienceSummary(sf: BroadcastRow['selection_filter']): string {
-  if (sf.mode === 'selected_ids') return `Selección manual · ${sf.order_ids?.length ?? 0} pedidos`
+  if (sf.mode === 'selected_ids') return `Clientes elegidos · ${sf.order_ids?.length ?? 0}`
   if (sf.mode === 'filtered') {
+    // Drafts anteriores al asistente pueden traer filtros de la pestaña SD: se conservan visibles.
     const f = sf.filters ?? {}
     const parts = [
-      f.status ? `estado=${String(f.status)}` : 'estado=todos',
+      f.status ? `estado=${String(f.status)}` : null,
       f.payment && f.payment !== 'todos' ? `pago=${String(f.payment)}` : null,
       f.date_from || f.date_to ? 'con rango de fecha' : null,
       f.search ? `búsqueda="${String(f.search)}"` : null,
     ].filter(Boolean)
-    return `Todos los resultados del filtro SD · ${parts.join(' · ')}`
+    return parts.length ? `Todo el grupo enviable · ${parts.join(' · ')}` : 'Todo el grupo enviable'
   }
   return '—'
 }
@@ -114,7 +129,7 @@ export function BroadcastHistoryModal({ onClose }: { onClose: () => void }) {
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
                     <span className="text-gray-500 tabular-nums">{fmt(r.created_at)}</span>
                     <span className="font-semibold text-gray-800">{r.creator?.full_name ?? '—'}</span>
-                    <span className="font-mono text-[11px] text-gray-500">{r.template_name}</span>
+                    <span className="text-xs text-gray-700" title={r.template_name}>{templateSummary(r)}</span>
                     <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-700">
                       {BROADCAST_STATUS_LABELS[r.status] ?? r.status}
                     </span>
