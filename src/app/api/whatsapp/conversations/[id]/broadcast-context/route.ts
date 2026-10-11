@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/server'
+import { createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getInboxAgentContext } from '@/lib/whatsapp/inbox-auth'
 import { buildBroadcastInboxContext, markBroadcastResponsesHandled } from '@/lib/broadcast/inbox-context'
 import { recordMarketingOptOut } from '@/lib/broadcast/suppression'
@@ -10,7 +10,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     const auth = await getInboxAgentContext()
     if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status })
     const { id } = await params
-    const ctx = await buildBroadcastInboxContext(await createServiceClient(), auth.storeId, id)
+    const ctx = await buildBroadcastInboxContext(createPrivilegedServiceClient(), auth.storeId, id)
     if (!ctx) return NextResponse.json({ error: 'No encontrado' }, { status: 404 })
     return NextResponse.json({ data: ctx })
   } catch (err) {
@@ -31,7 +31,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status })
     const { id } = await params
     const body = await request.json().catch(() => null) as { action?: unknown; reason?: unknown } | null
-    const db = await createServiceClient()
+    const db = createPrivilegedServiceClient()
 
     if (body?.action === 'mark_handled') {
       const n = await markBroadcastResponsesHandled(db, auth.storeId, id, auth.userId)

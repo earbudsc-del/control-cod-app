@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { createClient, createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getBroadcastAdminContext } from '@/lib/broadcast/admin-context'
 import { cancelBroadcast } from '@/lib/broadcast/cancel'
 
@@ -25,7 +25,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       return NextResponse.json({ error: 'Debes confirmar la cancelación' }, { status: 400 })
     }
     const { id } = await params
-    const r = await cancelBroadcast(await createServiceClient(), auth.ctx, id)
+    const r = await cancelBroadcast(createPrivilegedServiceClient(), auth.ctx, id)
     if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status })
     console.log(`[broadcast] cancel broadcast=${id} released=${r.released} in_flight_unsettled=${r.in_flight_unsettled} already=${r.already_cancelled} by=${auth.ctx.userId}`)
     return NextResponse.json(r)

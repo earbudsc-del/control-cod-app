@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { createClient, createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getBroadcastAdminContext } from '@/lib/broadcast/admin-context'
 import { getBroadcastMetrics } from '@/lib/broadcast/metrics'
 import { isWaBroadcastEnabled } from '@/lib/config/wa-broadcast'
@@ -14,7 +14,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status })
     const { id } = await params
 
-    const db = await createServiceClient()
+    const db = createPrivilegedServiceClient()
     const { data: broadcast, error } = await db.from('wa_broadcasts').select('*')
       .eq('id', id).eq('store_id', auth.ctx.storeId).maybeSingle()
     if (error) throw error

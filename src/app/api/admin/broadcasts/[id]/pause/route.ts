@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { createClient, createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getBroadcastAdminContext } from '@/lib/broadcast/admin-context'
 import { pauseBroadcast } from '@/lib/broadcast/launch'
 
@@ -13,7 +13,7 @@ export async function PATCH(_request: Request, { params }: { params: Promise<{ i
     const auth = await getBroadcastAdminContext(await createClient())
     if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status })
     const { id } = await params
-    const r = await pauseBroadcast(await createServiceClient(), auth.ctx, id)
+    const r = await pauseBroadcast(createPrivilegedServiceClient(), auth.ctx, id)
     if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status })
     console.log(`[broadcast] pause broadcast=${id} by=${auth.ctx.userId}`)
     return NextResponse.json({ ok: true })

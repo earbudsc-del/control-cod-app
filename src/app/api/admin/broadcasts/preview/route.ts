@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { createClient, createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getBroadcastAdminContext } from '@/lib/broadcast/admin-context'
 import { parseBroadcastSelection } from '@/lib/broadcast/selection'
 import { BroadcastSelectionTooBroadError, computeBroadcastAudience } from '@/lib/broadcast/broadcast-service'
@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     // el aislamiento por tienda lo aplica el servicio con auth.ctx.storeId.
     // Misma función que create/revalidación; resolvedAt = ahora (en filtered
     // es el cutoff created_at <= resolvedAt).
-    const preview = await computeBroadcastAudience(await createServiceClient(), auth.ctx, parsed.selection, new Date().toISOString())
+    const preview = await computeBroadcastAudience(createPrivilegedServiceClient(), auth.ctx, parsed.selection, new Date().toISOString())
     return NextResponse.json(preview)
   } catch (err) {
     if (err instanceof BroadcastSelectionTooBroadError) {

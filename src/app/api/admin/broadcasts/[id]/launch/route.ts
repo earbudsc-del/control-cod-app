@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { createClient, createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getBroadcastAdminContext } from '@/lib/broadcast/admin-context'
 import { launchBroadcast } from '@/lib/broadcast/launch'
 import { isWaBroadcastEnabled } from '@/lib/config/wa-broadcast'
@@ -41,7 +41,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       return NextResponse.json({ error: 'Debes confirmar que se enviarán mensajes reales' }, { status: 400 })
     }
 
-    const r = await launchBroadcast(await createServiceClient(), auth.ctx,
+    const r = await launchBroadcast(createPrivilegedServiceClient(), auth.ctx,
       { broadcastId: id, launchRequestKey: key, sendLimit, confirmCount }, isWaBroadcastEnabled())
     if (!r.ok) return NextResponse.json({ error: r.error, current_count: r.current_count }, { status: r.status })
     if (r.partial) {

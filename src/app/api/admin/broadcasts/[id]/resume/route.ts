@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { createClient, createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getBroadcastAdminContext } from '@/lib/broadcast/admin-context'
 import { resumeBroadcast } from '@/lib/broadcast/launch'
 import { isWaBroadcastEnabled } from '@/lib/config/wa-broadcast'
@@ -18,7 +18,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       return NextResponse.json({ error: 'Debes confirmar que se reanudarán envíos reales' }, { status: 400 })
     }
     const { id } = await params
-    const r = await resumeBroadcast(await createServiceClient(), auth.ctx, id, isWaBroadcastEnabled())
+    const r = await resumeBroadcast(createPrivilegedServiceClient(), auth.ctx, id, isWaBroadcastEnabled())
     if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status })
     console.log(`[broadcast] resume broadcast=${id} by=${auth.ctx.userId}`)
     return NextResponse.json({ ok: true })

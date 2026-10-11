@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { createClient, createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getBroadcastAdminContext } from '@/lib/broadcast/admin-context'
 import { parseBroadcastSelection } from '@/lib/broadcast/selection'
 import {
@@ -33,7 +33,7 @@ export async function POST(request: Request) {
     const requestKey = typeof body?.request_key === 'string' && UUID_RE.test(body.request_key) ? body.request_key.toLowerCase() : null
     if (!requestKey) return NextResponse.json({ error: 'request_key (UUID) requerido' }, { status: 400 })
 
-    const result = await createBroadcastDraft(await createServiceClient(), auth.ctx, parsed.selection, requestKey)
+    const result = await createBroadcastDraft(createPrivilegedServiceClient(), auth.ctx, parsed.selection, requestKey)
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status })
     return NextResponse.json({ broadcast: result.broadcast, replay: result.replay }, { status: result.replay ? 200 : 201 })
   } catch (err) {
@@ -51,7 +51,7 @@ export async function GET() {
     const auth = await getBroadcastAdminContext(await createClient())
     if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
-    const data = await listBroadcasts(await createServiceClient(), auth.ctx.storeId)
+    const data = await listBroadcasts(createPrivilegedServiceClient(), auth.ctx.storeId)
     return NextResponse.json({ data })
   } catch (err) {
     console.error('[GET /api/admin/broadcasts]', err)

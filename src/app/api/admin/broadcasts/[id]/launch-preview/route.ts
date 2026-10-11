@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { createClient, createPrivilegedServiceClient } from '@/lib/supabase/server'
 import { getBroadcastAdminContext } from '@/lib/broadcast/admin-context'
 import { computeLaunchPreview } from '@/lib/broadcast/launch'
 import { isWaBroadcastEnabled } from '@/lib/config/wa-broadcast'
@@ -20,7 +20,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const body = await request.json().catch(() => ({})) as { send_limit?: unknown }
     const limit = typeof body.send_limit === 'number' && Number.isFinite(body.send_limit) ? body.send_limit : null
 
-    const r = await computeLaunchPreview(await createServiceClient(), auth.ctx, id, limit)
+    const r = await computeLaunchPreview(createPrivilegedServiceClient(), auth.ctx, id, limit)
     if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status })
     return NextResponse.json({ ...r.preview, broadcast_enabled: isWaBroadcastEnabled() })
   } catch (err) {
