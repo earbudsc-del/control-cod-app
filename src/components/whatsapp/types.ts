@@ -21,6 +21,8 @@ export interface WaConversation {
   assigned_agent?: { id: string; full_name: string } | null
   // Sprint C.1 — respuestas de campaña Broadcast sin atender (0 si no hay).
   broadcast_attention?: number
+  // Escalamiento de Génesis abierto (gestión humana pendiente).
+  escalation_open?: boolean
 }
 
 // Agente seleccionable en el dropdown "Asignar a:" del header del Inbox.

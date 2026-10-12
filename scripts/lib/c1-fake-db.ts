@@ -47,6 +47,8 @@ export class C1FakeDb {
   // processor) justo después de un INSERT exitoso.
   failInsert?: (table: string, payloads: Row[]) => { code: string; message: string } | null
   afterInsert?: (table: string, rows: Row[]) => void
+  // Emula el max-rows de PostgREST (Supabase: 1000) en lecturas no-HEAD.
+  maxRows?: number
 
   t(name: string): Row[] { return (this.tables[name] ??= []) }
 
@@ -65,8 +67,8 @@ export class C1FakeDb {
     const st = {
       op: 'select' as 'select' | 'insert' | 'update' | 'upsert' | 'delete', cols: '*', filters: [] as Filter[],
       payload: null as Row | Row[] | null, onConflict: null as string | null,
-      orderCol: null as string | null, asc: true, from: 0, to: Infinity, lim: Infinity,
-      mode: 'many' as 'many' | 'single' | 'maybe',
+      orders: [] as Array<{ col: string; asc: boolean }>, from: 0, to: Infinity, lim: Infinity,
+      mode: 'many' as 'many' | 'single' | 'maybe', count: false, head: false,
     }
     const matches = (r: Row) => st.filters.every(f => {
       const v = getPath(r, f.col)
@@ -96,6 +98,11 @@ export class C1FakeDb {
       if (st.mode === 'single') return rows[0] ? { data: rows[0], error: null } : { data: null, error: { code: 'PGRST116', message: 'no rows' } }
       if (st.mode === 'maybe') return { data: rows[0] ?? null, error: null }
       return { data: rows, error: null }
+    }
+    // select(cols, { count: 'exact', head }) → count = total antes de paginar.
+    const shapeCounted = (all: Row[], page: Row[]) => {
+      if (st.head) return { data: null, error: null, count: all.length }
+      return st.count ? { ...shape(page), count: all.length } : shape(page)
     }
     const run = () => {
       db.log.push({ table, op: st.op })
@@ -141,15 +148,24 @@ export class C1FakeDb {
         return shape(targets.map(r => ({ ...r })))
       }
       let rows = db.t(table).filter(matches)
-      if (st.orderCol) {
-        const c = st.orderCol
-        rows = [...rows].sort((a, b) => cmp(a[c], b[c]) * (st.asc ? 1 : -1))
+      if (st.orders.length) {
+        // Orden compuesto (primera llamada = clave primaria), como en PostgREST.
+        rows = [...rows].sort((a, b) => {
+          for (const o of st.orders) {
+            const d = cmp(a[o.col], b[o.col]) * (o.asc ? 1 : -1)
+            if (d !== 0) return d
+          }
+          return 0
+        })
       }
-      rows = rows.slice(st.from, st.to + 1).slice(0, st.lim).map(r => embed({ ...r }))
-      return shape(rows)
+      const page = rows.slice(st.from, st.to + 1).slice(0, st.lim).slice(0, db.maxRows ?? Infinity).map(r => embed({ ...r }))
+      return shapeCounted(rows, page)
     }
     const b: any = { // eslint-disable-line @typescript-eslint/no-explicit-any
-      select: (cols?: string) => { if (st.op === 'select') st.cols = cols ?? '*'; return b },
+      select: (cols?: string, opts?: { count?: string; head?: boolean }) => {
+        if (st.op === 'select') { st.cols = cols ?? '*'; st.count = !!opts?.count; st.head = !!opts?.head }
+        return b
+      },
       insert: (p: Row | Row[]) => { st.op = 'insert'; st.payload = p; return b },
       update: (p: Row) => { st.op = 'update'; st.payload = p; return b },
       upsert: (p: Row, o?: { onConflict?: string }) => { st.op = 'upsert'; st.payload = p; st.onConflict = o?.onConflict ?? null; return b },
@@ -171,7 +187,7 @@ export class C1FakeDb {
         if (op !== 'match') throw new Error(`fake: filter ${op} no soportado`)
         st.filters.push({ op: 'match', col: c, val: v }); return b
       },
-      order: (c: string, o?: { ascending?: boolean }) => { st.orderCol = c; st.asc = o?.ascending !== false; return b },
+      order: (c: string, o?: { ascending?: boolean }) => { st.orders.push({ col: c, asc: o?.ascending !== false }); return b },
       range: (a: number, z: number) => { st.from = a; st.to = z; return b },
       limit: (n: number) => { st.lim = n; return b },
       single: () => { st.mode = 'single'; return b },

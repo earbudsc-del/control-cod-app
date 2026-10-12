@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'next/navigation'
-import WaConversationList from '@/components/whatsapp/WaConversationList'
+import WaConversationList, { type InboxFilterKey } from '@/components/whatsapp/WaConversationList'
 import WaMessagePane    from '@/components/whatsapp/WaMessagePane'
 import BroadcastContextPanel from '@/components/whatsapp/BroadcastContextPanel'
 import LocationAssignmentPanel from '@/components/whatsapp/LocationAssignmentPanel'
@@ -11,6 +11,41 @@ import { createClient } from '@/lib/supabase/client'
 
 // Roles con acceso al Inbox WhatsApp — mismo set que is_wa_inbox_role() (migración 030 + 039).
 const INBOX_ROLES = ['admin', 'ia_supervisor', 'confirmation_agent', 'dispatch_agent', 'novelty_agent', 'agent', 'delivery_agent']
+
+const PAGE_LIMIT = 50
+const RECONCILE_MS = 15_000     // re-sincroniza la primera página de la búsqueda/filtro activos
+// Contadores tras eventos en tiempo real: como mucho una consulta cada 5 s
+// aunque lleguen ráfagas (p. ej. una campaña enviándose).
+const COUNTS_THROTTLE_MS = 5_000
+
+// Orden canónico del servidor: last_message_at DESC NULLS LAST, id DESC.
+function byActivity(a: WaConversation, b: WaConversation): number {
+  const ta = a.last_message_at ? Date.parse(a.last_message_at) : null
+  const tb = b.last_message_at ? Date.parse(b.last_message_at) : null
+  if (ta !== tb) {
+    if (ta === null) return 1
+    if (tb === null) return -1
+    return tb - ta
+  }
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
+}
+
+// ¿Sigue cumpliendo el filtro por columnas tras un cambio en tiempo real?
+// (Sin atender / Campañas dependen de otras tablas: lo decide la re-sincronización.)
+function stillMatches(c: WaConversation, filter: InboxFilterKey, userId: string | null): boolean {
+  if (filter === 'unread') return c.unread_count > 0
+  if (filter === 'unassigned') return !c.assigned_to
+  if (filter === 'mine') return !!userId && c.assigned_to === userId
+  return true
+}
+
+function listUrl(q: string, filter: InboxFilterKey, cursor?: string | null, withCounts = false): string {
+  const p = new URLSearchParams({ filter, limit: String(PAGE_LIMIT) })
+  if (withCounts) p.set('counts', '1')
+  if (q.trim().length >= 2) p.set('q', q.trim())
+  if (cursor) p.set('cursor', cursor)
+  return `/api/whatsapp/conversations?${p}`
+}
 
 export default function InboxPage() {
   const searchParams = useSearchParams()
@@ -31,22 +66,109 @@ export default function InboxPage() {
   const messagesRef    = useRef<WaMessage[]>([])
   const agentsRef      = useRef<WaAgentOption[]>([])
 
-  const loadConversations = useCallback(async () => {
-    setLoadingConvs(true)
+  // Búsqueda global + filtro (servidor). `query` es lo que escribe el agente;
+  // `searchQ` la versión con debounce que se envía.
+  const [query,       setQuery]       = useState('')
+  const [searchQ,     setSearchQ]     = useState('')
+  const [filter,      setFilter]      = useState<InboxFilterKey>('all')
+  const [nextCursor,  setNextCursor]  = useState<string | null>(null)
+  const [total,       setTotal]       = useState<number | null>(null)
+  const [counts,      setCounts]      = useState<Partial<Record<InboxFilterKey, number>> | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [listError,   setListError]   = useState<string | null>(null)
+  const searchQRef  = useRef('')
+  const filterRef   = useRef<InboxFilterKey>('all')
+  const userIdRef   = useRef<string | null>(null)
+  const requestSeq  = useRef(0)
+  const countsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Scroll infinito: una sola petición de "siguiente página" a la vez y nunca
+  // dos veces el mismo cursor.
+  const loadingMoreRef   = useRef(false)
+  const requestedCursors = useRef(new Set<string>())
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearchQ(query), 300)
+    return () => clearTimeout(t)
+  }, [query])
+  useEffect(() => { searchQRef.current = searchQ }, [searchQ])
+  useEffect(() => { filterRef.current = filter }, [filter])
+
+  const loadCounts = useCallback(async () => {
     try {
-      const res  = await fetch('/api/whatsapp/conversations?limit=100')
+      const q = searchQRef.current.trim()
+      const res = await fetch(`/api/whatsapp/conversations/counts${q.length >= 2 ? `?q=${encodeURIComponent(q)}` : ''}`)
+      if (!res.ok) return
       const json = await res.json()
-      if (res.ok && Array.isArray(json.data)) {
+      if (json?.counts) setCounts(json.counts)
+    } catch { /* los contadores son informativos */ }
+  }, [])
+
+  const scheduleCounts = useCallback(() => {
+    if (countsTimer.current) return
+    countsTimer.current = setTimeout(() => {
+      countsTimer.current = null
+      void loadCounts()
+    }, COUNTS_THROTTLE_MS)
+  }, [loadCounts])
+
+  useEffect(() => () => { if (countsTimer.current) clearTimeout(countsTimer.current) }, [])
+
+  // Primera página de la búsqueda/filtro activos (reemplaza la lista).
+  const loadConversations = useCallback(async () => {
+    const seq = ++requestSeq.current
+    setLoadingConvs(true)
+    setListError(null)
+    try {
+      requestedCursors.current = new Set()
+      const res  = await fetch(listUrl(searchQRef.current, filterRef.current, null, true))
+      const json = await res.json().catch(() => null)
+      if (seq !== requestSeq.current) return
+      if (res.ok && Array.isArray(json?.data)) {
         setConversations(json.data)
+        setNextCursor(json.next_cursor ?? null)
+        setTotal(typeof json.total === 'number' ? json.total : null)
+        if (json.counts) setCounts(json.counts)
+      } else {
+        setConversations([]); setNextCursor(null); setTotal(0)
+        setListError(json?.error ?? 'No se pudieron cargar las conversaciones')
       }
     } finally {
-      setLoadingConvs(false)
+      if (seq === requestSeq.current) setLoadingConvs(false)
     }
   }, [])
 
+  // Lista + contadores en UNA petición (las consultas se comparten en el servidor).
   useEffect(() => {
-    loadConversations()
-  }, [loadConversations])
+    void loadConversations()
+  }, [searchQ, filter, loadConversations])
+
+  const loadMore = useCallback(async () => {
+    const cursor = nextCursor
+    if (!cursor || loadingMoreRef.current || requestedCursors.current.has(cursor)) return
+    loadingMoreRef.current = true
+    requestedCursors.current.add(cursor)
+    const seq = requestSeq.current
+    setLoadingMore(true)
+    try {
+      const res  = await fetch(listUrl(searchQRef.current, filterRef.current, cursor))
+      const json = await res.json().catch(() => null)
+      if (seq !== requestSeq.current) return
+      if (!res.ok || !Array.isArray(json?.data)) {
+        requestedCursors.current.delete(cursor)   // se puede reintentar con "Cargar más"
+        return
+      }
+      setConversations(prev => {
+        const seen = new Set(prev.map(c => c.id))
+        return [...prev, ...(json.data as WaConversation[]).filter(c => !seen.has(c.id))]
+      })
+      setNextCursor(json.next_cursor ?? null)
+      if (typeof json.total === 'number') setTotal(json.total)
+    } finally {
+      loadingMoreRef.current = false
+      if (seq === requestSeq.current) setLoadingMore(false)
+    }
+  }, [nextCursor])
+  const handleLoadMore = useCallback(() => { void loadMore() }, [loadMore])
 
   // Deep link ?conversation=<id> — usado por el botón "Abrir conversación (Inbox)"
   // del detalle operativo de un pedido (Reparto/Tránsito/orders/[id]). Abre esa
@@ -65,21 +187,31 @@ export default function InboxPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams])
 
+  // Re-sincronización periódica: la primera página de la MISMA búsqueda/filtro
+  // se fusiona con lo cargado (no se pierden páginas ni la búsqueda) y trae
+  // conversaciones que entraron al filtro y no estaban cargadas.
   useEffect(() => {
     const poll = async () => {
+      const seq = requestSeq.current
       try {
-        const res = await fetch('/api/whatsapp/conversations?limit=100')
+        const res = await fetch(listUrl(searchQRef.current, filterRef.current, null, true))
         if (!res.ok) return
         const json = await res.json()
-        if (Array.isArray(json.data)) {
-          setConversations(json.data)
-        }
+        if (seq !== requestSeq.current || !Array.isArray(json.data)) return
+        if (json.counts) setCounts(json.counts)
+        const fresh = json.data as WaConversation[]
+        setConversations(prev => {
+          const byId = new Map(prev.map(c => [c.id, c]))
+          for (const c of fresh) byId.set(c.id, { ...byId.get(c.id), ...c })
+          return [...byId.values()].sort(byActivity)
+        })
+        if (typeof json.total === 'number') setTotal(json.total)
       } catch (err) {
         console.warn('[wa-conv-poll] error', err)
       }
     }
 
-    const intervalId = setInterval(poll, 7000)
+    const intervalId = setInterval(poll, RECONCILE_MS)
     return () => clearInterval(intervalId)
   }, [])
 
@@ -142,6 +274,7 @@ export default function InboxPage() {
     supabase.auth.getUser().then(async ({ data }) => {
       const uid = data.user?.id ?? null
       setCurrentUserId(uid)
+      userIdRef.current = uid
       if (!uid) return
       const { data: profile } = await supabase
         .from('profiles').select('role').eq('id', uid).maybeSingle()
@@ -195,7 +328,8 @@ export default function InboxPage() {
                 ? 0
                 : c.unread_count + (msg.direction === 'inbound' ? 1 : 0),
             }
-          }))
+          }).sort(byActivity))
+          scheduleCounts()
         },
       )
       .on(
@@ -232,7 +366,11 @@ export default function InboxPage() {
                 assigned_agent:       assignedAgent,
               }
             })
+              // La conversación abierta nunca desaparece de la lista mientras se trabaja.
+              .filter(c => c.id === selectedIdRef.current || stillMatches(c, filterRef.current, userIdRef.current))
+              .sort(byActivity)
           )
+          scheduleCounts()
 
           // Mantiene el panel abierto sincronizado si otro agente toma/libera/
           // reasigna la conversación que el usuario actual tiene abierta.
@@ -265,9 +403,14 @@ export default function InboxPage() {
               console.warn('[wa-realtime] conversation fetch empty', json, convId)
               return
             }
-            setConversations(prev =>
-              prev.some(c => c.id === convId) ? prev : [conv, ...prev]
-            )
+            // Conversación nueva: solo se inserta en la vista sin búsqueda ni
+            // filtro; con búsqueda/filtro la trae la re-sincronización.
+            if (searchQRef.current.trim().length < 2 && filterRef.current === 'all') {
+              setConversations(prev =>
+                prev.some(c => c.id === convId) ? prev : [conv, ...prev].sort(byActivity)
+              )
+            }
+            scheduleCounts()
           } catch (err) {
             console.warn('[wa-realtime] fetch conversation threw', err, convId)
           }
@@ -284,7 +427,7 @@ export default function InboxPage() {
       cancelled = true
       supabase.removeChannel(channel)
     }
-  }, [])
+  }, [scheduleCounts])
 
   async function selectConversation(conv: WaConversation) {
     selectedIdRef.current = conv.id
@@ -409,6 +552,17 @@ export default function InboxPage() {
           selectedId={selectedId}
           loading={loadingConvs}
           onSelect={selectConversation}
+          query={query}
+          onQueryChange={setQuery}
+          filter={filter}
+          onFilterChange={setFilter}
+          counts={counts}
+          total={total}
+          hasMore={!!nextCursor}
+          loadingMore={loadingMore}
+          onLoadMore={handleLoadMore}
+          error={listError}
+          resetKey={`${searchQ}|${filter}`}
         />
       </div>
 
@@ -421,7 +575,10 @@ export default function InboxPage() {
         <LocationAssignmentPanel conversationId={selectedId} />
         <BroadcastContextPanel
           conversationId={selectedId}
-          onChanged={() => setConversations(prev => prev.map(c => c.id === selectedId ? { ...c, broadcast_attention: 0 } : c))}
+          onChanged={() => {
+            setConversations(prev => prev.map(c => c.id === selectedId ? { ...c, broadcast_attention: 0 } : c))
+            scheduleCounts()
+          }}
         />
         <div className="flex-1 min-h-0 flex">
         <WaMessagePane

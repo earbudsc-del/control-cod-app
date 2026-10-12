@@ -1,67 +1,42 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse }  from 'next/server'
+import { getInboxAccess } from '@/lib/whatsapp/inbox-access'
+import { attentionFlags, InboxQueryTooBroadError, queryInbox } from '@/lib/whatsapp/conversation-search'
 
-const DEFAULT_LIMIT = 30
-const MAX_LIMIT     = 100
-
+/**
+ * GET /api/whatsapp/conversations — búsqueda global + filtro + paginación por cursor.
+ *
+ * Params: q (nombre / teléfono / # pedido), filter (all | unread | attention |
+ * broadcast | unassigned | mine), cursor (opaco, de next_cursor), limit (≤100),
+ * counts=1 (incluye los contadores de todos los filtros reutilizando las mismas
+ * consultas: una petición en vez de dos). total = total real, no lo cargado.
+ * Sesión del agente (RLS) + store_id explícito del perfil.
+ */
 export async function GET(request: Request) {
   try {
     const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
+    const access = await getInboxAccess(supabase)
+    if (!access.ok) return NextResponse.json({ error: access.error }, { status: access.status })
 
-    const { searchParams } = new URL(request.url)
-    const page   = Math.max(1, parseInt(searchParams.get('page')  ?? '1'))
-    const limit  = Math.min(MAX_LIMIT, Math.max(1, parseInt(searchParams.get('limit') ?? String(DEFAULT_LIMIT))))
-    const status = searchParams.get('status')
-    const from   = (page - 1) * limit
-    const to     = from + limit - 1
-
-    let query = supabase
-      .from('wa_conversations')
-      .select(
-        `id, status, unread_count, last_message_at, last_message_preview,
-         assigned_to, ai_enabled, created_at, updated_at,
-         contact:wa_contacts(id, phone_normalized, display_name, wa_id, order_id),
-         assigned_agent:profiles(id, full_name)`,
-        { count: 'exact' },
-      )
-      .order('last_message_at', { ascending: false, nullsFirst: false })
-      .range(from, to)
-
-    if (status && ['open', 'pending', 'closed'].includes(status)) {
-      query = query.eq('status', status)
-    }
-
-    const { data, error, count } = await query
-    if (error) throw error
-
-    // Sprint C.1 — respuestas de campaña sin atender (destacar en la lista).
-    // Si la tabla no existe todavía (066 sin aplicar) o RLS no la permite, se
-    // ignora: la lista funciona exactamente igual que antes.
-    const attention = new Map<string, number>()
-    const ids = (data ?? []).map((c: { id: string }) => c.id)
-    if (ids.length > 0) {
-      const { data: pending, error: pendingErr } = await supabase
-        .from('wa_broadcast_responses').select('conversation_id').in('conversation_id', ids).is('handled_at', null)
-      if (!pendingErr) {
-        for (const r of (pending ?? []) as Array<{ conversation_id: string }>) {
-          attention.set(r.conversation_id, (attention.get(r.conversation_id) ?? 0) + 1)
-        }
-      }
-    }
-    const withAttention = (data ?? []).map((c: { id: string }) => ({ ...c, broadcast_attention: attention.get(c.id) ?? 0 }))
-
-    return NextResponse.json({
-      data: withAttention,
-      pagination: {
-        page,
-        limit,
-        total: count ?? 0,
-        pages: Math.ceil((count ?? 0) / limit),
-      },
+    const sp = new URL(request.url).searchParams
+    const page = await queryInbox(supabase, access.ctx, {
+      q: sp.get('q'), filter: sp.get('filter'), cursor: sp.get('cursor'), limit: sp.get('limit'),
+      withCounts: sp.get('counts') === '1',
     })
+
+    // Respuestas de campaña sin atender / escalamientos abiertos de esta página.
+    const flags = await attentionFlags(supabase, access.ctx.storeId, page.data.map(c => c.id)).catch(() => new Map())
+    const data = page.data.map(c => ({
+      ...c,
+      broadcast_attention: flags.get(c.id)?.broadcast ?? 0,
+      escalation_open:     flags.get(c.id)?.escalated ?? false,
+    }))
+
+    return NextResponse.json({ data, next_cursor: page.next_cursor, total: page.total, ...(page.counts ? { counts: page.counts } : {}) })
   } catch (err) {
+    if (err instanceof InboxQueryTooBroadError) {
+      return NextResponse.json({ error: err.message }, { status: 422 })
+    }
     console.error('[GET /api/whatsapp/conversations]', err)
     return NextResponse.json({ error: 'Error interno' }, { status: 500 })
   }
