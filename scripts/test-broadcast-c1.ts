@@ -296,10 +296,16 @@ async function main() {
     check('18. webhook duplicado → una sola fila', dup?.duplicate === true && db.t('wa_broadcast_responses').length === 1)
 
     const dec = await recordBroadcastButtonResponse(db, { storeId: S1, conversationId: conv, inboundMessageId: inbound(2).id,
-      phoneNormalized: row.phone_normalized, buttonText: 'Ya no lo deseo', buttonPayload: null, contextWamid: row.wa_message_id })
-    check('20a. "Ya no lo deseo" → decline_order por context.id', dec?.intent === 'decline_order' && dec.association === 'context_wamid', dec)
+      phoneNormalized: row.phone_normalized, buttonText: 'Cancelar oferta', buttonPayload: null, contextWamid: row.wa_message_id })
+    check('20a. "Cancelar oferta" → decline_order por context.id', dec?.intent === 'decline_order' && dec.association === 'context_wamid', dec)
+    const decP = await recordBroadcastButtonResponse(db, { storeId: S1, conversationId: conv, inboundMessageId: inbound(6).id,
+      phoneNormalized: row.phone_normalized, buttonText: 'Texto que Meta cambió', buttonPayload: `bc1:${row.id}:1`, contextWamid: row.wa_message_id })
+    check('20d. payload índice 1 → decline_order aunque cambie el texto visible', decP?.intent === 'decline_order' && decP.association === 'payload' && decP.orderId === o.id, decP)
+    const decN = await recordBroadcastButtonResponse(db, { storeId: S1, conversationId: conv, inboundMessageId: inbound(7).id,
+      phoneNormalized: row.phone_normalized, buttonText: 'Cancelar oferta', buttonPayload: null, contextWamid: null })
+    check('20e. "Cancelar oferta" sin asociación → unknown/none para revisión humana, sin pedido', decN?.intent === 'unknown' && decN.association === 'none' && decN.orderId === null, decN)
     check('19b/20b. ningún pedido se confirma ni cancela', JSON.stringify(db.t('orders')) === before)
-    check('20c. "Ya no lo deseo" NO es baja promocional', (db.tables.wa_contact_preferences ?? []).length === 0)
+    check('20c. "Cancelar oferta" NO es baja promocional', (db.tables.wa_contact_preferences ?? []).length === 0 && !isMarketingOptOutRequest('Cancelar oferta'))
 
     const unk = await recordBroadcastButtonResponse(db, { storeId: S1, conversationId: conv, inboundMessageId: inbound(3).id,
       phoneNormalized: row.phone_normalized, buttonText: 'Sí, confirmar', buttonPayload: 'Sí, confirmar', contextWamid: null })
@@ -643,11 +649,11 @@ async function main() {
     let threw = false
     try { if (ok.ok) buildTemplateComponents(ok.config, ['solo uno'], 'q') } catch { threw = true }
     check('M9. cantidad de parámetros distinta del contrato → error antes de llamar a Meta', threw)
-    check('M10. botones exactos del template', ok.ok && ok.config.buttons.join('|') === 'Sí, confirmar|Ya no lo deseo')
+    check('M10. botones exactos del template (Meta)', ok.ok && ok.config.buttons.join('|') === 'Sí, confirmar|Cancelar oferta')
     check('M11. sin precios literales en templates.ts (catálogo)', !/2[,.]?100|1[,.]?890|RD\$ ?\d/.test(readFileSync('src/lib/broadcast/templates.ts', 'utf8').split('\n').filter(l => !l.trim().startsWith('//')).join('\n')))
 
     const yes = ['STOP', 'Baja', 'no me escriban más', 'Por favor dejen de escribirme', 'denme de baja', 'No quiero recibir más mensajes']
-    const no = ['Ya no lo deseo', 'no', 'no tengo dinero ahora', 'Ahora no', 'cancelar el pedido', 'baja el precio?']
+    const no = ['Cancelar oferta', 'Ya no lo deseo', 'no', 'no tengo dinero ahora', 'Ahora no', 'cancelar el pedido', 'baja el precio?']
     check('T5. baja: frases inequívocas detectadas', yes.every(isMarketingOptOutRequest), yes.filter(t => !isMarketingOptOutRequest(t)))
     check('T6. baja: rechazo de pedido/oferta NO es baja', no.every(t => !isMarketingOptOutRequest(t)), no.filter(isMarketingOptOutRequest))
 

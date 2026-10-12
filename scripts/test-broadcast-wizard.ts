@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { C1FakeDb, type Row } from './lib/c1-fake-db'
 import { createBroadcastDraft, audienceFromDraft, listBroadcasts, type BroadcastAdminContext } from '../src/lib/broadcast/broadcast-service'
 import { parseBroadcastSelection, selectionTemplate } from '../src/lib/broadcast/selection'
-import { templateCompatibility, BROADCAST_TEMPLATES, type BroadcastCampaign } from '../src/lib/broadcast/campaign'
+import { templateCompatibility, BROADCAST_TEMPLATES, MAX_LAUNCH_SIZE, PILOT_DEFAULT_LIMIT, type BroadcastCampaign } from '../src/lib/broadcast/campaign'
 import { computeLaunchPreview, computeSelectionSendable, launchBroadcast } from '../src/lib/broadcast/launch'
 import { processBroadcastQueue } from '../src/lib/broadcast/processor'
 import { getBroadcastMetrics } from '../src/lib/broadcast/metrics'
@@ -432,6 +432,35 @@ async function main() {
     check('V6.3 historial: grupo con los nombres del asistente, template con su nombre en Meta y tipo de selección',
       /GROUP_LABELS\[campaignGroup\(c\)\]/.test(hist) && /def\.label\} \(Meta: \$\{def\.metaName\}\)/.test(hist)
       && /Clientes elegidos · /.test(hist) && /Todo el grupo enviable/.test(hist))
+  }
+
+  console.log('\n=== W9 — tamaño de lote y botón «Cancelar oferta» ===')
+  {
+    const wiz = readFileSync('src/components/broadcast/BroadcastWizard.tsx', 'utf8')
+    check('W9.1 lote inicial del asistente = 10, sin depender de los enviables',
+      /useState<number>\(PILOT_DEFAULT_LIMIT\)/.test(wiz) && !/sendable_count,\s*300/.test(wiz) && PILOT_DEFAULT_LIMIT === 10)
+    check('W9.2 el tope del input es el máximo autorizado del servidor', /max=\{MAX_LAUNCH_SIZE\}/.test(wiz) && MAX_LAUNCH_SIZE === 300)
+    check('W9.3 confirmación explícita intacta (casilla + escribir la cantidad)',
+      /ack && typed\.trim\(\) === String\(count\)/.test(wiz) && /acknowledge_real_messages: true/.test(wiz))
+
+    const os = Array.from({ length: 25 }, () => mkOrder())
+    const db = seedDb(os)
+    const id = await draft(db, { ...NEUTRAL, campaign: PENDING, template: 'sd_broadcast_confirmation' })
+    const p10 = await computeLaunchPreview(db, ADMIN, id, PILOT_DEFAULT_LIMIT, ENV)
+    check('W9.4 con 25 enviables, el lote inicial es 10 y 15 quedan para otra fase',
+      p10.ok && p10.preview.sendable_count === 25 && p10.preview.batch.length === 10 && p10.preview.not_in_batch === 15, p10)
+    const p40 = await computeLaunchPreview(db, ADMIN, id, 40, ENV)
+    check('W9.5 subir el lote a mano: 40 pedidos → lote = todos los enviables (25)', p40.ok && p40.preview.batch.length === 25)
+    const pMax = await computeLaunchPreview(db, ADMIN, id, 5000, ENV)
+    check('W9.6 por encima del máximo → se acota a 300', pMax.ok && pMax.preview.send_limit === MAX_LAUNCH_SIZE)
+    const bad = await launchBroadcast(db, ADMIN, { broadcastId: id, launchRequestKey: randomUUID(), sendLimit: 10, confirmCount: 25 }, true, ENV)
+    check('W9.7 lanzar exige confirmar la cantidad exacta del lote', !bad.ok && bad.status === 409)
+    check('W9.8 nada encolado tras el rechazo', db.t('wa_template_queue').length === 0)
+
+    check('W9.9 botones del template = los aprobados en Meta; intención por índice',
+      TEMPLATE_DEFINITIONS.sd_broadcast_confirmation.buttons.join('|') === 'Sí, confirmar|Cancelar oferta')
+    const pane = readFileSync('src/components/whatsapp/WaMessagePane.tsx', 'utf8')
+    check('W9.10 Inbox muestra los botones vigentes del template de Broadcast', /TEMPLATE_BUTTONS\[t as BroadcastTemplateName\]/.test(pane))
   }
 
   console.log(failures === 0 ? '\n✅ TODO OK' : `\n❌ ${failures} FALLOS`)

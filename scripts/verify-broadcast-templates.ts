@@ -25,7 +25,7 @@ if (!WA_API_VERSION || !WA_WABA_ID || !WA_ACCESS_TOKEN) {
 
 // Nombre EN META → contrato esperado (templates.ts META_TEMPLATE_CONTRACTS, C.1.2).
 const EXPECTED: Record<string, { buttons: string[]; language: string; vars: number }> = {
-  sd_broadcast_confirmation: { buttons: ['Sí, confirmar', 'Ya no lo deseo'], language: 'en', vars: 5 },
+  sd_broadcast_confirmation: { buttons: ['Sí, confirmar', 'Cancelar oferta'], language: 'en', vars: 5 },
   sd_broadcast_coordination: { buttons: ['Sí, quiero aprovechar', 'Ahora no'], language: 'es_DO', vars: 1 },  // recompra
 }
 const EXPECTED_BUTTONS: Record<string, string[]> = Object.fromEntries(Object.entries(EXPECTED).map(([k, v]) => [k, v.buttons]))

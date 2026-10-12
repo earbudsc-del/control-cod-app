@@ -46,7 +46,7 @@ export const REPURCHASE_OFFER = {
 export const MAX_RECOVERY_DISCOUNT_PCT = 10
 
 export type RecoveryStage =
-  | 'button_declined'            // pulsó "Ya no lo deseo" — NUNCA basta para descuento
+  | 'button_declined'            // pulsó "Cancelar oferta" — NUNCA basta para descuento
   | 'objection_identified'       // Génesis identificó la objeción
   | 'objection_unresolved_price' // objeción de precio que no se resolvió con valor/beneficios
 
@@ -67,6 +67,11 @@ export function recoveryDiscountDecision(i: RecoveryDiscountInput): { allowed: b
   const pct = Math.min(Math.max(i.requestedPct, 0), MAX_RECOVERY_DISCOUNT_PCT)
   return pct > 0 ? { allowed: true, pct, reason: 'ok' } : { allowed: false, pct: 0, reason: 'pct_invalido' }
 }
+
+// Tamaño de lote por lanzamiento: valor inicial del asistente (piloto) y tope
+// duro del servidor. Client-safe: el asistente y launch.ts usan los mismos.
+export const PILOT_DEFAULT_LIMIT = 10
+export const MAX_LAUNCH_SIZE = 300
 
 export const DEFAULT_CAMPAIGN: BroadcastCampaign = { type: 'coordination', segment: 'pending' }
 
@@ -121,8 +126,11 @@ export function campaignCanCreateDraft(_c: BroadcastCampaign): boolean {
 }
 
 // Quick replies EXACTOS de los templates (B.2.1). Coordinación: SOLO dos, sin ubicación.
+// Verificados contra la Graph API (scripts/verify-broadcast-templates.ts). El
+// texto es solo visible: la intención se resuelve por el ÍNDICE del botón
+// (payload bc1:<queue_id>:<índice>, ver TEMPLATE_BUTTON_INTENTS).
 export const TEMPLATE_BUTTONS: Record<BroadcastTemplateName, [string, string]> = {
-  sd_broadcast_confirmation: ['Sí, confirmar', 'Ya no lo deseo'],
+  sd_broadcast_confirmation: ['Sí, confirmar', 'Cancelar oferta'],
   sd_broadcast_repurchase:   ['Sí, quiero aprovechar', 'Ahora no'],
 }
 

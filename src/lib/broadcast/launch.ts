@@ -55,7 +55,9 @@ import {
   type BroadcastPreview,
 } from './broadcast-service'
 import { audienceFromDraft, computeBroadcastAudience } from './broadcast-service'
-import { campaignLabel, campaignGroup, templateCompatibility, type BroadcastGroup, type BroadcastTemplateName } from './campaign'
+import {
+  MAX_LAUNCH_SIZE, PILOT_DEFAULT_LIMIT, campaignLabel, campaignGroup, templateCompatibility, type BroadcastGroup, type BroadcastTemplateName,
+} from './campaign'
 import { buildBodyParamsFor, buildConfirmationBodyParams, resolveTemplateConfig } from './templates'
 import { selectionTemplate, type BroadcastSelection } from './selection'
 import { loadOptedOutPhones } from './suppression'
@@ -68,8 +70,8 @@ interface SupabaseLike {
 
 // Tope duro por lanzamiento: la lista de elegibles de la revalidación se
 // entrega completa hasta PREVIEW_LIST_LIMIT (300); nunca se lanza más.
-export const MAX_LAUNCH_SIZE = 300
-export const PILOT_DEFAULT_LIMIT = 10
+// Definidos en campaign.ts (client-safe) para que el asistente use los mismos.
+export { MAX_LAUNCH_SIZE, PILOT_DEFAULT_LIMIT }
 
 // F5 — preparación por bloques dentro del presupuesto de la función.
 // La ruta de lanzamiento declara maxDuration = 60 s (válido en todos los

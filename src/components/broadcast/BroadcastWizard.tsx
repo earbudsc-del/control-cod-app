@@ -19,7 +19,7 @@ import { useSelection } from '@/components/selection/SelectionProvider'
 import { broadcastReasonLabel } from '@/lib/broadcast/labels'
 import { REPURCHASE_AUDIENCE_BASE, MAX_SELECTED_IDS, type BroadcastAudienceBase, type BroadcastSelection } from '@/lib/broadcast/selection'
 import {
-  BROADCAST_TEMPLATES, GROUP_LABELS, REPURCHASE_WINDOWS, campaignGroup, campaignLabel, templateCompatibility,
+  BROADCAST_TEMPLATES, GROUP_LABELS, MAX_LAUNCH_SIZE, PILOT_DEFAULT_LIMIT, REPURCHASE_WINDOWS, campaignGroup, campaignLabel, templateCompatibility,
   type BroadcastCampaign, type BroadcastTemplateName, type RouteFilter,
 } from '@/lib/broadcast/campaign'
 import { TEMPLATE_DEFINITIONS, renderTemplateBody } from '@/lib/broadcast/templates'
@@ -89,7 +89,8 @@ export function BroadcastWizard({ selection: base, onClose, onCreated }: {
   const [launchKey] = useState(newRequestKey)
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<{ id: string } | null>(null)
-  const [limit, setLimit] = useState<number | null>(null)
+  // Lote inicial = piloto, sin importar cuántos sean enviables; el admin lo sube a mano.
+  const [limit, setLimit] = useState<number>(PILOT_DEFAULT_LIMIT)
   const [review, setReview] = useState<LaunchPreviewResponse | null>(null)
 
   // Envío
@@ -144,12 +145,11 @@ export function BroadcastWizard({ selection: base, onClose, onCreated }: {
     if (step < 4 || !created) return
     let cancelled = false
     setLoading(true); setError(null)
-    void postJson<LaunchPreviewResponse>(`/api/admin/broadcasts/${created.id}/launch-preview`, limit ? { send_limit: limit } : {})
+    void postJson<LaunchPreviewResponse>(`/api/admin/broadcasts/${created.id}/launch-preview`, { send_limit: limit })
       .then(r => {
         if (cancelled) return
         if (!r.ok) { setError(r.error); return }
         setReview(r.data)
-        if (limit === null) setLimit(Math.max(1, Math.min(r.data.sendable_count, 300)))
         setTyped(''); setAck(false)
       })
       .finally(() => { if (!cancelled) setLoading(false) })
@@ -172,7 +172,7 @@ export function BroadcastWizard({ selection: base, onClose, onCreated }: {
     && ack && typed.trim() === String(count) && !launching && done === null
 
   async function launch() {
-    if (!canLaunch || !created || !limit) return
+    if (!canLaunch || !created) return
     setLaunching(true); setError(null); setProgress(null)
     try {
       for (let round = 0; round < MAX_PREP_ROUNDS; round++) {
@@ -408,7 +408,7 @@ export function BroadcastWizard({ selection: base, onClose, onCreated }: {
 }
 
 function ReviewPanel({ review, template, limit, onLimit }: {
-  review: LaunchPreviewResponse; template: BroadcastTemplateName; limit: number | null; onLimit: (n: number) => void
+  review: LaunchPreviewResponse; template: BroadcastTemplateName; limit: number; onLimit: (n: number) => void
 }) {
   const def = TEMPLATE_DEFINITIONS[template]
   const [pg, setPg] = useState(1)
@@ -424,9 +424,9 @@ function ReviewPanel({ review, template, limit, onLimit }: {
       </div>
       <label className="flex flex-wrap items-center gap-2">
         Tamaño del lote:
-        <input type="number" min={1} max={300} value={limit ?? ''} onChange={e => onLimit(Math.max(1, Math.min(300, Number(e.target.value) || 1)))}
+        <input type="number" min={1} max={MAX_LAUNCH_SIZE} value={limit} onChange={e => onLimit(Math.max(1, Math.min(MAX_LAUNCH_SIZE, Number(e.target.value) || 1)))}
           className="w-24 rounded-md border border-gray-300 px-2 py-1" />
-        <span className="text-xs text-gray-500">Piloto: 10–20 · máx. 300 por lanzamiento</span>
+        <span className="text-xs text-gray-500">Inicial: {PILOT_DEFAULT_LIMIT} · súbelo a mano hasta {MAX_LAUNCH_SIZE} por lanzamiento</span>
       </label>
       {review.frozen_count !== null && <p className="text-xs text-gray-500">Lote confirmado congelado: {review.frozen_count} destinatario(s). Nunca se sustituyen.</p>}
 

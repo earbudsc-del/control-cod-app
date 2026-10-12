@@ -106,7 +106,7 @@ async function main() {
     check('A/B. copy de coordinación en ambos segmentos', pP.eligible[0]?.message_preview.includes('*¿Coordinamos tu entrega?*') === true
       && pC.eligible[0]?.message_preview.includes('*¿Coordinamos tu entrega?*') === true)
     check('9. botones coordinación: SOLO dos, sin ubicación',
-      JSON.stringify(pC.buttons) === JSON.stringify(['Sí, confirmar', 'Ya no lo deseo']) && !/ubicaci/i.test(pC.buttons.join(' ')))
+      JSON.stringify(pC.buttons) === JSON.stringify(['Sí, confirmar', 'Cancelar oferta']) && !/ubicaci/i.test(pC.buttons.join(' ')))
   }
 
   // ── Recompra ──────────────────────────────────────────────────────────────
@@ -390,12 +390,12 @@ async function main() {
       planConfirmationResponse('Sí, confirmar', st({ confirmation_status: 'confirmed', ...loc })).location === 'skip_already_known')
     check('ubicación "ambiguous" no cuenta como válida → se pide',
       planConfirmationResponse('Sí, confirmar', st({ ...loc, sd_location_status: 'ambiguous' })).location === 'request_location')
-    const p3 = planConfirmationResponse('Ya no lo deseo', st({ confirmation_status: 'confirmed' }))
-    check('"Ya no lo deseo" → recovery con Génesis, NO cancelación inmediata, sin descuento',
+    const p3 = planConfirmationResponse('Cancelar oferta', st({ confirmation_status: 'confirmed' }))
+    check('"Cancelar oferta" → recovery con Génesis, NO cancelación inmediata, sin descuento',
       p3.canonicalAction === 'start_genesis_recovery' && p3.genesisHandoff && p3.cancelsImmediately === false && p3.offersDiscount === false)
     check('pedido Pagado/entregado → ninguna acción sobre el pedido',
       planConfirmationResponse('Sí, confirmar', st({ payment_status: 'paid' })).canonicalAction === 'none'
-        && planConfirmationResponse('Ya no lo deseo', st({ normalized_status: 'delivered' })).canonicalAction === 'none')
+        && planConfirmationResponse('Cancelar oferta', st({ normalized_status: 'delivered' })).canonicalAction === 'none')
     const r1 = planRepurchaseResponse('Sí, quiero aprovechar', false)
     check('"Sí, quiero aprovechar" → pedido NUEVO de recompra, sin tocar el histórico, sin re-preguntar',
       r1.canonicalAction === 'create_new_repurchase_order' && r1.touchesHistoricalOrder === false && /No volver a preguntar/.test(r1.notes))
@@ -406,14 +406,14 @@ async function main() {
 
     // Ningún plan pide ubicación cuando ya hay una válida.
     const states = [st(loc), st({ confirmation_status: 'confirmed', ...loc }), st({ confirmation_status: 'confirmed', normalized_status: 'en_reparto', ...loc })]
-    const plans = states.flatMap(x => [planConfirmationResponse('Sí, confirmar', x), planConfirmationResponse('Ya no lo deseo', x)])
+    const plans = states.flatMap(x => [planConfirmationResponse('Sí, confirmar', x), planConfirmationResponse('Cancelar oferta', x)])
       .concat([planRepurchaseResponse('Sí, quiero aprovechar', true), planRepurchaseResponse('Ahora no', true)])
     check('ningún flujo pide ubicación si ya existe una válida', plans.every(pl => pl.location !== 'request_location'))
     check('ningún botón cancela ni ofrece descuento por sí solo', plans.every(pl => pl.cancelsImmediately === false && pl.offersDiscount === false))
 
     const dec = (o: Partial<Parameters<typeof recoveryDiscountDecision>[0]>) => recoveryDiscountDecision({
       campaign: PENDING, stage: 'objection_unresolved_price', discountAlreadyOffered: false, orderAlreadyDiscounted: false, requestedPct: 10, ...o })
-    check('recovery: NO descuento al pulsar "Ya no lo deseo"', !dec({ stage: 'button_declined' }).allowed)
+    check('recovery: NO descuento al pulsar "Cancelar oferta"', !dec({ stage: 'button_declined' }).allowed)
     check('recovery: NO descuento antes de trabajar la objeción', !dec({ stage: 'objection_identified' }).allowed)
     check('recovery: descuento solo con objeción de precio no resuelta', dec({}).allowed && dec({}).pct === 10)
     check('recovery: máximo 10% (pide 15 → 10)', dec({ requestedPct: 15 }).pct === MAX_RECOVERY_DISCOUNT_PCT && MAX_RECOVERY_DISCOUNT_PCT === 10)

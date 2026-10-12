@@ -4,6 +4,7 @@ import React, { useState, useRef, useCallback } from 'react'
 import type { RefObject } from 'react'
 import { ArrowLeft, MessageSquare, Send } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { BROADCAST_TEMPLATES, TEMPLATE_BUTTONS, type BroadcastTemplateName } from '@/lib/broadcast/campaign'
 import type { WaConversation, WaMessage, WaTemplateMetadata, WaAgentOption } from './types'
 
 const RD_TZ = 'America/Santo_Domingo'
@@ -39,8 +40,17 @@ function formatMsgTime(iso: string | null): string {
   }).format(new Date(iso))
 }
 
+// Broadcast: los botones visibles son los del template aprobado en Meta (la
+// intención va por índice). Envíos anteriores guardaron el texto viejo en
+// metadata; se muestran con el texto vigente sin reescribir el historial.
+function templateButtons(m: WaTemplateMetadata): string[] | undefined {
+  const t = m.template_name
+  return t && (BROADCAST_TEMPLATES as readonly string[]).includes(t) ? TEMPLATE_BUTTONS[t as BroadcastTemplateName] : m.buttons
+}
+
 function TemplateCard({ msg }: { msg: WaMessage }) {
   const m = msg.metadata as WaTemplateMetadata
+  const buttons = templateButtons(m)
   return (
     <div className="flex mb-2 justify-end">
       <div className="max-w-[75%] rounded-2xl rounded-tr-sm overflow-hidden shadow-sm border border-gray-200 bg-white text-sm">
@@ -57,9 +67,9 @@ function TemplateCard({ msg }: { msg: WaMessage }) {
             {msg.body}
           </p>
         )}
-        {m.buttons && m.buttons.length > 0 && (
+        {buttons && buttons.length > 0 && (
           <div className="border-t border-gray-100">
-            {m.buttons.map((btn, i) => (
+            {buttons.map((btn, i) => (
               <div
                 key={`${btn}-${i}`}
                 className={cn(

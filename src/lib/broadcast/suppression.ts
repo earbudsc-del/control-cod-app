@@ -1,7 +1,7 @@
 // Sprint C.1 — supresión de comunicaciones promocionales.
 //
 // Tres situaciones DISTINTAS que nunca se tratan como equivalentes:
-//   1. Rechazar un pedido      ("Ya no lo deseo")     → intención decline_order, NO es baja.
+//   1. Rechazar un pedido      ("Cancelar oferta")    → intención decline_order, NO es baja.
 //   2. Rechazar una oferta     ("Ahora no")           → repurchase_decline, NO es baja.
 //   3. Pedir no recibir más mensajes promocionales    → marketing_opt_out = true.
 //

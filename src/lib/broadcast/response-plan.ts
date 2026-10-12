@@ -33,7 +33,7 @@ import { MAX_RECOVERY_DISCOUNT_PCT, REPURCHASE_OFFER, type BroadcastCampaign, ty
 export type CanonicalAction =
   | 'apply_confirmation_confirmed'      // applyConfirmationAction({action:'confirmed', guardAutomated:true})
   | 'record_positive_intent_only'       // NO reconfirmar: solo auditoría de intención (pedido ya confirmado)
-  | 'start_genesis_recovery'            // "Ya no lo deseo": NO cancelar; Génesis intenta recuperar
+  | 'start_genesis_recovery'            // "Cancelar oferta": NO cancelar; Génesis intenta recuperar
   | 'create_new_repurchase_order'       // pedido NUEVO (nunca tocar el histórico) vía puerta canónica (gap)
   | 'record_campaign_declined'          // "Ahora no": solo auditoría de campaña
   | 'none'                              // estado no aplicable: no hacer nada y escalar
@@ -75,7 +75,7 @@ const base = { touchesHistoricalOrder: false, cancelsImmediately: false, offersD
  * interpreta según el estado canónico ACTUAL del pedido (no según el
  * segmento con el que se envió).
  */
-export function planConfirmationResponse(button: 'Sí, confirmar' | 'Ya no lo deseo', o: OrderStateForPlan): ButtonResponsePlan {
+export function planConfirmationResponse(button: 'Sí, confirmar' | 'Cancelar oferta', o: OrderStateForPlan): ButtonResponsePlan {
   const template = 'sd_broadcast_confirmation' as const
   const terminal = o.payment_status === 'paid' || o.normalized_status === 'delivered'
     || o.normalized_status === 'returned' || o.confirmation_status === 'cancelled' || !!o.tracking_number
@@ -102,7 +102,7 @@ export function planConfirmationResponse(button: 'Sí, confirmar' | 'Ya no lo de
       canonicalAction: 'none', genesisHandoff: true, location: 'not_applicable', notes: 'Revisión manual.' }
   }
 
-  // "Ya no lo deseo" → recuperación, nunca cancelación inmediata.
+  // "Cancelar oferta" → recuperación, nunca cancelación inmediata.
   return { ...base, template, button, meaning: 'Duda/rechazo — iniciar recuperación',
     canonicalAction: 'start_genesis_recovery', genesisHandoff: true, location: 'not_applicable',
     notes: 'Génesis identifica la objeción antes de cualquier descuento. Cancelación solo tras rechazo inequívoco, vía servicio canónico.' }

@@ -5,7 +5,7 @@
 //      solo corre con WA_AUTOMATIONS_ENABLED='true'. Con el flag ausente o
 //      apagado la ubicación se guarda igual en el pedido y un agente confirma
 //      con los flujos canónicos. (Antes confirmaba siempre, sin flag — una
-//      respuesta a Broadcast con un pin, incluso después de "Ya no lo deseo",
+//      respuesta a Broadcast con un pin, incluso después de "Cancelar oferta",
 //      confirmaba y despachaba el pedido sin intervención humana.)
 //
 //   2. Varios pedidos activos candidatos (ambiguo): NO se asigna la

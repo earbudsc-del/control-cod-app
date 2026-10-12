@@ -71,7 +71,7 @@ export const BROADCAST_STATUS_LABELS: Record<string, string> = {
 // C.1 — qué pasa con cada quick reply (atención humana; Génesis apagado).
 export const BROADCAST_BUTTON_HINTS: Record<string, string> = {
   'Sí, confirmar':         'Llega al Inbox como "Quiere confirmar". Un agente confirma con el flujo existente; no se confirma solo.',
-  'Ya no lo deseo':        'Llega al Inbox destacado. No cancela el pedido: un agente atiende y, si corresponde, cancela con el flujo existente.',
+  'Cancelar oferta':       'Llega al Inbox destacado. No cancela el pedido: un agente atiende y, si corresponde, cancela con el flujo existente.',
   'Sí, quiero aprovechar': 'Registra interés de recompra. No crea pedidos automáticamente.',
   'Ahora no':              'Registra que no le interesa ahora. No se insiste automáticamente.',
 }
@@ -80,7 +80,7 @@ export const BROADCAST_BUTTON_HINTS: Record<string, string> = {
 // se confirma ni se cancela automáticamente.
 export const BROADCAST_INTENT_LABELS: Record<string, string> = {
   confirm_interest:    'Quiere confirmar',
-  decline_order:       'Ya no lo desea',
+  decline_order:       'Rechaza la oferta (pedido sin cancelar)',
   repurchase_interest: 'Quiere aprovechar la recompra',
   repurchase_decline:  'Ahora no (recompra)',
   unknown:             'Respuesta sin campaña identificable',
