@@ -9,6 +9,7 @@
 import { resolveCommercialOffer, offerContentsLine } from './offer'
 import { BROADCAST_STATUS_LABELS } from './labels'
 import { isWithinServiceWindow, lastInboundAt } from '@/lib/whatsapp/conversation-window'
+import { compareEvents, decisionsBySend, withMessageTimes } from './response-timeline'
 
 interface SupabaseLike {
   from: (table: string) => any // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -19,11 +20,13 @@ export interface BroadcastInboxContext {
   phone_normalized: string | null
   marketing_opt_out: boolean
   window: { last_inbound_at: string | null; open: boolean }
-  responses: Array<{
+  responses: Array<{                // más reciente primero, por hora real del mensaje del cliente
     id: string; intent: string; association: string; button_text: string | null
     created_at: string; handled_at: string | null; broadcast_id: string | null; order_id: string | null
+    queue_id: string | null; inbound_message_id: string | null; message_at?: string | null
   }>
   unhandled: number
+  decision_changed_from: string | null   // intención anterior del mismo envío si el cliente cambió de decisión
   campaign: { id: string; template_name: string; status: string; status_label: string; launched_at: string | null } | null
   order: {
     id: string; order_number: string | null; customer_name: string | null; customer_phone: string | null
@@ -45,9 +48,14 @@ export async function buildBroadcastInboxContext(
   const phone = (Array.isArray(contactRaw) ? contactRaw[0] : contactRaw)?.phone_normalized ?? null
 
   const { data: respData } = await db.from('wa_broadcast_responses')
-    .select('id, intent, association, button_text, created_at, handled_at, broadcast_id, order_id')
-    .eq('store_id', storeId).eq('conversation_id', conversationId).order('created_at', { ascending: false }).limit(10)
-  const responses = (respData ?? []) as BroadcastInboxContext['responses']
+    .select('id, intent, association, button_text, created_at, handled_at, broadcast_id, order_id, queue_id, inbound_message_id')
+    .eq('store_id', storeId).eq('conversation_id', conversationId).order('created_at', { ascending: false }).limit(50)
+  // Orden real del cliente (no de procesamiento): un evento viejo que llega
+  // tarde no pasa por encima de la decisión más reciente.
+  const responses = (await withMessageTimes(db, storeId, (respData ?? []) as BroadcastInboxContext['responses']))
+    .sort((a, b) => compareEvents(b, a))
+  const latestQueue = responses.find(r => r.queue_id && r.intent !== 'unknown')?.queue_id ?? null
+  const decision = latestQueue ? decisionsBySend(responses.filter(r => r.queue_id === latestQueue)).get(latestQueue) : undefined
 
   // Pedido/campaña: de la última respuesta asociada; si no hay, del último
   // template de Broadcast enviado en esta conversación (metadata del outbound).
@@ -104,7 +112,8 @@ export async function buildBroadcastInboxContext(
   return {
     conversation_id: conversationId, phone_normalized: phone, marketing_opt_out: optOut,
     window: { last_inbound_at: last, open: isWithinServiceWindow(last, now) },
-    responses, unhandled: responses.filter(r => !r.handled_at).length, campaign, order,
+    responses, unhandled: responses.filter(r => !r.handled_at).length,
+    decision_changed_from: decision?.changed ? decision.previous : null, campaign, order,
   }
 }
 

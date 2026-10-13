@@ -7,7 +7,7 @@ import { decideContactOrderLink, isLinkedOrderStillActive, resolveContactOrderBy
 import { maybeGenesisRespond }  from '@/lib/genesis/respond'
 import { handleInboundLocation } from '@/lib/whatsapp/inbound-location'
 import { isWaAutomationsEnabled } from '@/lib/config/wa-automations'
-import { recordBroadcastButtonResponse } from '@/lib/broadcast/responses'
+import { recordBroadcastButtonResponse, recordBroadcastTextReply } from '@/lib/broadcast/responses'
 import { isMarketingOptOutRequest, recordMarketingOptOut } from '@/lib/broadcast/suppression'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -566,6 +566,23 @@ async function processInboundMessage(
       })
       if (recorded) {
         console.log(`[wa-webhook] broadcast respuesta — intent=${recorded.intent} assoc=${recorded.association} broadcast=${recorded.broadcastId ?? '-'} dup=${recorded.duplicate}`)
+      }
+    }
+    // Respuesta ESCRITA al template de campaña ("Sí, confirmar" citando el
+    // mensaje, sin pulsar el botón): misma intención, solo si es verificable.
+    // Aislada: si falla, la detección de baja promocional de abajo sigue igual.
+    if (content.messageType === 'text') {
+      try {
+        const context = msg.context as { id?: string } | undefined
+        const typed = await recordBroadcastTextReply(supabase, {
+          storeId, conversationId: conversation.id, inboundMessageId: newMsg.id, phoneNormalized,
+          text: body, contextWamid: context?.id ?? null, messageAt: sentAt,
+        })
+        if (typed) {
+          console.log(`[wa-webhook] broadcast respuesta escrita — intent=${typed.intent} assoc=${typed.association} broadcast=${typed.broadcastId ?? '-'} dup=${typed.duplicate}`)
+        }
+      } catch (txtErr) {
+        console.error('[wa-webhook] ⚠ registro de respuesta escrita Broadcast falló (mensaje ya guardado):', txtErr instanceof Error ? txtErr.message : txtErr)
       }
     }
     if (content.messageType === 'text' && isMarketingOptOutRequest(body)) {

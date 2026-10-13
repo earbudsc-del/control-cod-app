@@ -4,12 +4,18 @@
 //   accepted   = filas con wa_message_id (Meta aceptó). NO es entrega.
 //   delivered / read / failed_after_accept = estado del wa_message por
 //                webhook de status de Meta (read implica delivered).
-//   responded  = respuestas de botones registradas (wa_broadcast_responses).
+//   responded  = ENVÍOS con al menos una respuesta válida (no clientes únicos:
+//                un mismo teléfono puede estar en varios envíos).
+//   responses_by_intent = ÚLTIMA decisión de cada envío (orden real del
+//                cliente), mutuamente excluyentes: un envío cuenta una sola vez.
+//   responses_changed = envíos cuyo cliente cambió de decisión.
+//   responses_total / responses_by_intent_raw = historial completo (auditoría).
 //   confirm_interest ≠ confirmed: "Sí, confirmar" es intención; una
 //   confirmación atribuible exige confirmation_status='confirmed' con
 //   customer_confirmed_at POSTERIOR al envío al pedido de esa fila.
 
 import { classifyMetaFailure, type FailureCategory } from './phone-rules'
+import { decisionsBySend, withMessageTimes, type ResponseEvent } from './response-timeline'
 
 interface SupabaseLike {
   from: (table: string) => any // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -31,8 +37,11 @@ export interface BroadcastMetrics {
   send_unknown:  number
   skipped:       number
   skipped_by_reason: Record<string, number>
-  responded:     number
-  responses_by_intent: Record<string, number>
+  responded:     number                       // envíos con respuesta válida
+  responses_by_intent: Record<string, number>  // última decisión por envío
+  responses_changed: number                    // envíos que cambiaron de decisión
+  responses_total: number                      // filas registradas (auditoría)
+  responses_by_intent_raw: Record<string, number>
   responses_unhandled: number
   confirmations_attributable: number
   errors: Array<{ queue_id: string; order_id: string; status: string; meta_error_code: string | null; error_message: string | null }>
@@ -53,7 +62,7 @@ export async function getBroadcastMetrics(db: SupabaseLike, storeId: string, bro
   const m: BroadcastMetrics = {
     queued: rows.length, pending: 0, processing: 0, accepted: 0, delivered: 0, read: 0, failed: 0, failed_by_category: {},
     failed_after_accept: 0, send_unknown: 0, skipped: 0, skipped_by_reason: {}, responded: 0,
-    responses_by_intent: {}, responses_unhandled: 0, confirmations_attributable: 0, errors: [],
+    responses_by_intent: {}, responses_changed: 0, responses_total: 0, responses_by_intent_raw: {}, responses_unhandled: 0, confirmations_attributable: 0, errors: [],
   }
   for (const r of rows) {
     if (r.status === 'pending') m.pending++
@@ -86,12 +95,19 @@ export async function getBroadcastMetrics(db: SupabaseLike, storeId: string, bro
     }
   }
 
-  const { data: resp } = await db.from('wa_broadcast_responses').select('intent, handled_at')
+  const { data: resp } = await db.from('wa_broadcast_responses')
+    .select('id, queue_id, intent, created_at, inbound_message_id, handled_at')
     .eq('store_id', storeId).eq('broadcast_id', broadcastId)
-  for (const r of (resp ?? []) as Array<{ intent: string; handled_at: string | null }>) {
-    m.responded++
-    m.responses_by_intent[r.intent] = (m.responses_by_intent[r.intent] ?? 0) + 1
+  const events = (resp ?? []) as Array<ResponseEvent & { handled_at: string | null }>
+  for (const r of events) {
+    m.responses_total++
+    m.responses_by_intent_raw[r.intent] = (m.responses_by_intent_raw[r.intent] ?? 0) + 1
     if (!r.handled_at) m.responses_unhandled++
+  }
+  for (const d of decisionsBySend(await withMessageTimes(db, storeId, events)).values()) {
+    m.responded++
+    m.responses_by_intent[d.latest] = (m.responses_by_intent[d.latest] ?? 0) + 1
+    if (d.changed) m.responses_changed++
   }
 
   const sentAtByOrder = new Map(rows.filter(r => r.wa_message_id && r.processed_at).map(r => [r.order_id, r.processed_at!]))

@@ -112,8 +112,10 @@ export function BroadcastCampaignPanel({ broadcastId, onChanged }: { broadcastId
             <Stat label="Fallidos" value={m.failed + m.failed_after_accept} />
             <Stat label="Inciertos" value={m.send_unknown} />
             <Stat label="Omitidos" value={m.skipped} />
-            <Stat label="Respondieron" value={m.responded} />
-            <Stat label="Quieren confirmar" value={m.responses_by_intent.confirm_interest ?? 0} />
+            <Stat label="Envíos con respuesta" value={m.responded} />
+            <Stat label="Quieren confirmar" value={(m.responses_by_intent.confirm_interest ?? 0) + (m.responses_by_intent.repurchase_interest ?? 0)} />
+            <Stat label="Rechazan la oferta" value={(m.responses_by_intent.decline_order ?? 0) + (m.responses_by_intent.repurchase_decline ?? 0)} />
+            <Stat label="Cambiaron de decisión" value={m.responses_changed ?? 0} />
             <Stat label="Sin atender" value={m.responses_unhandled} />
             <Stat label="Confirm. atribuibles" value={m.confirmations_attributable} />
           </div>
@@ -124,7 +126,10 @@ export function BroadcastCampaignPanel({ broadcastId, onChanged }: { broadcastId
             <p className="text-gray-600">Fallidos por causa (ninguno se reintenta solo): {Object.entries(m.failed_by_category).map(([k, n]) => `${FAILURE_CATEGORY_LABELS[k] ?? k}: ${n}`).join(' · ')}</p>
           )}
           {Object.keys(m.responses_by_intent).length > 0 && (
-            <p className="text-gray-600">Respuestas: {Object.entries(m.responses_by_intent).map(([k, n]) => `${BROADCAST_INTENT_LABELS[k] ?? k}: ${n}`).join(' · ')}</p>
+            <p className="text-gray-600">Última decisión por envío: {Object.entries(m.responses_by_intent).map(([k, n]) => `${BROADCAST_INTENT_LABELS[k] ?? k}: ${n}`).join(' · ')}</p>
+          )}
+          {m.responded > 0 && (
+            <p className="text-gray-500">Cada envío cuenta una sola vez con la última respuesta del cliente. «Envíos con respuesta» no equivale a clientes únicos. Historial completo: {m.responses_total ?? m.responded} respuestas registradas.</p>
           )}
           {m.errors.length > 0 && (
             <details>
