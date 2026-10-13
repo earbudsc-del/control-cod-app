@@ -78,6 +78,27 @@ export function decisionsBySend(events: ResponseEvent[]): Map<string, SendDecisi
   return out
 }
 
+/** Respuesta inmediatamente anterior a `candidate` en el tiempo real del cliente. */
+export function previousEvent<T extends ResponseEvent>(existing: T[], candidate: ResponseEvent): T | undefined {
+  const before = existing.filter(e => compareEvents(e, candidate) < 0).sort(compareEvents)
+  return before[before.length - 1]
+}
+
+/**
+ * Estado de atención que debe heredar una respuesta nueva de un envío, o null
+ * si debe quedar pendiente ("Sin atender"):
+ *  · llega tarde (hay respuestas posteriores en el tiempo real del cliente):
+ *    no cambia la última decisión → hereda el estado de la más reciente;
+ *  · repite la intención inmediatamente anterior y esa ya fue atendida → atendida;
+ *  · cambia de intención, o la anterior sigue pendiente → pendiente.
+ */
+export function inheritedAttention<T extends ResponseEvent & { handled_at: string | null }>(existing: T[], candidate: ResponseEvent): T | null {
+  const later = existing.filter(e => compareEvents(e, candidate) > 0).sort(compareEvents)
+  if (later.length > 0) return later[later.length - 1].handled_at ? later[later.length - 1] : null
+  const prev = previousEvent(existing, candidate)
+  return prev && prev.intent === candidate.intent && prev.handled_at ? prev : null
+}
+
 /** Hora real de los mensajes del cliente (wa_messages.sent_at), por bloques. */
 export async function loadMessageTimes(db: SupabaseLike, storeId: string, messageIds: string[]): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>()

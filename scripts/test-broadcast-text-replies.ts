@@ -219,22 +219,6 @@ async function main() {
       const { by } = await decision(t.db)
       check('B9.13 evento viejo tardío: no cambia la última decisión ni reabre "Sin atender"', by.confirm_interest === 1 && !attention.has(t.convId))
     }
-    // Nueva respuesta válida después de atendida → vuelve a "Sin atender"
-    {
-      const t = seed()
-      await t.say('Sí, confirmar', 1)
-      await markBroadcastResponsesHandled(t.db as never, S1, t.convId, 'agent-1')
-      __resetInboxCaches()
-      const before = (await attentionConversationIds(t.db as never, S1)).has(t.convId)
-      await t.say('Cancelar oferta', 2)
-      __resetInboxCaches()
-      const afterChange = (await attentionConversationIds(t.db as never, S1)).has(t.convId)
-      await markBroadcastResponsesHandled(t.db as never, S1, t.convId, 'agent-1')
-      await t.say('Cancelar oferta', 3)
-      __resetInboxCaches()
-      const afterRepeat = (await attentionConversationIds(t.db as never, S1)).has(t.convId)
-      check('B9.14 tras atender, una nueva respuesta válida vuelve a "Sin atender" (cambio o repetición)', !before && afterChange && afterRepeat)
-    }
     // Distintas campañas y envíos
     {
       const t = seed()
@@ -261,6 +245,94 @@ async function main() {
       await getBroadcastMetrics(t.db as never, S1, 'bc-1'); await buildBroadcastInboxContext(t.db as never, S1, t.convId)
       check('B9.18 cambios de decisión no modifican pedidos', JSON.stringify(t.db.t('orders')) === before)
       check('B9.19 cambios de decisión no crean bajas promocionales', t.db.t('wa_contact_preferences').length === 0)
+    }
+  }
+
+  console.log('\n=== B10 — reapertura de «Sin atender» ===')
+  {
+    const pending = async (t: ReturnType<typeof seed>) => { __resetInboxCaches(); return (await attentionConversationIds(t.db as never, S1)).has(t.convId) }
+    const attend = (t: ReturnType<typeof seed>) => markBroadcastResponsesHandled(t.db as never, S1, t.convId, 'agent-1')
+    const button = (t: ReturnType<typeof seed>, idx: 0 | 1, min: number) => recordBroadcastButtonResponse(t.db as never, {
+      storeId: S1, conversationId: t.convId, inboundMessageId: t.inbound(min), phoneNormalized: PHONE,
+      buttonText: idx === 0 ? 'Sí, confirmar' : 'Cancelar oferta', buttonPayload: `bc1:${t.queue('wamid.CAMPAIGN').id}:${idx}`,
+      contextWamid: 'wamid.CAMPAIGN', messageAt: t.msgAt(min) })
+
+    // Repite la misma intención ya atendida → no reabre, pero se guarda
+    {
+      const t = seed()
+      await t.say('Sí, confirmar', 1); await attend(t)
+      const r = await t.say('si, confirmar', 2)
+      const rows = t.db.t('wa_broadcast_responses')
+      check('B10.1 repetición consecutiva de una intención atendida → no reabre «Sin atender»', !(await pending(t)))
+      check('B10.2 la repetición se conserva en el historial (2 filas)', !r?.duplicate && rows.length === 2 && rows[1].handled_at === rows[0].handled_at && rows[1].handled_by === 'agent-1')
+      const ctx = await buildBroadcastInboxContext(t.db as never, S1, t.convId)
+      check('B10.3 contexto del Inbox coherente: 0 sin atender, sin aviso de cambio', ctx?.unhandled === 0 && ctx?.decision_changed_from === null)
+    }
+    // Cambia de intención tras ser atendida → reabre
+    {
+      const t = seed()
+      await t.say('Sí, confirmar', 1); await attend(t)
+      await t.say('Cancelar oferta', 2)
+      check('B10.4 cambio de intención tras atender → vuelve a «Sin atender»', await pending(t))
+      await attend(t)
+      check('B10.5 «Marcar atendida» lo resuelve', !(await pending(t)))
+      await t.say('Sí, confirmar', 3)
+      check('B10.6 volver a la intención anterior también es un cambio → reabre', await pending(t))
+    }
+    // Con una respuesta todavía pendiente, sigue pendiente
+    {
+      const t = seed()
+      await t.say('Sí, confirmar', 1); await t.say('Sí, confirmar', 2)
+      const rows = t.db.t('wa_broadcast_responses')
+      check('B10.7 repetición con la anterior aún pendiente → sigue pendiente', (await pending(t)) && rows.every(r => r.handled_at == null))
+      await attend(t)
+      check('B10.8 «Marcar atendida» atiende todas las pendientes', !(await pending(t)) && rows.every(r => r.handled_at))
+    }
+    // Botones: mismas reglas
+    {
+      const t = seed()
+      await button(t, 0, 1); await attend(t)
+      await button(t, 0, 2)
+      const repeatOk = !(await pending(t))
+      await button(t, 1, 3)
+      check('B10.9 botón: repetir lo atendido no reabre; cambiar sí', repeatOk && await pending(t) && t.db.t('wa_broadcast_responses').length === 3)
+    }
+    {
+      const t = seed()
+      await button(t, 0, 1); await attend(t)
+      await t.say('Sí, confirmar', 2)
+      check('B10.10 botón atendido y luego escribe lo mismo → no reabre', !(await pending(t)) && t.db.t('wa_broadcast_responses').length === 2)
+    }
+    // Mensajes viejos fuera de orden
+    {
+      const t = seed()
+      await t.say('Sí, confirmar', 10); await attend(t)
+      await button(t, 1, 5)                                      // botón viejo que llega tarde
+      const { responses_by_intent: by } = await getBroadcastMetrics(t.db as never, S1, 'bc-1')
+      check('B10.11 botón viejo tardío: no reemplaza la última intención ni reabre', by.confirm_interest === 1 && !by.decline_order && !(await pending(t)))
+    }
+    {
+      const t = seed()
+      await t.say('Sí, confirmar', 10)                           // aún pendiente
+      await t.say('Cancelar oferta', 5)                          // viejo, tardío
+      check('B10.12 mensaje viejo tardío con la última aún pendiente → sigue pendiente', await pending(t))
+    }
+    {
+      const t = seed()
+      await t.say('Sí, confirmar', 10); await attend(t)
+      await t.say('Sí, confirmar', 30); await t.say('Cancelar oferta', 20)   // repite (no reabre) y luego llega uno viejo distinto
+      const { responses_by_intent: by } = await getBroadcastMetrics(t.db as never, S1, 'bc-1')
+      check('B10.13 secuencia mixta fuera de orden: última = confirmar, sin reabrir, 3 filas', by.confirm_interest === 1 && !(await pending(t)) && t.db.t('wa_broadcast_responses').length === 3)
+    }
+    // No altera «Sin leer» ni oculta otras razones de atención
+    {
+      const t = seed()
+      const conv = t.db.t('wa_conversations')[0]; conv.unread_count = 4
+      await t.say('Sí, confirmar', 1); await attend(t)
+      t.db.t('genesis_escalations').push({ id: randomUUID(), store_id: S1, conversation_id: t.convId, status: 'open' })
+      await t.say('Sí, confirmar', 2)
+      check('B10.14 un escalamiento abierto sigue mostrando la conversación en «Sin atender»', await pending(t))
+      check('B10.15 «Sin leer» (unread_count) no se toca', conv.unread_count === 4)
     }
   }
 

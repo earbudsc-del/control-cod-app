@@ -563,6 +563,7 @@ async function processInboundMessage(
         buttonText:    (content.metadata?.button_reply_title as string | undefined) ?? null,
         buttonPayload: (content.metadata?.button_reply_id as string | undefined) ?? null,
         contextWamid:  context?.id ?? null,
+        messageAt:     sentAt,
       })
       if (recorded) {
         console.log(`[wa-webhook] broadcast respuesta — intent=${recorded.intent} assoc=${recorded.association} broadcast=${recorded.broadcastId ?? '-'} dup=${recorded.duplicate}`)
