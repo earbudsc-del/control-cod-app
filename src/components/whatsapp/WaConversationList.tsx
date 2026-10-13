@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 import { MessageSquare, Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WaConversation } from './types'
+import { displayPreview } from '@/lib/whatsapp/location-message'
 
 const RD_TZ = 'America/Santo_Domingo'
 
@@ -258,7 +259,7 @@ export default function WaConversationList({
                       'text-xs truncate flex-1',
                       conv.unread_count > 0 ? 'text-gray-700' : 'text-gray-400',
                     )}>
-                      {conv.last_message_preview ?? 'Sin mensajes'}
+                      {displayPreview(conv.last_message_preview) ?? 'Sin mensajes'}
                     </p>
                     {conv.unread_count > 0 && (
                       <span className="flex-shrink-0 min-w-[18px] h-[18px] rounded-full bg-green-500 text-white text-[10px] font-bold flex items-center justify-center px-1">

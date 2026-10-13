@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse }  from 'next/server'
 import { isWithinServiceWindow, lastInboundAt, OUTSIDE_WINDOW_ERROR } from '@/lib/whatsapp/conversation-window'
+import { attachLinkedOrders } from '@/lib/whatsapp/location-message'
 
 const DEFAULT_LIMIT = 50
 const MAX_LIMIT     = 100
@@ -20,7 +21,7 @@ export async function GET(
     // RLS ya filtra store_id en wa_conversations — null significa no existe o no pertenece.
     const { data: conv, error: convErr } = await supabase
       .from('wa_conversations')
-      .select('id')
+      .select('id, store_id')
       .eq('id', id)
       .maybeSingle()
 
@@ -41,7 +42,9 @@ export async function GET(
         .order('sent_at', { ascending: true, nullsFirst: false })
 
       if (afterError) throw afterError
-      return NextResponse.json({ data: afterData, pagination: null })
+      // Ubicaciones: pedido vinculado (una consulta, solo si hay pines).
+      const withLinks = await attachLinkedOrders(supabase, conv.store_id, afterData ?? [])
+      return NextResponse.json({ data: withLinks, pagination: null })
     }
 
     const page  = Math.max(1, parseInt(searchParams.get('page')  ?? '1'))
@@ -62,7 +65,7 @@ export async function GET(
     if (error) throw error
 
     return NextResponse.json({
-      data,
+      data: await attachLinkedOrders(supabase, conv.store_id, data ?? []),
       pagination: {
         page,
         limit,

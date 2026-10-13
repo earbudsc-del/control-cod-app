@@ -8,6 +8,7 @@ import BroadcastContextPanel from '@/components/whatsapp/BroadcastContextPanel'
 import LocationAssignmentPanel from '@/components/whatsapp/LocationAssignmentPanel'
 import type { WaConversation, WaMessage, WaAgentOption } from '@/components/whatsapp/types'
 import { createClient } from '@/lib/supabase/client'
+import { messagePreview } from '@/lib/whatsapp/location-message'
 
 // Roles con acceso al Inbox WhatsApp — mismo set que is_wa_inbox_role() (migración 030 + 039).
 const INBOX_ROLES = ['admin', 'ia_supervisor', 'confirmation_agent', 'dispatch_agent', 'novelty_agent', 'agent', 'delivery_agent']
@@ -255,7 +256,7 @@ export default function InboxPage() {
           if (c.id !== convId) return c
           return {
             ...c,
-            last_message_preview: lastIncoming.body ?? c.last_message_preview,
+            last_message_preview: messagePreview(lastIncoming),
             last_message_at:      lastIncoming.sent_at ?? c.last_message_at,
             unread_count:         0,
           }
@@ -322,7 +323,8 @@ export default function InboxPage() {
             const isOpen = c.id === selectedIdRef.current
             return {
               ...c,
-              last_message_preview: msg.body ?? c.last_message_preview,
+              // Sin texto (p. ej. ubicación) → "[tipo]", como el webhook; la lista lo muestra legible.
+              last_message_preview: messagePreview(msg),
               last_message_at:      msg.sent_at ?? c.last_message_at,
               unread_count: isOpen
                 ? 0

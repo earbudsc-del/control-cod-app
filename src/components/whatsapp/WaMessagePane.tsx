@@ -2,8 +2,9 @@
 
 import React, { useState, useRef, useCallback } from 'react'
 import type { RefObject } from 'react'
-import { ArrowLeft, MessageSquare, Send } from 'lucide-react'
+import { ArrowLeft, Check, Copy, ExternalLink, MapPin, MessageSquare, Send } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { formatCoordinates, googleMapsUrl, parseLocation } from '@/lib/whatsapp/location-message'
 import { BROADCAST_TEMPLATES, TEMPLATE_BUTTONS, type BroadcastTemplateName } from '@/lib/broadcast/campaign'
 import type { WaConversation, WaMessage, WaTemplateMetadata, WaAgentOption } from './types'
 
@@ -96,9 +97,65 @@ function TemplateCard({ msg }: { msg: WaMessage }) {
   )
 }
 
+// Ubicación compartida por WhatsApp: coordenadas reales, Maps y enlace copiable
+// para el mensajero. Mismo enlace que LocationAssignmentPanel.
+function LocationCard({ msg }: { msg: WaMessage }) {
+  const loc = parseLocation(msg.metadata)
+  const [copied, setCopied] = useState(false)
+  const inbound = msg.direction === 'inbound'
+  if (!loc) return null
+  const url = googleMapsUrl(loc)
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(url)
+    } catch {
+      // Navegadores sin API de portapapeles (http o permisos): selección manual.
+      window.prompt('Copia el enlace de la ubicación:', url)
+      return
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div className={cn('flex mb-2', inbound ? 'justify-start' : 'justify-end')}>
+      <div className="w-72 max-w-[85%] rounded-2xl border border-gray-200 bg-white text-sm shadow-sm overflow-hidden">
+        <div className="flex items-start gap-2 px-3 pt-3">
+          <MapPin className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
+          <div className="min-w-0">
+            <p className="font-semibold text-gray-900">{loc.name ?? 'Ubicación compartida'}</p>
+            {loc.address && <p className="text-xs text-gray-600 break-words">{loc.address}</p>}
+            <p className="font-mono text-[11px] text-gray-400">{formatCoordinates(loc)}</p>
+            {msg.linked_order_number && (
+              <p className="mt-1 inline-block rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                Vinculada al pedido {msg.linked_order_number}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="mt-2 grid grid-cols-2 border-t border-gray-100">
+          <a href={url} target="_blank" rel="noreferrer"
+            className="flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-semibold text-indigo-600 hover:bg-indigo-50">
+            <ExternalLink className="h-3.5 w-3.5" /> Abrir en Google Maps
+          </a>
+          <button type="button" onClick={copyLink}
+            className="flex items-center justify-center gap-1.5 border-l border-gray-100 px-2 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50">
+            {copied ? <><Check className="h-3.5 w-3.5 text-emerald-600" /> Copiado</> : <><Copy className="h-3.5 w-3.5" /> Copiar enlace</>}
+          </button>
+        </div>
+        <p className="px-3 pb-1.5 text-right text-[10px] text-gray-400">{formatMsgTime(msg.sent_at)}</p>
+      </div>
+    </div>
+  )
+}
+
 function MessageBubble({ msg }: { msg: WaMessage }) {
   if (msg.message_type === 'template' && msg.metadata) {
     return <TemplateCard msg={msg} />
+  }
+  if (msg.message_type === 'location' && parseLocation(msg.metadata)) {
+    return <LocationCard msg={msg} />
   }
   const inbound = msg.direction === 'inbound'
   return (

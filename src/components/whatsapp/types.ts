@@ -44,6 +44,8 @@ export interface WaMessage {
   sent_by: string | null
   wa_msg_id: string
   metadata?: Record<string, unknown> | null
+  // Ubicación: número del pedido cuya ubicación SD es este pin (si lo hay).
+  linked_order_number?: string | null
 }
 
 export interface WaTemplateMetadata {
