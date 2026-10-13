@@ -20,6 +20,14 @@ const INTENT_STYLE: Record<string, string> = {
   unknown:             'bg-amber-100 text-amber-800',
 }
 
+// «Cambió de decisión: antes …»
+const PREVIOUS_DECISION: Record<string, string> = {
+  confirm_interest:    'quería confirmar',
+  decline_order:       'rechazaba la oferta',
+  repurchase_interest: 'quería aprovechar la recompra',
+  repurchase_decline:  'no le interesaba la recompra',
+}
+
 function fmtMoney(v: number | null): string {
   return v == null ? '—' : `RD$${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(v)}`
 }
@@ -59,7 +67,7 @@ export default function BroadcastContextPanel({ conversationId, onChanged }: { c
   }
 
   if (!ctx || (!ctx.order && ctx.responses.length === 0)) return null
-  const last = ctx.responses[0]
+  const last = ctx.responses.find(r => r.intent !== 'unknown') ?? ctx.responses[0]
   const o = ctx.order
 
   return (
@@ -71,6 +79,11 @@ export default function BroadcastContextPanel({ conversationId, onChanged }: { c
         {last && (
           <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${INTENT_STYLE[last.intent] ?? INTENT_STYLE.unknown}`}>
             {BROADCAST_INTENT_LABELS[last.intent] ?? last.intent}{last.button_text ? ` · "${last.button_text}"` : ''}
+          </span>
+        )}
+        {ctx.decision_changed_from && (
+          <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-800">
+            Cambió de decisión: antes {PREVIOUS_DECISION[ctx.decision_changed_from] ?? ctx.decision_changed_from}
           </span>
         )}
         {ctx.unhandled > 0 && <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[11px] font-semibold text-amber-900">Sin atender</span>}

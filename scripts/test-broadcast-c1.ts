@@ -423,7 +423,12 @@ async function main() {
     msg.status = 'read'; msg.read_at = clock.toISOString()
     m = await getBroadcastMetrics(db, S1, inboxBroadcast)
     check('29c. leído cuenta como entregado y leído', m.delivered === 1 && m.read === 1, m)
-    check('29d. intención ≠ confirmación atribuible', (m.responses_by_intent.confirm_interest ?? 0) === 1 && m.confirmations_attributable === 0, m)
+    check('29d. intención ≠ confirmación atribuible', (m.responses_by_intent_raw.confirm_interest ?? 0) === 1 && m.confirmations_attributable === 0, m)
+    // Este envío respondió "Sí, confirmar" y después "Cancelar oferta": la
+    // métrica usa la última decisión (excluyente) y conserva el historial.
+    check('29d2. última decisión por envío + cambio de decisión + historial completo',
+      m.responded === 1 && m.responses_by_intent.decline_order === 1 && !m.responses_by_intent.confirm_interest
+      && m.responses_changed === 1 && m.responses_total === 3, m)
     inboxOrder!.confirmation_status = 'confirmed'
     inboxOrder!.customer_confirmed_at = new Date(Date.parse(sentRows[0].processed_at) + 60_000).toISOString()
     m = await getBroadcastMetrics(db, S1, inboxBroadcast)

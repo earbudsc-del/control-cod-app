@@ -21,6 +21,7 @@
 
 import { TEMPLATE_BUTTONS, BROADCAST_TEMPLATES, type BroadcastTemplateName } from './campaign'
 import { parseButtonPayload, TEMPLATE_BUTTON_INTENTS, type ButtonIntent } from './templates'
+import { inheritedAttention, withMessageTimes, type ResponseEvent } from './response-timeline'
 
 interface SupabaseLike {
   from: (table: string) => any // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -36,6 +37,7 @@ export interface ButtonResponseInput {
   buttonText:        string | null
   buttonPayload:     string | null
   contextWamid:      string | null
+  messageAt?:        string | null   // sent_at del mensaje (timestamp de Meta)
 }
 
 export interface RecordedResponse {
@@ -70,6 +72,30 @@ async function findQueueRow(db: SupabaseLike, storeId: string, col: 'id' | 'wa_m
   return r && r.broadcast_id && isBroadcastTemplate(r.template_name) ? r : null
 }
 
+type PriorResponse = ResponseEvent & { handled_at: string | null; handled_by: string | null }
+
+async function priorResponses(db: SupabaseLike, storeId: string, queueId: string): Promise<PriorResponse[]> {
+  const { data, error } = await db.from('wa_broadcast_responses')
+    .select('id, queue_id, intent, created_at, inbound_message_id, handled_at, handled_by')
+    .eq('store_id', storeId).eq('queue_id', queueId)
+  if (error) throw new Error(`wa_broadcast_responses(prior): ${error.message ?? String(error)}`)
+  return (data ?? []) as PriorResponse[]
+}
+
+// Atención de una respuesta nueva de un envío (ver inheritedAttention): la
+// repetición consecutiva de una intención ya atendida y los mensajes viejos
+// que llegan tarde no reabren "Sin atender"; un cambio de intención sí.
+// Solo decide handled_at/handled_by de la fila nueva: no toca otras filas,
+// ni unread_count, ni escalamientos.
+async function attentionFields(db: SupabaseLike, storeId: string, existing: PriorResponse[], candidate: ResponseEvent) {
+  const from = inheritedAttention(await withMessageTimes(db, storeId, existing), candidate)
+  return from ? { handled_at: from.handled_at, handled_by: from.handled_by } : {}
+}
+
+const candidateEvent = (queueId: string, intent: string, inboundMessageId: string, messageAt?: string | null): ResponseEvent => ({
+  id: '\uffff', queue_id: queueId, intent, created_at: new Date().toISOString(), inbound_message_id: inboundMessageId, message_at: messageAt ?? null,
+})
+
 export async function recordBroadcastButtonResponse(db: SupabaseLike, i: ButtonResponseInput): Promise<RecordedResponse | null> {
   let association: RecordedResponse['association'] = 'none'
   let row: QueueRowRef | null = null
@@ -99,6 +125,9 @@ export async function recordBroadcastButtonResponse(db: SupabaseLike, i: ButtonR
     broadcast_id: row?.broadcast_id ?? null, queue_id: row?.id ?? null, order_id: row?.order_id ?? null,
     template_name: row?.template_name ?? null, button_text: i.buttonText, button_payload: i.buttonPayload,
     intent, association,
+    ...(row && intent !== 'unknown'
+      ? await attentionFields(db, i.storeId, await priorResponses(db, i.storeId, row.id), candidateEvent(row.id, intent, i.inboundMessageId, i.messageAt))
+      : {}),
   }
   const { error } = await db.from('wa_broadcast_responses').insert(record)
   if (error && error.code !== '23505') throw new Error(`wa_broadcast_responses: ${error.message ?? String(error)}`)
@@ -107,4 +136,66 @@ export async function recordBroadcastButtonResponse(db: SupabaseLike, i: ButtonR
     intent, association, broadcastId: record.broadcast_id, queueId: record.queue_id, orderId: record.order_id,
     duplicate: error?.code === '23505',
   }
+}
+
+// ── Respuesta ESCRITA al template (sin pulsar el botón) ──────────────────────
+//
+// El cliente puede responder citando el template y escribir el texto del botón
+// ("Sí, confirmar"). WhatsApp lo entrega como mensaje de TEXTO con context.id =
+// wamid del template, sin payload. Se registra como respuesta de campaña SOLO si:
+//   1. el texto es exactamente el de un botón aprobado (normalizando mayúsculas,
+//      tildes y espacios — "si,  CONFIRMAR" sí; "Sí, confirmar mañana" no);
+//   2. el mensaje citado es un envío de Broadcast real de la MISMA tienda y el
+//      MISMO teléfono (verificable: si no, no se registra nada — un texto suelto
+//      puede significar cualquier cosa);
+//   3. ese botón pertenece al template de ese envío.
+// Igual que los botones: solo registra la intención (association='context_wamid',
+// ya permitida por la DB); nunca confirma ni cancela.
+// Duplicados: el MISMO mensaje nunca se registra dos veces (reintento de Meta;
+// además UNIQUE inbound_message_id). Ninguna otra respuesta se descarta al
+// escribir: con mensajes que llegan fuera de orden, descartar "porque la anterior
+// tenía la misma intención" puede perder la última decisión real (Sí 10s →
+// Cancelar 20s, que llega tarde → Sí 30s). Las repeticiones consecutivas de la
+// misma intención (botón + texto, Sí → Sí) se colapsan al LEER
+// (response-timeline.ts): no cuentan como decisión nueva ni como cambio.
+// Atención: ver attentionFields (repetir lo ya atendido no reabre; cambiar sí).
+
+export function normalizeButtonText(v: string | null | undefined): string {
+  return String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+}
+
+export interface TextReplyInput {
+  storeId:          string
+  conversationId:   string
+  inboundMessageId: string
+  phoneNormalized:  string
+  text:             string | null
+  contextWamid:     string | null
+  messageAt?:       string | null   // sent_at del mensaje (timestamp de Meta)
+}
+
+export async function recordBroadcastTextReply(db: SupabaseLike, i: TextReplyInput): Promise<RecordedResponse | null> {
+  if (!i.contextWamid || !i.text) return null
+  const typed = normalizeButtonText(i.text)
+  if (!typed || !BROADCAST_TEMPLATES.some(t => TEMPLATE_BUTTONS[t].some(b => normalizeButtonText(b) === typed))) return null
+
+  const row = await findQueueRow(db, i.storeId, 'wa_message_id', i.contextWamid)
+  if (!row || row.phone_normalized !== i.phoneNormalized) return null
+  const template = row.template_name as BroadcastTemplateName
+  const idx = TEMPLATE_BUTTONS[template].findIndex(b => normalizeButtonText(b) === typed)
+  if (idx !== 0 && idx !== 1) return null            // botón de OTRO template: no corresponde a este envío
+  const intent = TEMPLATE_BUTTON_INTENTS[template][idx]
+
+  const base = { intent, association: 'context_wamid' as const, broadcastId: row.broadcast_id, queueId: row.id, orderId: row.order_id }
+  const existing = await priorResponses(db, i.storeId, row.id)
+  if (existing.some(e => e.inbound_message_id === i.inboundMessageId)) return { ...base, duplicate: true }   // reintento de Meta
+  const attention = await attentionFields(db, i.storeId, existing, candidateEvent(row.id, intent, i.inboundMessageId, i.messageAt))
+  const { error } = await db.from('wa_broadcast_responses').insert({
+    store_id: i.storeId, conversation_id: i.conversationId, inbound_message_id: i.inboundMessageId,
+    broadcast_id: row.broadcast_id, queue_id: row.id, order_id: row.order_id, template_name: row.template_name,
+    button_text: i.text, button_payload: null, intent, association: 'context_wamid',
+    ...attention,
+  })
+  if (error && error.code !== '23505') throw new Error(`wa_broadcast_responses: ${error.message ?? String(error)}`)
+  return { ...base, duplicate: error?.code === '23505' }
 }
